@@ -58,11 +58,19 @@ target_filling
 max_iter
 tol
 mixing
+mixing_method          # "linear" or "pulay"
+pulay_history          # default 6
+pulay_start            # default 3
+pulay_regularization   # default 1e-10
 mu_tol
 mu_max_iter
 verbose
-momentum_backend   # "fft" or "direct"
+momentum_backend       # "fft" or "direct"
 ```
+
+`mixing_method="linear"` 使用普通 under-relaxation。
+
+`mixing_method="pulay"` 使用 recent residual history 做 Pulay/DIIS extrapolation；`mixing` 此时表示对 extrapolated self-energy 的 damping。Pulay 只改变 self-consistency 的数值求解路径，不改变 GW 方程。
 
 ### `NonInteractingResult`
 
@@ -83,9 +91,32 @@ density
 converged
 iterations
 final_error
+mixing_method
+min_screening_singular_value
+min_screening_m
+min_screening_Omega
+min_screening_q1
+min_screening_q2
 ```
 
-`final_error` 是最后一次 GW self-consistency iteration 的 fixed-point error；若 `converged=True`，应满足 `final_error < opts.tol`。
+`final_error` 现在是未乘 mixing 的 raw self-energy fixed-point residual：
+
+\[
+\max\left(
+\|\Sigma_H^{out}-\Sigma_H\|_\infty,
+\|\Sigma_{GW}^{out}-\Sigma_{GW}\|_\infty
+\right).
+\]
+
+因此不同 mixing/method 的 `final_error` 可以直接比较；若 `converged=True`，应满足 `final_error < opts.tol`。
+
+screening fields 对应
+
+\[
+s_{\min}=\min_Q\sigma_{\min}[I-V(\mathbf q)P(Q)]
+\]
+
+以及该最小值出现的 bosonic index/frequency 和 reduced momentum。
 
 ### `build_g0_inverse(h0, grid, mu)`
 
@@ -107,6 +138,10 @@ final_error
 [I-VP]W=V.
 \]
 
+### `screening_diagnostic(P, Vq, grid)`
+
+返回 `I-VP` 的全 Q 最小奇异值及其 `(m, Omega, q1, q2)` 位置。该 helper 当前位于 `rubycgw.gw` 模块。
+
 ### `compute_sigma_gw(G, W, grid, backend="fft")`
 
 返回 `(Nf,Nk1,Nk2,6,6)` 的 `Sigma_GW`。另保留 direct/FFT reference functions。
@@ -117,7 +152,9 @@ final_error
 
 ### `solve_gw(params, grid, opts, initial=None)`
 
-执行 self-consistent GW。`initial` 可传上一参数点的 `GWResult`；若 shape 相同，则复用 `Sigma_H`, `Sigma_GW`, `mu` 作为初值。返回值包含 `final_error`，便于区分“接近收敛”和“明显 fixed-point instability”。
+执行 self-consistent GW。`initial` 可传上一参数点的 `GWResult`；若 shape 相同，则复用 `Sigma_H`, `Sigma_GW`, `mu` 作为初值。
+
+未收敛时返回的 `G` 与 `Sigma` 保持同一 iterate 的一致性，不再用 raw map output 覆盖 `Sigma`；这对 continuation/retry 更安全。
 
 ## `rubycgw.cgw`
 
@@ -184,17 +221,21 @@ r_{\rm same}^{\rm eff}=\chi_{\rm same}^{-1}.
 ```text
 anchor near filling=3
 interaction V-ramp
-GW adaptive mixing retries: 0.20 -> 0.15 -> 0.10 -> 0.05
+GW attempts: linear:0.20 -> linear:0.10 -> pulay:0.70
 two filling continuation branches
 ```
 
-可用
+相关参数：
 
 ```bash
 --gw-mixing 0.20
---gw-retry-mixings 0.15 0.10 0.05
+--gw-retry-mixings 0.10
+--gw-pulay-mixing 0.70
+--gw-pulay-history 6
+--gw-pulay-start 3
+--no-gw-pulay
 ```
 
-修改 retry schedule。每一个 V-ramp attempt 都写入 `v_ramp.csv`，包含 `mixing`, `iterations`, `final_error`, `mu`, `actual_filling`, `runtime_s`。正式 filling CSV 还保存 `GW_final_error`, `GW_mixing_used`, `GW_attempts`。
+每一个 V-ramp attempt 都写入 `v_ramp.csv`，包含 method/mixing、iterations、raw `final_error`、chemical potential、actual filling，以及 `min_screening_singular_value` 和其 Q 位置。正式 filling CSV 保存同类 GW diagnostics。
 
-若所有 GW retries 都失败，该 filling 跳过 vertex 并把 response 写成 NaN。
+若所有 GW attempts 都失败，该 filling 跳过 vertex 并把 response 写成 NaN。
