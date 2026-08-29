@@ -53,26 +53,46 @@ class MatsubaraGrid:
         return self.kmesh()
 
 
-def shift_fermion_field(field: np.ndarray, dq1: int, dq2: int, m: int) -> np.ndarray:
-    """Return F(k+Q) on the base fermion grid.
+def frequency_shift_slices(nf: int, m: int) -> tuple[slice, slice]:
+    """Return ``(src, dst)`` slices for a fermionic shift by bosonic index m.
 
-    ``field`` has shape (Nf, Nk1, Nk2, ..., ...). Spatial momentum is periodic;
-    the finite Matsubara box is not. Values shifted outside the stored fermion
-    frequency box are set to zero. This is a controlled prototype truncation;
-    production calculations must verify convergence with ``nw``.
+    For a field ``F[n]`` the shifted field satisfies
+
+        F_shifted[dst] = F[src]
+
+    and values outside ``dst`` are zero.  The returned slices allow the hot
+    convolution loops to work only on the valid Matsubara window instead of
+    allocating a full zero-padded array for every internal Q.
+    """
+    m = int(m)
+    if abs(m) >= nf:
+        return slice(0, 0), slice(0, 0)
+    if m >= 0:
+        return slice(m, nf), slice(0, nf - m)
+    s = -m
+    return slice(0, nf - s), slice(s, nf)
+
+
+def roll_spatial(field: np.ndarray, dq1: int, dq2: int) -> np.ndarray:
+    """Return the periodic spatial momentum shift ``F(k+q)``.
+
+    ``field`` may contain only the valid Matsubara slice.  Only the two spatial
+    momentum axes are rolled.
+    """
+    return np.roll(field, shift=(-int(dq1), -int(dq2)), axis=(1, 2))
+
+
+def shift_fermion_field(field: np.ndarray, dq1: int, dq2: int, m: int) -> np.ndarray:
+    """Return F(k+Q) on the full base fermion grid.
+
+    This compatibility helper keeps the original public behavior.  Performance
+    critical GW/cGW loops use :func:`frequency_shift_slices` and
+    :func:`roll_spatial` directly so they do not repeatedly allocate the
+    zero-padded Matsubara box.
     """
     out = np.zeros_like(field)
-    nf = field.shape[0]
-
-    if abs(m) >= nf:
+    src, dst = frequency_shift_slices(field.shape[0], int(m))
+    if src.stop == src.start:
         return out
-    if m >= 0:
-        src = slice(m, nf)
-        dst = slice(0, nf - m)
-    else:
-        s = -m
-        src = slice(0, nf - s)
-        dst = slice(s, nf)
-    out[dst] = field[src]
-    out = np.roll(out, shift=(-dq1, -dq2), axis=(1, 2))
+    out[dst] = roll_spatial(field[src], dq1, dq2)
     return out
