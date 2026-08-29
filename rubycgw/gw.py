@@ -52,6 +52,7 @@ class GWResult:
     density: np.ndarray
     converged: bool
     iterations: int
+    final_error: float
 
 
 @dataclass
@@ -147,10 +148,9 @@ def density_from_G(
         sigma_h = np.zeros((NSUB, NSUB), dtype=complex)
 
     href = h0 + sigma_h[None, None, :, :]
-    # Numerical roundoff can leave O(1e-16) anti-Hermitian pieces.
     href = 0.5 * (href + np.swapaxes(href.conj(), -1, -2))
     evals, evecs = np.linalg.eigh(href)
-    weights = np.abs(evecs) ** 2  # (k1,k2,orbital,band)
+    weights = np.abs(evecs) ** 2
 
     occ = _fermi(evals - float(mu), grid.T)
     n_ref = np.sum(weights * occ[..., None, :], axis=(0, 1, 3)) / grid.nk
@@ -177,7 +177,6 @@ def hartree_self_energy(density: np.ndarray, Vq0: np.ndarray) -> np.ndarray:
 
 
 def compute_polarization_direct(G: np.ndarray, grid: MatsubaraGrid) -> np.ndarray:
-    """Reference explicit-q implementation of P(Q)."""
     P = np.zeros((grid.nb, grid.nk1, grid.nk2, NSUB, NSUB), dtype=complex)
     pref = grid.T / grid.nk
     for im, m in enumerate(grid.m_values):
@@ -196,19 +195,12 @@ def compute_polarization_direct(G: np.ndarray, grid: MatsubaraGrid) -> np.ndarra
 
 
 def compute_polarization_fft(G: np.ndarray, grid: MatsubaraGrid) -> np.ndarray:
-    """FFT implementation of P_ab(Q)=int_k G_ab(k+Q)G_ba(k).
-
-    Only the two periodic momentum axes are transformed.  The Matsubara sum is
-    kept explicit and uses exactly the same finite-frequency-window convention
-    as the direct implementation.
-    """
     P = np.zeros((grid.nb, grid.nk1, grid.nk2, NSUB, NSUB), dtype=complex)
     pref = grid.T / grid.nk
     for im, m in enumerate(grid.m_values):
         src, dst = frequency_shift_slices(grid.nf, int(m))
         if src.stop == src.start:
             continue
-
         A = G[src]
         B = np.swapaxes(G[dst], -1, -2)
         Ahat = np.fft.fftn(A, axes=(1, 2))
@@ -228,7 +220,6 @@ def compute_polarization(G: np.ndarray, grid: MatsubaraGrid,
 
 def compute_screened_interaction(P: np.ndarray, Vq: np.ndarray,
                                  grid: MatsubaraGrid) -> np.ndarray:
-    """Solve [I - V(q)P(Q)] W(Q) = V(q) for all Q in one batched solve."""
     eye = np.eye(NSUB, dtype=complex)
     Vbatch = Vq[None, :, :, :, :]
     lhs = eye[None, None, None, :, :] - np.matmul(Vbatch, P)
@@ -238,7 +229,6 @@ def compute_screened_interaction(P: np.ndarray, Vq: np.ndarray,
 
 def compute_sigma_gw_direct(G: np.ndarray, W: np.ndarray,
                             grid: MatsubaraGrid) -> np.ndarray:
-    """Reference explicit-q implementation of Sigma_GW."""
     sigma = np.zeros_like(G)
     pref = grid.T / grid.nk
     for im, m in enumerate(grid.m_values):
@@ -255,14 +245,12 @@ def compute_sigma_gw_direct(G: np.ndarray, W: np.ndarray,
 
 def compute_sigma_gw_fft(G: np.ndarray, W: np.ndarray,
                           grid: MatsubaraGrid) -> np.ndarray:
-    """FFT implementation of Sigma_GW(k)=-int_Q G(k+Q)W(Q)^T."""
     sigma = np.zeros_like(G)
     pref = grid.T / grid.nk
     for im, m in enumerate(grid.m_values):
         src, dst = frequency_shift_slices(grid.nf, int(m))
         if src.stop == src.start:
             continue
-
         A = G[src]
         B = np.swapaxes(W[im], -1, -2)[None, :, :, :, :]
         Ahat = np.fft.fftn(A, axes=(1, 2))
@@ -321,7 +309,6 @@ def solve_noninteracting(params: RubyParameters, grid: MatsubaraGrid,
                          target_filling: float | None = None,
                          mu_tol: float = 1e-10,
                          mu_max_iter: int = 100) -> NonInteractingResult:
-    """Construct G0, optionally at the same fixed filling used by GW."""
     h0 = build_h0(grid.kmesh(), params)
     sigma_h = np.zeros((NSUB, NSUB), dtype=complex)
     sigma_gw = np.zeros((grid.nf, grid.nk1, grid.nk2, NSUB, NSUB), dtype=complex)
@@ -347,15 +334,7 @@ def _compatible_initial(initial: GWResult | None, grid: MatsubaraGrid) -> bool:
 def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
              opts: GWOptions = GWOptions(),
              initial: GWResult | None = None) -> GWResult:
-    """Solve self-consistent GW, optionally warm-started from a previous point.
-
-    ``initial`` is useful for continuation scans in V, filling, temperature, or
-    nOmega when the fermionic array shape is unchanged.  If the shape differs
-    (for example an nk or nw convergence scan), the initial state is ignored.
-    The previous self-energies and chemical potential are only initial guesses;
-    the equations are always iterated to the requested tolerance for the new
-    parameters.
-    """
+    """Solve self-consistent GW and report the final fixed-point residual."""
     backend = _check_backend(opts.momentum_backend)
     kpts = grid.kmesh()
     qpts = grid.qmesh()
@@ -377,6 +356,8 @@ def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
     P = np.zeros_like(W)
 
     converged = False
+    err = float("inf")
+    it = 0
     for it in range(1, opts.max_iter + 1):
         density = density_from_G(G, grid, h0=h0, mu=mu, sigma_h=sigma_h)
         sigma_h_new = hartree_self_energy(density, Vq0)
@@ -418,13 +399,10 @@ def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
     P = compute_polarization(G, grid, backend=backend)
     W = compute_screened_interaction(P, Vq, grid)
     sigma_gw = compute_sigma_gw(G, W, grid, backend=backend)
-
-    # Report density with the final static Hartree term used in the returned
-    # self-energy.  The difference from the last iterative density is at the
-    # convergence tolerance when converged.
     density = density_from_G(G, grid, h0=h0, mu=mu, sigma_h=sigma_h)
 
     return GWResult(
         G=G, W=W, P=P, Sigma_H=sigma_h, Sigma_GW=sigma_gw,
         mu=mu, density=density, converged=converged, iterations=it,
+        final_error=float(err),
     )
