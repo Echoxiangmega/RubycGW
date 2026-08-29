@@ -12,18 +12,16 @@
 \chi_{\rm same}=\chi_-.
 \]
 
-若把 physical loop-current order parameter 本身记作
+若 physical loop-current order parameter 为
 
 \[
 m_\lambda=\langle\eta_\lambda\rangle,
 \]
 
-并用与它共轭的 source `h_lambda` 定义 effective action，则 normal state 原点的二阶曲率是 inverse susceptibility：
+则 normal state 原点的 effective-action curvature 是
 
 \[
-\boxed{
-r_{\lambda}^{\rm eff}=\chi_{\lambda}^{-1}
-}.
+\boxed{r_{\lambda}^{\rm eff}=\chi_{\lambda}^{-1}}.
 \]
 
 因此脚本画
@@ -36,7 +34,7 @@ r_{\rm same}^{\rm eff}=\chi_{\rm same}^{-1}.
 }
 \]
 
-这里仍然遵循项目的 physical label convention：
+仍采用
 
 \[
 +\leftrightarrow\text{physical opposite},
@@ -44,69 +42,52 @@ r_{\rm same}^{\rm eff}=\chi_{\rm same}^{-1}.
 -\leftrightarrow\text{physical same}.
 \]
 
-这和旧 HS auxiliary field 的二次系数
+该 `r_eff` 不是旧 HS auxiliary field 的 `3V-(V^2/2)chi0`。对于连续 instability，较小的 `r_eff` 是较软的 channel。
 
-\[
-3V-\frac{V^2}{2}\chi^{(0)}
-\]
+## 2. 默认扫描参数
 
-不是同一个归一化对象。旧式子是 HS auxiliary field 的 Landau coefficient；当前 `1/chi` 是 physical eta effective action 的 curvature。
-
-对于连续 instability，判断规则非常直接：
-
-\[
-\chi_{\rm same}>\chi_{\rm opposite}
-\Longleftrightarrow
-r_{\rm same}^{\rm eff}<r_{\rm opposite}^{\rm eff},
-\]
-
-因此较小的 `r_eff` 对应较软、较先发生连续失稳的 channel。
-
-## 2. 默认扫描范围
-
-为了和之前 Ruby HS filling 图逐点对应，默认使用
+默认使用
 
 ```text
 V = 3.0
 T = 0.05
 filling = 0.05 ... 5.95
 241 points
-```
-
-即
-
-\[
-n_j=0.05+j\frac{5.90}{240},\qquad j=0,\ldots,240.
-\]
-
-many-body 数值默认参数为
-
-```text
 nk = 6x6
 nw = 60
 nOmega = 12
 vertex-stage = mt
 momentum-backend = fft
-GW mixing = 0.20
-vertex mixing = 0.20
 GW tol = 1e-8
 vertex tol = 1e-8
 ```
 
-早期 strong-coupling filling scan 曾把 mixing 设成 `GW=0.08`, `vertex=0.10`，结果即使在容易收敛的 V-ramp 点也需要约两百次 iteration。现在由于默认已经有 V-ramp 和 filling continuation 提供 nearby seed，mixing 提高到 `0.20/0.20`，同时保持 `1e-8` tolerance 不变。也就是说加速来自更少的 fixed-point iteration，而不是放宽收敛精度。
+GW 首选 mixing 为 `0.20`。如果该固定点没有收敛，程序不会立刻失败，而是从**同一个最近已收敛 seed** 自动重试：
 
-若某个强耦合点出现明显振荡，可手动降低：
+```text
+0.20 -> 0.15 -> 0.10 -> 0.05
+```
+
+这使弱耦合点保持快速，而强耦合点才自动使用更保守的 under-relaxation。可自行改变 fallback：
 
 ```bash
-python filling_scan.py --gw-mixing 0.10 --vertex-mixing 0.10
+python filling_scan.py --gw-retry-mixings 0.12 0.08 0.04
 ```
+
+vertex mixing 默认仍是 `0.20`，目前 vertex 尚未做相同的 adaptive retry。
 
 ## 3. 运行
 
-完整 241 点扫描：
+完整扫描：
 
 ```bash
 python filling_scan.py
+```
+
+快速诊断 half filling：
+
+```bash
+python filling_scan.py --fillings 3 --nk 4 --nw 55 --nomega 12
 ```
 
 粗扫描：
@@ -115,79 +96,100 @@ python filling_scan.py
 python filling_scan.py --num-fillings 61
 ```
 
-只检查整数 filling：
-
-```bash
-python filling_scan.py --fillings 1 2 3 4 5
-```
-
 full cGW：
 
 ```bash
 python filling_scan.py --vertex-stage both
 ```
 
-`both` 会先求 GW+MT，再用当前 filling 已收敛的 MT vertex 作为 full MT+AL 的初值。
+## 4. Anchor + V-ramp continuation
 
-## 4. 强耦合下的 anchor + V-ramp continuation
+强耦合下默认从最接近 `--anchor-filling` 的 requested filling 开始；默认 anchor 是 `3.0`。
 
-不能从 `filling=0.05, V=3` 直接 cold start：若第一个 GW 点没有收敛，后续点也没有可用 continuation seed，最终会得到毫无物理意义的巨大 fixed-point iterate。
-
-因此当前默认流程改为：
-
-1. 在用户要求的 filling 网格中找到最接近 `--anchor-filling` 的点；默认 anchor 是 `3.0`。
-2. 在 anchor filling 固定粒子数，先做 interaction continuation。对 `V=3` 默认路径为
+对 `V=3`，默认 interaction path 现在加密为
 
 ```text
-0.1 -> 0.25 -> 0.5 -> 0.75 -> 1.0 -> 1.5 -> 2.0 -> 2.5 -> 3.0
+0.1 -> 0.25 -> 0.5 -> 0.6 -> 0.7 -> 0.75 -> 0.9 -> 1.0
+    -> 1.25 -> 1.5 -> 1.75 -> 2.0 -> 2.25 -> 2.5 -> 2.75 -> 3.0
 ```
 
-3. 每一级都把上一级 converged GW solution 作为下一步初值。
-4. 到达 target V 后，再求 anchor 的 eta vertex。
-5. 由同一个 anchor solution 分成两个独立 branch：
+每一级先用 `mixing=0.20`。若失败，则同一级 V 自动按 `0.15 -> 0.10 -> 0.05` 重试；每次 retry 都重新从**上一级 converged GW solution** 出发，而不是从失败 iterate 继续。
+
+例如终端可能显示：
+
+```text
+[V-ramp  6/16, try 1/4] V=0.7500 mix=0.200 converged=False ... err=...
+[V-ramp  6/16, try 2/4] V=0.7500 mix=0.150 converged=False ... err=...
+[V-ramp  6/16, try 3/4] V=0.7500 mix=0.100 converged=True  ... err=...
+```
+
+只有当该 V 的所有 mixing 都失败时，V-ramp 才停止。
+
+可自定义 V path：
+
+```bash
+python filling_scan.py --v-ramp-values 0.1 0.25 0.5 0.6 0.7 0.75 1.0 1.5 2.0 2.5 3.0
+```
+
+到达 target V 后，由同一个 anchor solution 分成两个独立 branch：
 
 ```text
 anchor -> lower fillings
 anchor -> higher fillings
 ```
 
-这样 higher branch 不会使用 lower branch 最末端的状态作为初值。
+## 5. GW residual 与失败处理
 
-可改变 anchor：
+`GWResult` 现在额外保存
 
-```bash
-python filling_scan.py --anchor-filling 2.0
+```text
+final_error
 ```
 
-可指定自己的 interaction ramp：
+即最后一次 self-consistency iteration 使用的 fixed-point error。对于 converged 点应满足
 
-```bash
-python filling_scan.py --v-ramp-values 0.1 0.3 0.6 1.0 1.5 2.0 2.5 3.0
+\[
+\text{final_error}<\text{GW tol}.
+\]
+
+`v_ramp.csv` 每一个 V / retry attempt 都保存：
+
+```text
+step
+attempt
+V
+mixing
+converged
+iterations
+final_error
+mu
+actual_filling
+runtime_s
 ```
 
-如需故意测试 target V 的 cold start：
+因此可以直接区分：
 
-```bash
-python filling_scan.py --no-v-ramp
+```text
+err ~ 1e-7 : 已很接近，只差少量 iteration
+err ~ 1e-3 : 收敛很慢或振荡
+err ~ O(1) : fixed-point iteration 明显不稳定
 ```
 
-`--no-continuation` 会同时关闭参数点 continuation；主要用于诊断，不推荐做强耦合 production scan。
+正式 filling scan 同样会 adaptive retry GW，并保存
 
-若 V-ramp 在某一级 GW 已不能收敛，程序会在那里停止，而不会继续 cold-start target V。`v_ramp.csv` 会记录最后能够到达的 interaction、iteration count、chemical potential 和 wall time。
+```text
+GW_final_error
+GW_mixing_used
+GW_attempts
+```
 
-## 5. GW / vertex 失败时怎样处理
-
-一个没有收敛的 GW fixed point 不能作为 covariant response 的 background。因此现在的安全规则是：
+如果所有 GW retry 都失败，则
 
 ```text
 GW not converged -> skip vertex -> chi/r_eff = NaN
 ```
 
-不会再把 `10^100`、`10^150` 一类发散的 fixed-point iterate 写成 susceptibility。
-
-如果 GW 收敛但某个 eta vertex 未收敛，则只把该 channel 的 susceptibility 与 `r_eff` 记为 NaN，并保留上一个 converged vertex 作为相邻 filling 的 continuation seed。
-
-这使 CSV 中的有限数值都具有明确的 convergence status。
+不会把发散 iterate 当作 susceptibility。
 
 ## 6. 输出
 
@@ -197,7 +199,7 @@ GW not converged -> skip vertex -> chi/r_eff = NaN
 results/filling/<timestamp>/
 ```
 
-并输出：
+主要文件为
 
 ```text
 filling_scan.csv
@@ -208,28 +210,11 @@ chi_vs_filling.png
 delta_r_vs_filling.png
 ```
 
-`filling_scan.csv` 最终始终按 filling 从小到大排列，即使实际计算顺序是从 anchor 向两侧展开。新增字段包括：
-
-```text
-scan_branch
-vertex_skipped_because_GW_failed
-GW_converged
-selected_plus_converged
-selected_minus_converged
-```
-
-同时保存 chemical potential、actual filling、iteration count 与各阶段 wall time。
+`filling_scan.csv` 最终始终按 filling 从小到大排列，即使实际计算顺序是从 anchor 向两侧展开。
 
 ## 7. 图的解释
 
-主图是
-
-\[
-r_{\rm opposite}^{\rm eff}(n),\qquad
-r_{\rm same}^{\rm eff}(n).
-\]
-
-如果某个 filling 上
+如果
 
 \[
 r_{\rm same}^{\rm eff}<r_{\rm opposite}^{\rm eff},
@@ -237,35 +222,31 @@ r_{\rm same}^{\rm eff}<r_{\rm opposite}^{\rm eff},
 
 则 same 是 leading continuous-instability channel；反之 opposite 更软。
 
-`delta_r_vs_filling.png` 使用
+脚本还画
 
 \[
 \Delta r=r_{\rm same}^{\rm eff}-r_{\rm opposite}^{\rm eff}.
 \]
 
-所以
+因此
 
 ```text
 Delta r < 0 : same softer
 Delta r > 0 : opposite softer
-Delta r = 0 : quadratic-level degeneracy/crossing
+Delta r = 0 : quadratic-level crossing
 ```
 
-未收敛点不会进入曲线。
-
-注意这仍是 normal-state quadratic-response criterion。若要严格判断深处 ordered phase 的最终基态，需要进一步做 finite-source / symmetry-broken free-energy comparison。
+这仍是 normal-state quadratic-response criterion；严格 ordered-state 基态比较需要进一步做 symmetry-broken free-energy calculation。
 
 ## 8. 终端进度条
 
-filling scan 默认显示单行进度条，例如：
+正式 filling scan 默认显示：
 
 ```text
 [########--------------------]  72/241  29.88% | elapsed 14m08s | ETA 33m12s | filling=1.7958
 ```
 
-V-ramp 本身会逐级打印 `V`, convergence, iteration count, chemical potential 和 time。正式 filling scan 开始后，进度条 ETA 只统计 filling 点，不把一次性的 V-ramp 初始化时间混入平均每点耗时。
-
-若不希望显示进度条：
+V-ramp 初始化会逐级打印 V、mixing、iteration count、`final_error`、chemical potential 和 runtime。关闭 filling 进度条：
 
 ```bash
 python filling_scan.py --no-progress
