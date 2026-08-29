@@ -208,3 +208,53 @@ chi_eta(G, K, grid, Gamma=Gamma)  # cGW
 ```
 
 默认计算也使用 FFT backend，并把 `bare/GW/MT/full` 各阶段 wall time 写入 CSV。若需要严格 direct-vs-FFT debugging，可在 Python API 中把两个 Options 的 `momentum_backend` 都设为 `"direct"`。
+
+### `filling_scan.py`
+
+固定 interaction 后扫描 six-site unit cell filling，并画物理 loop-current order parameter 的 effective quadratic mass
+
+\[
+r_{\rm opposite}^{\rm eff}=\chi_{\rm opposite}^{-1},\qquad
+r_{\rm same}^{\rm eff}=\chi_{\rm same}^{-1}.
+\]
+
+这里 `+` 是 physical opposite，`-` 是 physical same。该 `r_eff` 是物理 eta effective action 的二阶曲率，不是旧 HS auxiliary field 的 `3V-(V^2/2)chi0`。
+
+默认参数刻意复现旧 HS filling 图的扫描范围：
+
+```text
+V = 3.0
+T = 0.05
+filling = 0.05 ... 5.95
+241 points
+```
+
+但 many-body grid 默认使用 `6x6`, `nw=60`, `nOmega=12`，并默认 `GW+MT + FFT + continuation`。输出包括：
+
+```text
+results/filling/<timestamp>/filling_scan.csv
+results/filling/<timestamp>/r_eff_vs_filling.png
+results/filling/<timestamp>/chi_vs_filling.png
+results/filling/<timestamp>/delta_r_vs_filling.png
+results/filling/<timestamp>/settings.json
+```
+
+快速粗扫示例：
+
+```bash
+python filling_scan.py --num-fillings 61
+```
+
+旧 HS 同样的 241 点网格：
+
+```bash
+python filling_scan.py
+```
+
+full cGW 可用：
+
+```bash
+python filling_scan.py --vertex-stage both
+```
+
+其中 `both` 先收敛 MT，再以 MT vertex warm-start full cGW。由于 `V=3` 明显强于当前 convergence benchmark 中的弱耦合点，脚本默认使用较保守的 GW/vertex mixing，并把每一点的 convergence flag 和 iteration count 写入 CSV。
