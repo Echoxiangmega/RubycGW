@@ -104,7 +104,7 @@ python filling_scan.py
 快速诊断 half filling：
 
 ```bash
-python filling_scan.py --fillings 3 --nk 4 --nw 55 --nomega 12
+python filling_scan.py --fillings 3 --nk 6 --nw 55 --nomega 12
 ```
 
 粗扫描：
@@ -167,9 +167,7 @@ X=(\Sigma_H,\Sigma_{GW}),\qquad F[X]=(\Sigma_H^{out},\Sigma_{GW}^{out}).
 }
 \]
 
-因此 `final_error` 不会因为把 linear mixing 从 `0.20` 改成 `0.05` 就人为变小。这比早期用 mixed-step 大小判断收敛更适合比较不同 mixing method。
-
-对于 converged 点必须满足
+因此 `final_error` 不会因为把 linear mixing 从 `0.20` 改成 `0.05` 就人为变小。对于 converged 点必须满足
 
 \[
 \text{final_error}<\text{GW tol}.
@@ -197,13 +195,11 @@ Pulay 保存最近若干步 residual，并寻找系数 `c_i` 使
 \sum_i c_i=1.
 \]
 
-然后用这些系数对 fixed-point outputs 做 extrapolation。代码中 Hartree block 和 dynamic GW block 在 residual inner product 中分别按自身元素数归一化，避免巨大 `Sigma_GW(iw,k)` 数组完全淹没 6x6 Hartree block。
-
-Pulay 只改变数值求解路径，不改变 GW 方程本身。
+代码中 Hartree block 和 dynamic GW block 在 residual inner product 中分别按自身元素数归一化。Pulay 只改变数值求解路径，不改变 GW 方程本身。
 
 ## 7. Screening stability diagnostic
 
-每个 GW result 还计算
+每个 GW result 计算
 
 \[
 \boxed{
@@ -219,9 +215,7 @@ s_{\min}
 W(Q)=\left[I-V(\mathbf q)P(Q)\right]^{-1}V(\mathbf q),
 \]
 
-所以 `s_min` 是判断 screened interaction 是否接近奇异的直接数值指标。
-
-程序同时记录出现最小值的
+所以 `s_min` 是判断 screened interaction 是否接近奇异的直接数值指标。程序同时记录出现最小值的
 
 ```text
 screening_m
@@ -230,19 +224,81 @@ screening_q1
 screening_q2
 ```
 
-解释时要区分两种情况：
+解释时要区分：
 
 ```text
 final_error large, s_min still moderate
-    -> 更像 fixed-point solver 问题，Pulay 可能帮助
+    -> 更像 fixed-point solver 问题
 
 s_min -> very small
     -> I-VP 本身接近奇异，可能是 screening/RPA instability
 ```
 
-不能仅因为 Pulay 最终把某个点收敛，就忽略 `s_min` 的物理信息。
+## 8. 最软模式 `screening_mode.csv`
 
-## 8. 输出
+对 V-ramp 中每一个**已经收敛**的 GW 点，程序进一步取最小奇异值所在的
+
+\[
+Q_*= (\mathbf q_*,i\Omega_{m_*})
+\]
+
+并保存两种六子格 mode。
+
+第一种是 `screening_mode`：
+
+\[
+\left[I-V(\mathbf q_*)P(Q_*)\right]v_{\rm scr}
+\approx0.
+\]
+
+它是 `I-VP` 的 right singular vector，更自然地解释为 effective-potential / screening direction，而不是直接等同于 density modulation。
+
+第二种是后续构造 charge-order seed 更有用的 `density_mode`：
+
+\[
+\boxed{
+v_n\propto P(Q_*)v_{\rm scr}.
+}
+\]
+
+因为
+
+\[
+(I-PV)P v_{\rm scr}
+=
+P(I-VP)v_{\rm scr},
+\]
+
+所以当 screening singularity 被逼近时，`density_mode` 同时逼近 density self-consistency matrix `I-PV` 的 null direction。
+
+两组 mode 均归一化为
+
+\[
+\sum_{a=0}^{5}|v_a|^2=1.
+\]
+
+SVD 自带任意整体复相位。为了让不同 V 的 mode 可直接比较，代码固定规范：**绝对值最大的 sublattice 分量被旋到实且为正**。
+
+`screening_mode.csv` 每一行对应一个 converged V-ramp 点，包含：
+
+```text
+V, filling, method, mixing, iterations, final_error
+min_screening_singular_value
+screening_m, screening_Omega, screening_q1, screening_q2
+density_mode_residual
+screening_mode_0_re/im/abs/phase_rad ... screening_mode_5_...
+density_mode_0_re/im/abs/phase_rad ... density_mode_5_...
+```
+
+其中 `density_mode_residual` 是
+
+\[
+\left\|(I-PV)v_n\right\|_\infty
+\]
+
+在同一个 `Q_*` 上的值。后续若要建立 finite-Q symmetry-broken GW 初值，应优先使用 `density_mode`。
+
+## 9. 输出
 
 `v_ramp.csv` 每一个 V / retry attempt 都保存：
 
@@ -290,13 +346,16 @@ GW not converged -> skip vertex -> chi/r_eff = NaN
 ```text
 results/filling/<timestamp>/filling_scan.csv
 results/filling/<timestamp>/v_ramp.csv
+results/filling/<timestamp>/screening_mode.csv
 results/filling/<timestamp>/settings.json
 results/filling/<timestamp>/r_eff_vs_filling.png
 results/filling/<timestamp>/chi_vs_filling.png
 results/filling/<timestamp>/delta_r_vs_filling.png
 ```
 
-## 9. 图的解释
+即使 V-ramp 在较大 V 处失败，前面所有 converged V 的 `screening_mode.csv` 仍会保留。
+
+## 10. 图的解释
 
 如果
 
@@ -322,7 +381,7 @@ Delta r = 0 : quadratic-level crossing
 
 这仍是 normal-state quadratic-response criterion；严格 ordered-state 基态比较需要进一步做 symmetry-broken free-energy calculation。
 
-## 10. 终端进度条
+## 11. 终端进度条
 
 正式 filling scan 默认显示：
 
