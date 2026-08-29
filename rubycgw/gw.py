@@ -65,6 +65,9 @@ class GWResult:
     min_screening_Omega: float
     min_screening_q1: float
     min_screening_q2: float
+    min_screening_mode: np.ndarray
+    min_density_mode: np.ndarray
+    min_density_mode_residual: float
 
 
 @dataclass
@@ -231,14 +234,72 @@ def compute_screened_interaction(P: np.ndarray, Vq: np.ndarray,
     return np.linalg.solve(lhs, rhs)
 
 
-def screening_diagnostic(P: np.ndarray, Vq: np.ndarray,
-                         grid: MatsubaraGrid) -> tuple[float, int, float, float, float]:
-    """Return the smallest singular value of I-VP and the Q where it occurs."""
+def _canonicalize_mode(vector: np.ndarray) -> tuple[np.ndarray, int]:
+    """Normalize a complex mode and fix its arbitrary global phase.
+
+    The component with largest magnitude is rotated to be real and positive.
+    This convention makes modes from neighboring continuation points directly
+    comparable even though SVD vectors carry an arbitrary U(1) phase.
+    """
+    mode = np.asarray(vector, dtype=complex).reshape(NSUB).copy()
+    norm = float(np.linalg.norm(mode))
+    if not np.isfinite(norm) or norm < 1e-14:
+        return np.zeros(NSUB, dtype=complex), 0
+    mode /= norm
+    pivot = int(np.argmax(np.abs(mode)))
+    mode *= np.exp(-1j * np.angle(mode[pivot]))
+    if mode[pivot].real < 0.0:
+        mode *= -1.0
+    if abs(mode[pivot].imag) < 1e-14:
+        mode[pivot] = complex(mode[pivot].real, 0.0)
+    return mode, pivot
+
+
+def screening_soft_modes(
+    P: np.ndarray,
+    Vq: np.ndarray,
+    grid: MatsubaraGrid,
+) -> tuple[float, int, float, float, float, np.ndarray, np.ndarray, float]:
+    """Return the softest screening direction and associated density mode.
+
+    The monitored screening matrix is
+
+        M_scr(Q) = I - V(q) P(Q).
+
+    ``screening_mode`` is its right singular vector at the globally smallest
+    singular value.  This vector lives naturally in the effective-potential /
+    screening space.  The corresponding density fluctuation is obtained from
+
+        density_mode ~ P(Q*) screening_mode,
+
+    because
+
+        (I-PV) P screening_mode = P (I-VP) screening_mode.
+
+    At an exact singularity this is therefore a null direction of the density
+    self-consistency matrix ``I-PV``.  Both vectors are unit-normalized and have
+    their arbitrary global phase fixed by :func:`_canonicalize_mode`.
+    """
     lhs = _screening_lhs(P, Vq)
     svals = np.linalg.svd(lhs, compute_uv=False)
     smin_grid = svals[..., -1]
     flat = int(np.argmin(smin_grid))
     im, iq1, iq2 = np.unravel_index(flat, smin_grid.shape)
+
+    _, _, vh = np.linalg.svd(lhs[im, iq1, iq2], full_matrices=False)
+    screening_mode, _ = _canonicalize_mode(vh[-1].conj())
+
+    psel = P[im, iq1, iq2]
+    vsel = Vq[iq1, iq2]
+    density_raw = psel @ screening_mode
+    if np.linalg.norm(density_raw) < 1e-14:
+        density_lhs = np.eye(NSUB, dtype=complex) - psel @ vsel
+        _, _, vh_density = np.linalg.svd(density_lhs, full_matrices=False)
+        density_raw = vh_density[-1].conj()
+    density_mode, _ = _canonicalize_mode(density_raw)
+    density_lhs = np.eye(NSUB, dtype=complex) - psel @ vsel
+    density_residual = float(np.max(np.abs(density_lhs @ density_mode)))
+
     q = grid.qmesh()[iq1, iq2]
     return (
         float(smin_grid[im, iq1, iq2]),
@@ -246,7 +307,17 @@ def screening_diagnostic(P: np.ndarray, Vq: np.ndarray,
         float(grid.Omega[im]),
         float(q[0]),
         float(q[1]),
+        screening_mode,
+        density_mode,
+        density_residual,
     )
+
+
+def screening_diagnostic(P: np.ndarray, Vq: np.ndarray,
+                         grid: MatsubaraGrid) -> tuple[float, int, float, float, float]:
+    """Backward-compatible scalar screening diagnostic."""
+    smin, m, omega, q1, q2, _, _, _ = screening_soft_modes(P, Vq, grid)
+    return smin, m, omega, q1, q2
 
 
 def compute_sigma_gw_direct(G: np.ndarray, W: np.ndarray,
@@ -439,8 +510,6 @@ def _mixed_self_energies(
         h_diis += c * hout
         gw_diis += c * gout
 
-    # Damped DIIS: alpha=1 is standard DIIS, while smaller alpha blends the
-    # extrapolated solution with the current iterate for additional stability.
     return (
         (1.0 - alpha) * sigma_h + alpha * h_diis,
         (1.0 - alpha) * sigma_gw + alpha * gw_diis,
@@ -524,9 +593,6 @@ def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
         sigma_gw = sigma_gw_next
         G = Gnext
 
-    # Re-evaluate the map on the returned iterate.  Do not overwrite the
-    # returned self-energies with the map output if the solve did not converge;
-    # that would make G and Sigma inconsistent and contaminate continuation.
     density = density_from_G(G, grid, h0=h0, mu=mu, sigma_h=sigma_h)
     sigma_h_out = hartree_self_energy(density, Vq0)
     P = compute_polarization(G, grid, backend=backend)
@@ -535,7 +601,10 @@ def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
     err = _residual_error(sigma_h_out - sigma_h, sigma_gw_out - sigma_gw)
     converged = bool(err < opts.tol)
 
-    smin, mmin, omin, q1min, q2min = screening_diagnostic(P, Vq, grid)
+    (
+        smin, mmin, omin, q1min, q2min,
+        screening_mode, density_mode, density_mode_residual,
+    ) = screening_soft_modes(P, Vq, grid)
 
     return GWResult(
         G=G,
@@ -554,4 +623,7 @@ def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
         min_screening_Omega=omin,
         min_screening_q1=q1min,
         min_screening_q2=q2min,
+        min_screening_mode=screening_mode,
+        min_density_mode=density_mode,
+        min_density_mode_residual=density_mode_residual,
     )
