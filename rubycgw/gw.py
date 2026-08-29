@@ -44,6 +44,13 @@ class GWResult:
     iterations: int
 
 
+@dataclass
+class NonInteractingResult:
+    G0: np.ndarray
+    mu: float
+    density: np.ndarray
+
+
 def build_g0_inverse(h0: np.ndarray, grid: MatsubaraGrid, mu: float) -> np.ndarray:
     eye = np.eye(NSUB, dtype=complex)
     out = np.empty((grid.nf, grid.nk1, grid.nk2, NSUB, NSUB), dtype=complex)
@@ -145,6 +152,31 @@ def _solve_mu(h0, sigma_h, sigma_gw, grid, target, mu0, tol, max_iter):
         else:
             lo = mid
     return mid, Gmid
+
+
+def solve_noninteracting(params: RubyParameters, grid: MatsubaraGrid,
+                         mu: float = 0.0,
+                         target_filling: float | None = None,
+                         mu_tol: float = 1e-10,
+                         mu_max_iter: int = 100) -> NonInteractingResult:
+    """Construct G0, optionally at the same fixed filling used by GW.
+
+    For comparisons of G0G0 versus interacting GG/cGW at fixed filling, the
+    noninteracting chemical potential must be determined independently; using
+    the interacting GW chemical potential would generally change the filling.
+    """
+    h0 = build_h0(grid.kmesh(), params)
+    sigma_h = np.zeros((NSUB, NSUB), dtype=complex)
+    sigma_gw = np.zeros((grid.nf, grid.nk1, grid.nk2, NSUB, NSUB), dtype=complex)
+    if target_filling is None:
+        G0 = dyson_from_sigma(h0, grid, mu, sigma_h, sigma_gw)
+        mu0 = float(mu)
+    else:
+        mu0, G0 = _solve_mu(
+            h0, sigma_h, sigma_gw, grid, target_filling,
+            float(mu), mu_tol, mu_max_iter
+        )
+    return NonInteractingResult(G0=G0, mu=mu0, density=density_from_G(G0, grid))
 
 
 def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
