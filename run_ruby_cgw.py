@@ -44,18 +44,12 @@ def _print_vertex_norms(label, vertex):
 
 
 def main():
-    # Deliberately small reference grid. Increase only after nw/nOmega/nk
-    # convergence checks.
     params = RubyParameters(ti=0.4, t1=0.2, t2=0.2, V=0.10)
     grid = MatsubaraGrid(nk1=4, nk2=4, nw=16, nOmega=6, T=0.05)
     target_filling = 2.0
 
     _, _, K_plus, K_minus = eta_vertices()
 
-    # ------------------------------------------------------------------
-    # 1) Bare G0G0 at the SAME FILLING as the interacting calculation.
-    #    Its chemical potential is solved independently from the GW mu.
-    # ------------------------------------------------------------------
     bare = solve_noninteracting(
         params,
         grid,
@@ -70,9 +64,6 @@ def main():
     print("density per site:", bare.density)
     print("total filling:", np.sum(bare.density))
 
-    # ------------------------------------------------------------------
-    # 2) Self-consistent GW.
-    # ------------------------------------------------------------------
     gw_opts = GWOptions(
         mu=bare.mu,
         target_filling=target_filling,
@@ -90,15 +81,10 @@ def main():
     print("density per site:", gw.density)
     print("total filling:", np.sum(gw.density))
 
-    # Dressed bubble: self-energy included, vertex still bare K_eta.
     chi_plus_gg = chi_eta(gw.G, K_plus, grid)
     chi_minus_gg = chi_eta(gw.G, K_minus, grid)
-
     Vq0 = build_interaction(grid.qmesh(), params)[0, 0]
 
-    # ------------------------------------------------------------------
-    # 3) cGW vertex with Hartree + MT, but AL switched off.
-    # ------------------------------------------------------------------
     mt_opts = VertexOptions(
         max_iter=150,
         tol=1e-8,
@@ -117,9 +103,6 @@ def main():
     print("plus/opposite vertex converged:", vp_mt.converged, "iterations:", vp_mt.iterations)
     print("minus/same vertex converged    :", vm_mt.converged, "iterations:", vm_mt.iterations)
 
-    # ------------------------------------------------------------------
-    # 4) Full q=0 cGW = Hartree + MT + AL1 + AL2.
-    # ------------------------------------------------------------------
     full_opts = VertexOptions(
         max_iter=150,
         tol=1e-8,
@@ -131,8 +114,16 @@ def main():
     )
 
     print("\n=== solve full cGW vertices ===")
-    vp_full = solve_vertex_q0(gw.G, gw.W, Vq0, K_plus, grid, full_opts)
-    vm_full = solve_vertex_q0(gw.G, gw.W, Vq0, K_minus, grid, full_opts)
+    # The full solution is very close to the already converged MT solution for
+    # the present model, so use MT as a warm start instead of restarting at K.
+    vp_full = solve_vertex_q0(
+        gw.G, gw.W, Vq0, K_plus, grid, full_opts,
+        initial_gamma=vp_mt.Gamma,
+    )
+    vm_full = solve_vertex_q0(
+        gw.G, gw.W, Vq0, K_minus, grid, full_opts,
+        initial_gamma=vm_mt.Gamma,
+    )
     chi_plus_full = chi_eta(gw.G, K_plus, grid, Gamma=vp_full.Gamma)
     chi_minus_full = chi_eta(gw.G, K_minus, grid, Gamma=vm_full.Gamma)
 
