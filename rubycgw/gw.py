@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 
-from .grids import MatsubaraGrid, shift_fermion_field
+from .grids import MatsubaraGrid, frequency_shift_slices, roll_spatial
 from .model import NSUB, RubyParameters, build_h0, build_interaction
 
 
@@ -85,14 +85,20 @@ def hartree_self_energy(density: np.ndarray, Vq0: np.ndarray) -> np.ndarray:
 
 
 def compute_polarization(G: np.ndarray, grid: MatsubaraGrid) -> np.ndarray:
+    """Compute P without allocating a full zero-padded G(k+Q) for every Q."""
     P = np.zeros((grid.nb, grid.nk1, grid.nk2, NSUB, NSUB), dtype=complex)
     pref = grid.T / grid.nk
     for im, m in enumerate(grid.m_values):
+        src, dst = frequency_shift_slices(grid.nf, int(m))
+        if src.stop == src.start:
+            continue
+        Gsrc = G[src]
+        Gbase = G[dst]
         for iq1 in range(grid.nk1):
             for iq2 in range(grid.nk2):
-                Gq = shift_fermion_field(G, iq1, iq2, int(m))
+                Gq = roll_spatial(Gsrc, iq1, iq2)
                 P[im, iq1, iq2] = pref * np.einsum(
-                    "nxyab,nxyba->ab", Gq, G, optimize=True
+                    "nxyab,nxyba->ab", Gq, Gbase, optimize=True
                 )
     return P
 
@@ -112,13 +118,18 @@ def compute_screened_interaction(P: np.ndarray, Vq: np.ndarray,
 
 
 def compute_sigma_gw(G: np.ndarray, W: np.ndarray, grid: MatsubaraGrid) -> np.ndarray:
+    """Compute Sigma_GW using only the valid Matsubara window for each Q."""
     sigma = np.zeros_like(G)
     pref = grid.T / grid.nk
     for im, m in enumerate(grid.m_values):
+        src, dst = frequency_shift_slices(grid.nf, int(m))
+        if src.stop == src.start:
+            continue
+        Gsrc = G[src]
         for iq1 in range(grid.nk1):
             for iq2 in range(grid.nk2):
-                Gq = shift_fermion_field(G, iq1, iq2, int(m))
-                sigma -= pref * Gq * W[im, iq1, iq2].T[None, None, None, :, :]
+                Gq = roll_spatial(Gsrc, iq1, iq2)
+                sigma[dst] -= pref * Gq * W[im, iq1, iq2].T[None, None, None, :, :]
     return sigma
 
 
@@ -159,12 +170,7 @@ def solve_noninteracting(params: RubyParameters, grid: MatsubaraGrid,
                          target_filling: float | None = None,
                          mu_tol: float = 1e-10,
                          mu_max_iter: int = 100) -> NonInteractingResult:
-    """Construct G0, optionally at the same fixed filling used by GW.
-
-    For comparisons of G0G0 versus interacting GG/cGW at fixed filling, the
-    noninteracting chemical potential must be determined independently; using
-    the interacting GW chemical potential would generally change the filling.
-    """
+    """Construct G0, optionally at the same fixed filling used by GW."""
     h0 = build_h0(grid.kmesh(), params)
     sigma_h = np.zeros((NSUB, NSUB), dtype=complex)
     sigma_gw = np.zeros((grid.nf, grid.nk1, grid.nk2, NSUB, NSUB), dtype=complex)
@@ -179,17 +185,40 @@ def solve_noninteracting(params: RubyParameters, grid: MatsubaraGrid,
     return NonInteractingResult(G0=G0, mu=mu0, density=density_from_G(G0, grid))
 
 
+def _compatible_initial(initial: GWResult | None, grid: MatsubaraGrid) -> bool:
+    if initial is None:
+        return False
+    expected = (grid.nf, grid.nk1, grid.nk2, NSUB, NSUB)
+    return initial.Sigma_GW.shape == expected and initial.Sigma_H.shape == (NSUB, NSUB)
+
+
 def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
-             opts: GWOptions = GWOptions()) -> GWResult:
+             opts: GWOptions = GWOptions(),
+             initial: GWResult | None = None) -> GWResult:
+    """Solve self-consistent GW, optionally warm-started from a previous point.
+
+    ``initial`` is useful for continuation scans in V, filling, temperature, or
+    nOmega when the fermionic array shape is unchanged.  If the shape differs
+    (for example an nk or nw convergence scan), the initial state is ignored.
+    The previous self-energies and chemical potential are only initial guesses;
+    the equations are always iterated to the requested tolerance for the new
+    parameters.
+    """
     kpts = grid.kmesh()
     qpts = grid.qmesh()
     h0 = build_h0(kpts, params)
     Vq = build_interaction(qpts, params)
     Vq0 = Vq[0, 0]
 
-    sigma_h = np.zeros((NSUB, NSUB), dtype=complex)
-    sigma_gw = np.zeros((grid.nf, grid.nk1, grid.nk2, NSUB, NSUB), dtype=complex)
-    mu = float(opts.mu)
+    if _compatible_initial(initial, grid):
+        sigma_h = np.array(initial.Sigma_H, copy=True)
+        sigma_gw = np.array(initial.Sigma_GW, copy=True)
+        mu = float(initial.mu)
+    else:
+        sigma_h = np.zeros((NSUB, NSUB), dtype=complex)
+        sigma_gw = np.zeros((grid.nf, grid.nk1, grid.nk2, NSUB, NSUB), dtype=complex)
+        mu = float(opts.mu)
+
     G = dyson_from_sigma(h0, grid, mu, sigma_h, sigma_gw)
     W = np.zeros((grid.nb, grid.nk1, grid.nk2, NSUB, NSUB), dtype=complex)
     P = np.zeros_like(W)
