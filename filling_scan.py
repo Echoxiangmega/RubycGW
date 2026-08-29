@@ -12,9 +12,11 @@ action written in terms of the physical loop-current order parameter eta.
 
 For strong coupling the default scan is continuation based.  It starts near
 half filling, ramps the interaction to the target V, and then scans filling in
-two branches.  GW uses adaptive linear-mixing retries: the fast default mixing
-is attempted first, then progressively smaller values are tried from the same
-last converged seed if necessary.
+two branches.  Each GW point first uses fast linear mixing and, if the linear
+fixed-point iterations fail, retries from the same last converged seed with a
+Pulay/DIIS accelerator.  Screening diagnostics monitor the smallest singular
+value of I-VP so numerical fixed-point failure can be distinguished from an
+interaction-driven near-singularity of W.
 """
 
 from __future__ import annotations
@@ -134,43 +136,57 @@ def _vertex_options(args, include_al: bool) -> VertexOptions:
     )
 
 
-def _gw_options(args, filling: float, mu: float, mixing: float) -> GWOptions:
+def _gw_options(args, filling: float, mu: float, mixing: float,
+                method: str) -> GWOptions:
     return GWOptions(
         mu=float(mu),
         target_filling=float(filling),
         max_iter=args.gw_max_iter,
         tol=args.gw_tol,
         mixing=float(mixing),
+        mixing_method=str(method),
+        pulay_history=args.gw_pulay_history,
+        pulay_start=args.gw_pulay_start,
+        pulay_regularization=args.gw_pulay_regularization,
         verbose=args.verbose_iterations,
         momentum_backend=args.momentum_backend,
     )
 
 
-def _gw_mixing_schedule(args) -> list[float]:
-    """Primary GW mixing followed by unique fallback values."""
-    values = [float(args.gw_mixing)] + [float(x) for x in args.gw_retry_mixings]
-    out: list[float] = []
-    for value in values:
+def _gw_attempt_schedule(args) -> list[tuple[str, float]]:
+    """Linear attempts followed by one Pulay/DIIS fallback by default."""
+    linear_values = [float(args.gw_mixing)] + [float(x) for x in args.gw_retry_mixings]
+    out: list[tuple[str, float]] = []
+    for value in linear_values:
         if not (0.0 < value <= 1.0):
             raise ValueError("GW mixing values must lie in (0, 1].")
-        if not any(np.isclose(value, old) for old in out):
-            out.append(value)
+        if not any(method == "linear" and np.isclose(value, old) for method, old in out):
+            out.append(("linear", value))
+
+    if not args.no_gw_pulay:
+        if not (0.0 < args.gw_pulay_mixing <= 1.0):
+            raise ValueError("--gw-pulay-mixing must lie in (0, 1].")
+        out.append(("pulay", float(args.gw_pulay_mixing)))
     return out
 
 
+def _attempt_label(method: str, mixing: float) -> str:
+    return f"{method}:{mixing:g}"
+
+
 def _solve_gw_adaptive(args, params, grid, filling: float, mu_guess: float, initial):
-    """Try GW from the same seed with progressively safer mixing values."""
+    """Retry the same GW point from the same seed with linear then Pulay mixing."""
     attempts = []
     total_time = 0.0
     last = None
-    schedule = _gw_mixing_schedule(args)
+    schedule = _gw_attempt_schedule(args)
 
-    for i, mixing in enumerate(schedule, start=1):
+    for i, (method, mixing) in enumerate(schedule, start=1):
         t0 = time.perf_counter()
         gw = solve_gw(
             params,
             grid,
-            _gw_options(args, filling, mu_guess, mixing),
+            _gw_options(args, filling, mu_guess, mixing, method),
             initial=initial,
         )
         runtime = time.perf_counter() - t0
@@ -178,12 +194,18 @@ def _solve_gw_adaptive(args, params, grid, filling: float, mu_guess: float, init
         last = gw
         attempts.append({
             "attempt": i,
+            "method": method,
             "mixing": float(mixing),
             "converged": bool(gw.converged),
             "iterations": int(gw.iterations),
             "final_error": float(gw.final_error),
             "mu": float(gw.mu),
             "actual_filling": float(np.sum(gw.density)),
+            "min_screening_singular_value": float(gw.min_screening_singular_value),
+            "screening_m": int(gw.min_screening_m),
+            "screening_Omega": float(gw.min_screening_Omega),
+            "screening_q1": float(gw.min_screening_q1),
+            "screening_q2": float(gw.min_screening_q2),
             "runtime_s": float(runtime),
         })
         if gw.converged:
@@ -214,8 +236,14 @@ def _base_row(args, filling: float, branch: str) -> dict:
         "GW_converged": False,
         "GW_iterations": np.nan,
         "GW_final_error": np.nan,
+        "GW_mixing_method_used": "",
         "GW_mixing_used": np.nan,
         "GW_attempts": np.nan,
+        "GW_min_screening_singular_value": np.nan,
+        "GW_screening_m": np.nan,
+        "GW_screening_Omega": np.nan,
+        "GW_screening_q1": np.nan,
+        "GW_screening_q2": np.nan,
         "selected_plus_converged": False,
         "selected_minus_converged": False,
         "selected_plus_iterations": np.nan,
@@ -264,8 +292,6 @@ def _v_ramp_schedule(target_v: float, explicit_values: list[float] | None) -> li
 
     sign = 1.0 if target_v > 0 else -1.0
     target_abs = abs(target_v)
-    # Denser steps around the region where the V=3 half-filling benchmark first
-    # became difficult, while keeping larger steps once a stable branch exists.
     base = [
         0.1, 0.25, 0.5, 0.6, 0.7, 0.75, 0.9, 1.0,
         1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75,
@@ -285,7 +311,7 @@ def _write_v_ramp_csv(rows: list[dict], path: Path) -> None:
 
 
 def _prepare_anchor_gw_seed(args, grid, anchor_filling: float, outdir: Path):
-    """Ramp V at the anchor filling with adaptive GW mixing retries."""
+    """Ramp V at the anchor filling with adaptive linear/Pulay GW retries."""
     if args.no_v_ramp or args.no_continuation:
         return None, True
 
@@ -295,11 +321,14 @@ def _prepare_anchor_gw_seed(args, grid, anchor_filling: float, outdir: Path):
         params_target, grid, mu=args.mu0, target_filling=float(anchor_filling)
     )
 
-    mixing_schedule = _gw_mixing_schedule(args)
+    attempt_schedule = _gw_attempt_schedule(args)
     print("\nPreparing anchor GW seed by interaction continuation")
     print(f"anchor filling = {anchor_filling:.8g}")
     print("V ramp = " + " -> ".join(f"{v:g}" for v in schedule))
-    print("GW mixing attempts = " + " -> ".join(f"{x:g}" for x in mixing_schedule))
+    print(
+        "GW attempts = "
+        + " -> ".join(_attempt_label(method, mixing) for method, mixing in attempt_schedule)
+    )
 
     previous = None
     ramp_rows: list[dict] = []
@@ -316,27 +345,35 @@ def _prepare_anchor_gw_seed(args, grid, anchor_filling: float, outdir: Path):
                 "attempt": attempt["attempt"],
                 "V": float(value),
                 "filling": float(anchor_filling),
+                "method": attempt["method"],
                 "mixing": attempt["mixing"],
                 "converged": attempt["converged"],
                 "iterations": attempt["iterations"],
                 "final_error": attempt["final_error"],
                 "mu": attempt["mu"],
                 "actual_filling": attempt["actual_filling"],
+                "min_screening_singular_value": attempt["min_screening_singular_value"],
+                "screening_m": attempt["screening_m"],
+                "screening_Omega": attempt["screening_Omega"],
+                "screening_q1": attempt["screening_q1"],
+                "screening_q2": attempt["screening_q2"],
                 "runtime_s": attempt["runtime_s"],
             })
             print(
-                f"  [V-ramp {istep:2d}/{len(schedule):2d}, try {attempt['attempt']}/{len(mixing_schedule)}] "
-                f"V={value:7.4f}  mix={attempt['mixing']:.3f}  "
-                f"converged={str(attempt['converged']):5s}  it={attempt['iterations']:3d}  "
-                f"err={attempt['final_error']:.3e}  mu={attempt['mu']: .8f}  "
-                f"time={attempt['runtime_s']:.1f}s"
+                f"  [V-ramp {istep:2d}/{len(schedule):2d}, try {attempt['attempt']}/{len(attempt_schedule)}] "
+                f"V={value:7.4f}  {attempt['method']:6s} mix={attempt['mixing']:.3f}  "
+                f"conv={str(attempt['converged']):5s} it={attempt['iterations']:3d}  "
+                f"res={attempt['final_error']:.3e}  "
+                f"smin={attempt['min_screening_singular_value']:.3e}  "
+                f"Q=(m={attempt['screening_m']},q={attempt['screening_q1']:.3f},{attempt['screening_q2']:.3f})  "
+                f"mu={attempt['mu']: .8f}  time={attempt['runtime_s']:.1f}s"
             )
             _write_v_ramp_csv(ramp_rows, outdir / "v_ramp.csv")
 
         if gw is None or not gw.converged:
             print(
-                f"\nV-ramp stopped: all GW mixing attempts failed at V={value:g}. "
-                "The filling scan will not cold-start at the target interaction."
+                f"\nV-ramp stopped: all GW attempts failed at V={value:g}. "
+                "Inspect both residual and min screening singular value in v_ramp.csv."
             )
             return None, False
         previous = gw
@@ -366,6 +403,8 @@ def _run_point(args, grid, params, filling: float, state: dict | None, branch: s
     gw, attempts, time_gw = _solve_gw_adaptive(
         args, params, grid, filling, bare.mu, initial_gw
     )
+    if gw is None:
+        raise RuntimeError("No GW attempt was executed")
     used = attempts[-1]
     row.update({
         "mu_GW": float(gw.mu),
@@ -373,17 +412,25 @@ def _run_point(args, grid, params, filling: float, state: dict | None, branch: s
         "GW_converged": bool(gw.converged),
         "GW_iterations": int(gw.iterations),
         "GW_final_error": float(gw.final_error),
+        "GW_mixing_method_used": used["method"],
         "GW_mixing_used": float(used["mixing"]),
         "GW_attempts": int(len(attempts)),
+        "GW_min_screening_singular_value": float(gw.min_screening_singular_value),
+        "GW_screening_m": int(gw.min_screening_m),
+        "GW_screening_Omega": float(gw.min_screening_Omega),
+        "GW_screening_q1": float(gw.min_screening_q1),
+        "GW_screening_q2": float(gw.min_screening_q2),
         "time_GW_s": float(time_gw),
     })
 
     if len(attempts) > 1:
         for attempt in attempts:
             print(
-                f"  GW retry filling={filling:.6g}: try {attempt['attempt']}/{len(_gw_mixing_schedule(args))} "
-                f"mix={attempt['mixing']:.3f} converged={attempt['converged']} "
-                f"it={attempt['iterations']} err={attempt['final_error']:.3e}"
+                f"  GW retry filling={filling:.6g}: try {attempt['attempt']}/{len(_gw_attempt_schedule(args))} "
+                f"{attempt['method']} mix={attempt['mixing']:.3f} "
+                f"conv={attempt['converged']} it={attempt['iterations']} "
+                f"res={attempt['final_error']:.3e} "
+                f"smin={attempt['min_screening_singular_value']:.3e}"
             )
 
     new_state = dict(previous_state)
@@ -393,8 +440,9 @@ def _run_point(args, grid, params, filling: float, state: dict | None, branch: s
         row["vertex_skipped_because_GW_failed"] = True
         row["runtime_s"] = float(time.perf_counter() - point_start)
         print(
-            f"filling={filling:6.3f}  GW FAILED after {len(attempts)} mixing attempt(s); "
-            f"last err={gw.final_error:.3e}; vertex skipped  time={row['runtime_s']:.1f}s"
+            f"filling={filling:6.3f}  GW FAILED after {len(attempts)} attempt(s); "
+            f"res={gw.final_error:.3e}, smin={gw.min_screening_singular_value:.3e}; "
+            f"vertex skipped  time={row['runtime_s']:.1f}s"
         )
         return row, new_state
 
@@ -497,7 +545,8 @@ def _run_point(args, grid, params, filling: float, state: dict | None, branch: s
         f"chi_opp={_format_number(row['selected_opposite_re'])}  "
         f"chi_same={_format_number(row['selected_same_re'])}  "
         f"r_opp={_format_number(rp_re)}  r_same={_format_number(rm_re)}  "
-        f"GW it={gw.iterations:3d} mix={row['GW_mixing_used']:.3f} err={gw.final_error:.2e}  "
+        f"GW it={gw.iterations:3d} {used['method']}:{used['mixing']:.3f} "
+        f"res={gw.final_error:.2e} smin={gw.min_screening_singular_value:.2e}  "
         f"vertex it=({row['selected_plus_iterations']},{row['selected_minus_iterations']})  "
         f"time={row['runtime_s']:.1f}s"
     )
@@ -610,9 +659,16 @@ def _parse_args():
     p.add_argument("--gw-tol", type=float, default=1e-8)
     p.add_argument("--gw-mixing", type=float, default=0.20)
     p.add_argument(
-        "--gw-retry-mixings", nargs="+", type=float, default=[0.15, 0.10, 0.05],
-        help="Fallback GW linear-mixing values tried from the same converged seed.",
+        "--gw-retry-mixings", nargs="+", type=float, default=[0.10],
+        help="Fallback linear-mixing values tried before Pulay/DIIS.",
     )
+    p.add_argument("--no-gw-pulay", action="store_true", help="Disable Pulay/DIIS fallback.")
+    p.add_argument("--gw-pulay-mixing", type=float, default=0.70,
+                   help="Damping applied to the Pulay/DIIS extrapolated self-energy.")
+    p.add_argument("--gw-pulay-history", type=int, default=6)
+    p.add_argument("--gw-pulay-start", type=int, default=3)
+    p.add_argument("--gw-pulay-regularization", type=float, default=1e-10)
+
     p.add_argument("--vertex-max-iter", type=int, default=300)
     p.add_argument("--vertex-tol", type=float, default=1e-8)
     p.add_argument("--vertex-mixing", type=float, default=0.20)
@@ -652,7 +708,10 @@ def main():
 
     settings = dict(vars(args))
     settings["resolved_anchor_filling"] = anchor
-    settings["resolved_gw_mixing_schedule"] = _gw_mixing_schedule(args)
+    settings["resolved_gw_attempt_schedule"] = [
+        {"method": method, "mixing": mixing}
+        for method, mixing in _gw_attempt_schedule(args)
+    ]
     with (outdir / "settings.json").open("w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
 
@@ -664,8 +723,13 @@ def main():
         f"nOmega={args.nomega}, stage={args.vertex_stage}, backend={args.momentum_backend}"
     )
     print(
-        "GW mixing attempts: " + " -> ".join(f"{x:g}" for x in _gw_mixing_schedule(args))
+        "GW attempts: "
+        + " -> ".join(_attempt_label(method, mixing) for method, mixing in _gw_attempt_schedule(args))
         + f"; vertex mixing={args.vertex_mixing:g}"
+    )
+    print(
+        f"Pulay: history={args.gw_pulay_history}, start={args.gw_pulay_start}, "
+        f"regularization={args.gw_pulay_regularization:.1e}"
     )
     print(f"tol: GW={args.gw_tol:.1e}, vertex={args.vertex_tol:.1e}")
     print(f"number of fillings: {len(fillings)}")
