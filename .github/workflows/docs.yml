@@ -7,6 +7,7 @@ on:
       - 'rubycgw/**'
       - 'run_ruby_cgw.py'
       - 'convergence_scan.py'
+      - 'filling_scan.py'
       - 'requirements.txt'
       - 'README.md'
       - '.github/workflows/docs.yml'
@@ -16,6 +17,7 @@ on:
       - 'rubycgw/**'
       - 'run_ruby_cgw.py'
       - 'convergence_scan.py'
+      - 'filling_scan.py'
       - 'requirements.txt'
       - 'README.md'
       - '.github/workflows/docs.yml'
@@ -43,6 +45,7 @@ jobs:
             docs/tutorial.md \
             docs/convergence_scan.md \
             docs/performance_and_reuse.md \
+            docs/filling_scan.md \
             --from=markdown+tex_math_dollars \
             --toc \
             --number-sections \
