@@ -2,7 +2,7 @@ import numpy as np
 
 from rubycgw.model import RubyParameters, build_h0, build_interaction, eta_vertices
 from rubycgw.grids import MatsubaraGrid, shift_fermion_field
-from rubycgw.gw import build_g0_inverse
+from rubycgw.gw import build_g0_inverse, solve_noninteracting
 from rubycgw.susceptibility import chi_eta
 
 
@@ -36,6 +36,13 @@ def test_shift_rule_k_to_k_plus_q():
                 f[n, i, j, 0, 0] = 100*n + 10*i + j
     s = shift_fermion_field(f, 1, 2, 1)
     assert s[0, 0, 0, 0, 0] == f[1, 1, 2, 0, 0]
+
+
+def test_noninteracting_solver_hits_target_filling():
+    params = RubyParameters(V=0.1)
+    grid = MatsubaraGrid(nk1=2, nk2=2, nw=12, nOmega=2, T=0.1)
+    result = solve_noninteracting(params, grid, target_filling=2.0)
+    assert abs(np.sum(result.density) - 2.0) < 1e-8
 
 
 def test_v_zero_bare_susceptibility_is_finite():
