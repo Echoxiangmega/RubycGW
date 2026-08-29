@@ -18,29 +18,15 @@ RubyParameters(ti=0.4, t1=0.2, t2=0.2, V=0.2)
 
 ### `build_h0(kpts, params)`
 
-输入：`kpts` shape `(...,2)` 的 reduced momentum。
-
-输出：`h0` shape `(...,6,6)`。
-
-用途：构造单粒子 Bloch Hamiltonian。
+输入：`kpts` shape `(...,2)`；输出：`(...,6,6)` 的 `h0(k)`。
 
 ### `build_interaction(qpts, params)`
 
-输入：`qpts` shape `(...,2)`。
-
-输出：`Vq` shape `(...,6,6)`。
-
-用途：构造 NN density-density interaction matrix `V_ab(q)`。
+输入：`qpts` shape `(...,2)`；输出：`(...,6,6)` 的 `V_ab(q)`。
 
 ### `eta_vertices()`
 
-返回
-
-```python
-K_A, K_B, K_plus, K_minus
-```
-
-每个都是 `6x6` Hermitian matrix。`K_plus` 是 physical opposite，`K_minus` 是 physical same。
+返回 `K_A, K_B, K_plus, K_minus`。`K_plus` 是 physical opposite，`K_minus` 是 physical same。
 
 ## `rubycgw.grids`
 
@@ -50,42 +36,31 @@ K_A, K_B, K_plus, K_minus
 MatsubaraGrid(nk1=4, nk2=4, nw=16, nOmega=8, T=0.05)
 ```
 
-主要属性：
+主要属性：`n_values`, `m_values`, `omega`, `Omega`, `nk`, `nf`, `nb`。
 
-```text
-n_values   fermion Matsubara integer indices
-m_values   boson Matsubara integer indices
-omega      fermion frequencies
-Omega      boson frequencies
-nk         nk1*nk2
-nf         2*nw
-nb         2*nOmega+1
+### `frequency_shift_slices(nf, m)`
+
+返回 `(src,dst)` 两个 slice，使
+
+```python
+F_shifted[dst] = F[src]
 ```
 
-`kmesh()` 和 `qmesh()` 返回 shape `(Nk1,Nk2,2)` 的 reduced momentum mesh。
+对应 `omega -> omega + Omega_m` 的有效 Matsubara window。hot loop 使用这个函数避免为每个 Q 分配完整 zero-padded array。
+
+### `roll_spatial(field, dq1, dq2)`
+
+只对两个 momentum axes 做 periodic `k -> k+q` shift。
 
 ### `shift_fermion_field(field, dq1, dq2, m)`
 
-输入 `field` shape `(Nf,Nk1,Nk2,...)`，返回 `F(k+Q)`。
-
-空间 momentum periodic wrap；frequency shift 超出有限 fermion box 时设为零。
+保留原公开接口，返回完整 shape 的 `F(k+Q)`；超出 fermion box 的 frequency 设为零。主要用于通用调用和测试，性能关键代码现在直接使用前两个 allocation-light helper。
 
 ## `rubycgw.gw`
 
 ### `GWOptions`
 
-主要参数：
-
-```text
-mu              初始 chemical potential
-target_filling  None 表示固定 mu，否则每轮调整 mu
-max_iter        GW 最大迭代次数
-tol             收敛阈值
-mixing          self-energy mixing
-mu_tol          filling root solver 阈值
-mu_max_iter     chemical-potential bisection 最大次数
-verbose         是否打印每轮信息
-```
+主要参数：`mu`, `target_filling`, `max_iter`, `tol`, `mixing`, `mu_tol`, `mu_max_iter`, `verbose`。
 
 ### `NonInteractingResult`
 
@@ -99,21 +74,13 @@ verbose         是否打印每轮信息
 
 返回 shape `(Nf,Nk1,Nk2,6,6)` 的 `G0^{-1}`。
 
-### `dyson_from_sigma(h0, grid, mu, sigma_h, sigma_gw)`
-
-根据 Dyson equation 返回 interacting `G`。
-
 ### `density_from_G(G, grid)`
 
-返回 length-6 的 orbital density array。
-
-### `hartree_self_energy(density, Vq0)`
-
-返回 `6x6` diagonal Hartree self-energy。
+返回 length-6 orbital density。
 
 ### `compute_polarization(G, grid)`
 
-返回 shape `(Nb,Nk1,Nk2,6,6)` 的 `P(Q)`。
+返回 `(Nb,Nk1,Nk2,6,6)` 的 `P(Q)`。当前实现只对每个 m 的有效 Matsubara slice 做 contraction。
 
 ### `compute_screened_interaction(P, Vq, grid)`
 
@@ -121,63 +88,41 @@ verbose         是否打印每轮信息
 
 ### `compute_sigma_gw(G, W, grid)`
 
-返回 shape `(Nf,Nk1,Nk2,6,6)` 的 GW self-energy。
+返回 `(Nf,Nk1,Nk2,6,6)` 的 `Sigma_GW`，同样只处理有效 frequency window。
 
 ### `solve_noninteracting(params, grid, mu=0.0, target_filling=None, ...)`
 
-构造 noninteracting reference。若给 `target_filling`，独立求 `mu0`。
+构造 noninteracting reference。固定 filling 时独立求 `mu0`。
 
-### `solve_gw(params, grid, opts)`
+### `solve_gw(params, grid, opts, initial=None)`
 
-执行完整 self-consistent GW fixed-point loop，返回 `GWResult`。
+执行 self-consistent GW。`initial` 可以传上一个参数点的 `GWResult`：若 fermionic array shape 相同，则旧的 `Sigma_H`, `Sigma_GW`, `mu` 作为新点初值；若 shape 不同自动忽略。
+
+这适合 `V/filling/nOmega` 等 continuation scan。warm start 不改变新点方程，也不会跳过 convergence test。
 
 ## `rubycgw.cgw`
 
 ### `VertexOptions`
 
-```text
-max_iter
-tol
-mixing
-include_hartree
-include_mt
-include_al
-verbose
-```
-
-用三个 include flag 可以分别做 `bare`, `MT-only` 或 full cGW 的诊断。
+字段：`max_iter`, `tol`, `mixing`, `include_hartree`, `include_mt`, `include_al`, `verbose`。
 
 ### `VertexResult`
 
-字段：
+字段：`Gamma`, `Gamma_H`, `Gamma_MT`, `Gamma_AL1`, `Gamma_AL2`, `converged`, `iterations`。
 
-```text
-Gamma
-Gamma_H
-Gamma_MT
-Gamma_AL1
-Gamma_AL2
-converged
-iterations
-```
+### `gamma_h_q0`, `gamma_mt_q0`, `gamma_al_q0`
 
-每个 Gamma field shape `(Nf,Nk1,Nk2,6,6)`。
+分别计算 q=(0,0) Hartree、MT、AL1/AL2 correction。保留为独立诊断 API。
 
-### `gamma_h_q0(G, Gamma, Vq0, grid)`
+### `solve_vertex_q0(G, W, Vq0, K, grid, opts, initial_gamma=None)`
 
-计算 static uniform Hartree vertex correction。
+解 q=(0,0) vertex equation。`initial_gamma` 可传：
 
-### `gamma_mt_q0(G, W, Gamma, grid)`
+- shape `(Nf,Nk1,Nk2,6,6)` 的前一参数点 full vertex；
+- 当前点已经收敛的 MT-only vertex，用来 warm-start full MT+AL solve；
+- `6x6` matrix（会 broadcast）。
 
-计算 q=(0,0) MT correction。
-
-### `gamma_al_q0(G, W, Gamma, grid)`
-
-返回 `(Gamma_AL1, Gamma_AL2)`。
-
-### `solve_vertex_q0(G, W, Vq0, K, grid, opts)`
-
-在 converged GW background 上解 q=(0,0) linear vertex equation。
+solver 内部每轮只形成一次 `X=G Gamma G`，然后 Hartree/MT/AL 共用同一个 internal-Q loop。
 
 ## `rubycgw.susceptibility`
 
@@ -189,7 +134,7 @@ iterations
 -\frac{T}{N_k}\sum_k\mathrm{Tr}[K_{left}G(k+q)\Gamma(k,q)G(k)].
 \]
 
-若 `Gamma=None`，右 vertex 使用 bare `K_left`。因此：
+若 `Gamma=None`，右 vertex 使用 bare `K_left`：
 
 ```python
 chi_eta(G0, K, grid)              # G0G0
@@ -197,21 +142,22 @@ chi_eta(G, K, grid)               # dressed GG
 chi_eta(G, K, grid, Gamma=Gamma)  # cGW
 ```
 
-### `channel_summary(G, K_plus, K_minus, grid)`
+## Driver scripts
 
-快速返回 plus/opposite、minus/same 以及 same-minus-opposite 差值。
+### `run_ruby_cgw.py`
 
-## `run_ruby_cgw.py`
+完整 staged reference run。full cGW 自动从同一点已经收敛的 MT vertex 开始。
 
-这是目前推荐的 end-to-end reference driver。它不是 library API，而是展示正确调用顺序的教程脚本：
+### `convergence_scan.py`
+
+支持
 
 ```text
-solve_noninteracting
-    -> chi G0G0
-solve_gw
-    -> chi GG
-solve_vertex_q0(include_al=False)
-    -> GW+MT
-solve_vertex_q0(include_al=True)
-    -> full cGW
+--vertex-stage mt
+--vertex-stage full
+--vertex-stage both
+--no-continuation
+--skip-hartree
 ```
+
+默认开启 compatible continuation，并把 `bare/GW/MT/full` 各阶段 wall time 写入 CSV。
