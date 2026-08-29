@@ -2,7 +2,7 @@ import numpy as np
 
 from rubycgw.model import RubyParameters, build_h0, build_interaction, eta_vertices
 from rubycgw.grids import MatsubaraGrid, shift_fermion_field
-from rubycgw.gw import build_g0_inverse, solve_noninteracting
+from rubycgw.gw import GWOptions, build_g0_inverse, solve_gw, solve_noninteracting
 from rubycgw.susceptibility import chi_eta
 
 
@@ -48,12 +48,26 @@ def test_noninteracting_solver_hits_target_filling():
 def test_noninteracting_solver_brackets_near_empty_and_full():
     """Analytic tail subtraction must permit fillings close to 0 and 6."""
     params = RubyParameters(V=3.0)
-    # Deliberately small nw: for G0 the tail-subtracted density is the exact
-    # finite-temperature band filling and should not suffer the old +1/2 floor.
     grid = MatsubaraGrid(nk1=2, nk2=2, nw=6, nOmega=2, T=0.05)
     for target in (0.05, 5.95):
         result = solve_noninteracting(params, grid, target_filling=target)
         assert abs(np.sum(result.density) - target) < 1e-8
+
+
+def test_gw_result_reports_final_error():
+    params = RubyParameters(V=0.0)
+    grid = MatsubaraGrid(nk1=2, nk2=2, nw=6, nOmega=2, T=0.1)
+    opts = GWOptions(
+        target_filling=2.0,
+        max_iter=8,
+        tol=1e-10,
+        mixing=0.5,
+        verbose=False,
+    )
+    result = solve_gw(params, grid, opts)
+    assert result.converged
+    assert np.isfinite(result.final_error)
+    assert result.final_error < opts.tol
 
 
 def test_v_zero_bare_susceptibility_is_finite():
