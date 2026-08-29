@@ -105,3 +105,29 @@ E. 对关键 V / filling / T 点重复以上检查
 ## 8. 当前主要性能瓶颈
 
 full cGW 的 AL 部分最昂贵。当前实现已经把显式四重 orbital sum 化为 `L1/L2` 和 `W L W` 的 6x6 matrix contraction，但仍对 internal bosonic momentum/frequency 做显式循环。以后优化方向包括 FFT convolution、缓存 shifted fields、利用 q=0/time-reversal symmetry、以及用 Krylov solver 解 vertex equation。
+
+## 9. 自动 convergence scan
+
+仓库提供 `convergence_scan.py` 自动执行上述 A-C 三步。最简单的完整扫描是：
+
+```bash
+python convergence_scan.py --scan all
+```
+
+如果 full AL 计算较慢，建议先分开执行：
+
+```bash
+python convergence_scan.py --scan nw
+python convergence_scan.py --scan nomega
+python convergence_scan.py --scan nk
+```
+
+每个 grid point 都完整保存 `G0G0`, `GG`, `GW+MT`, `full cGW` 四层结果、GW/vertex convergence flag、chemical potential、vertex norms 和 runtime。默认输出目录为：
+
+```text
+results/convergence/YYYYMMDD-HHMMSS/
+```
+
+并生成 `convergence.csv` 以及对应的 `convergence_nw.png`, `convergence_nOmega.png`, `convergence_nk.png`。每张图画 full-cGW 的 `chi_opposite`, `chi_same` 和 `chi_same-chi_opposite`。
+
+完整命令行参数和输出字段见 [convergence_scan.md](convergence_scan.md)。
