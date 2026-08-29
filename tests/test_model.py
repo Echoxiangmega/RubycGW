@@ -70,6 +70,29 @@ def test_gw_result_reports_final_error():
     assert result.final_error < opts.tol
 
 
+def test_gw_pulay_api_and_screening_diagnostic():
+    """Pulay mode is accepted and V=0 has the exact unit screening denominator."""
+    params = RubyParameters(V=0.0)
+    grid = MatsubaraGrid(nk1=2, nk2=2, nw=4, nOmega=1, T=0.1)
+    opts = GWOptions(
+        target_filling=3.0,
+        max_iter=6,
+        tol=1e-10,
+        mixing=0.7,
+        mixing_method="pulay",
+        pulay_history=4,
+        pulay_start=2,
+        verbose=False,
+    )
+    result = solve_gw(params, grid, opts)
+    assert result.converged
+    assert result.mixing_method == "pulay"
+    assert abs(result.min_screening_singular_value - 1.0) < 1e-12
+    assert np.isfinite(result.min_screening_Omega)
+    assert np.isfinite(result.min_screening_q1)
+    assert np.isfinite(result.min_screening_q2)
+
+
 def test_v_zero_bare_susceptibility_is_finite():
     params = RubyParameters(V=0.0)
     grid = MatsubaraGrid(nk1=2, nk2=2, nw=8, nOmega=2, T=0.1)
