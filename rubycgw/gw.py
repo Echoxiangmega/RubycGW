@@ -15,8 +15,10 @@ momentum convolutions by FFT while retaining the Matsubara sums explicitly.
 validation.
 
 For fixed-filling calculations, densities use an analytic reference-Green-
-function tail subtraction.  This removes the low/high-filling pathology of a
-bare finite Matsubara sum with only a constant +1/2 tail correction.
+function tail subtraction.  GW self-consistency supports both ordinary linear
+mixing and a small-history Pulay/DIIS accelerator.  The convergence residual is
+the *raw* fixed-point residual of the Hartree and GW self-energies, so its value
+is independent of the chosen damping/mixing parameter.
 """
 
 from __future__ import annotations
@@ -35,6 +37,10 @@ class GWOptions:
     max_iter: int = 100
     tol: float = 1e-8
     mixing: float = 0.25
+    mixing_method: str = "linear"  # "linear" or "pulay"
+    pulay_history: int = 6
+    pulay_start: int = 3
+    pulay_regularization: float = 1e-10
     mu_tol: float = 1e-10
     mu_max_iter: int = 100
     verbose: bool = True
@@ -53,6 +59,12 @@ class GWResult:
     converged: bool
     iterations: int
     final_error: float
+    mixing_method: str
+    min_screening_singular_value: float
+    min_screening_m: int
+    min_screening_Omega: float
+    min_screening_q1: float
+    min_screening_q2: float
 
 
 @dataclass
@@ -69,16 +81,15 @@ def _check_backend(backend: str) -> str:
     return backend
 
 
+def _check_mixing_method(method: str) -> str:
+    method = str(method).lower()
+    if method not in {"linear", "pulay"}:
+        raise ValueError("mixing_method must be 'linear' or 'pulay'")
+    return method
+
+
 def _reverse_fft_spectrum(field: np.ndarray, axes: tuple[int, int]) -> np.ndarray:
-    """Return the discrete spectrum F_hat(-r) on the chosen periodic axes.
-
-    For complex fields this is deliberately *not* a Hermitian conjugation:
-
-        F_hat(-r) = conj( FFT[conj(F)](r) ).
-
-    This is the factor needed for correlations of the form
-    ``sum_k A(k+q) B(k)`` without complex-conjugating B.
-    """
+    """Return the discrete spectrum F_hat(-r) on the chosen periodic axes."""
     return np.conj(np.fft.fftn(np.conj(field), axes=axes))
 
 
@@ -125,19 +136,8 @@ def density_from_G(
 
         G_ref^{-1}(k,iw) = iw + mu - h0(k) - Sigma_H
 
-    whose infinite Matsubara sum is evaluated exactly from Fermi occupations.
-    The finite numerical sum is then applied only to ``G-G_ref``:
-
-        n_a = n_a^ref + (T/Nk) sum_{k,n} [G_aa-G_ref,aa].
-
-    Since Sigma_GW(iw) -> 0 at high frequency, the difference decays much
-    faster than G itself.  For a noninteracting Green function the correction
-    vanishes and the filling is exactly the finite-temperature band filling,
-    independent of the Matsubara cutoff.
-
-    The legacy ``density_from_G(G, grid)`` call is retained for external
-    compatibility and uses the old symmetric-box ``1/2 + sum G`` estimate.
-    Internal fixed-filling solvers always use the tail-subtracted form.
+    and evaluate its infinite Matsubara sum analytically.  The finite numerical
+    sum is then applied only to ``G-G_ref``.
     """
     diag = np.diagonal(G, axis1=-2, axis2=-1)
 
@@ -218,13 +218,35 @@ def compute_polarization(G: np.ndarray, grid: MatsubaraGrid,
     return compute_polarization_direct(G, grid)
 
 
-def compute_screened_interaction(P: np.ndarray, Vq: np.ndarray,
-                                 grid: MatsubaraGrid) -> np.ndarray:
+def _screening_lhs(P: np.ndarray, Vq: np.ndarray) -> np.ndarray:
     eye = np.eye(NSUB, dtype=complex)
     Vbatch = Vq[None, :, :, :, :]
-    lhs = eye[None, None, None, :, :] - np.matmul(Vbatch, P)
-    rhs = np.broadcast_to(Vbatch, P.shape)
+    return eye[None, None, None, :, :] - np.matmul(Vbatch, P)
+
+
+def compute_screened_interaction(P: np.ndarray, Vq: np.ndarray,
+                                 grid: MatsubaraGrid) -> np.ndarray:
+    lhs = _screening_lhs(P, Vq)
+    rhs = np.broadcast_to(Vq[None, :, :, :, :], P.shape)
     return np.linalg.solve(lhs, rhs)
+
+
+def screening_diagnostic(P: np.ndarray, Vq: np.ndarray,
+                         grid: MatsubaraGrid) -> tuple[float, int, float, float, float]:
+    """Return the smallest singular value of I-VP and the Q where it occurs."""
+    lhs = _screening_lhs(P, Vq)
+    svals = np.linalg.svd(lhs, compute_uv=False)
+    smin_grid = svals[..., -1]
+    flat = int(np.argmin(smin_grid))
+    im, iq1, iq2 = np.unravel_index(flat, smin_grid.shape)
+    q = grid.qmesh()[iq1, iq2]
+    return (
+        float(smin_grid[im, iq1, iq2]),
+        int(grid.m_values[im]),
+        float(grid.Omega[im]),
+        float(q[0]),
+        float(q[1]),
+    )
 
 
 def compute_sigma_gw_direct(G: np.ndarray, W: np.ndarray,
@@ -331,11 +353,111 @@ def _compatible_initial(initial: GWResult | None, grid: MatsubaraGrid) -> bool:
     return initial.Sigma_GW.shape == expected and initial.Sigma_H.shape == (NSUB, NSUB)
 
 
+def _residual_error(res_h: np.ndarray, res_gw: np.ndarray) -> float:
+    return max(
+        float(np.max(np.abs(res_h))),
+        float(np.max(np.abs(res_gw))),
+    )
+
+
+def _residual_inner(a_h: np.ndarray, a_gw: np.ndarray,
+                    b_h: np.ndarray, b_gw: np.ndarray) -> float:
+    """Balanced real inner product for Pulay residuals.
+
+    Hartree and dynamic GW blocks have very different element counts, so each
+    block is normalized by its own size before the two contributions are added.
+    """
+    h = np.vdot(a_h, b_h).real / max(a_h.size, 1)
+    g = np.vdot(a_gw, b_gw).real / max(a_gw.size, 1)
+    return float(h + g)
+
+
+def _pulay_coefficients(history: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+                        regularization: float) -> np.ndarray:
+    """DIIS coefficients minimizing the residual combination with sum(c)=1."""
+    m = len(history)
+    B = np.empty((m + 1, m + 1), dtype=float)
+    B.fill(0.0)
+    for i in range(m):
+        _, _, rhi, rgi = history[i]
+        for j in range(i, m):
+            _, _, rhj, rgj = history[j]
+            val = _residual_inner(rhi, rgi, rhj, rgj)
+            B[i, j] = val
+            B[j, i] = val
+
+    diag_scale = max(float(np.max(np.abs(np.diag(B[:m, :m])))), 1.0)
+    B[:m, :m] += float(regularization) * diag_scale * np.eye(m)
+    B[:m, m] = 1.0
+    B[m, :m] = 1.0
+    rhs = np.zeros(m + 1, dtype=float)
+    rhs[m] = 1.0
+    try:
+        sol = np.linalg.solve(B, rhs)
+    except np.linalg.LinAlgError:
+        sol = np.linalg.lstsq(B, rhs, rcond=None)[0]
+    return sol[:m]
+
+
+def _mixed_self_energies(
+    sigma_h: np.ndarray,
+    sigma_gw: np.ndarray,
+    sigma_h_out: np.ndarray,
+    sigma_gw_out: np.ndarray,
+    opts: GWOptions,
+    it: int,
+    history: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the next self-energy iterate using linear or Pulay mixing."""
+    alpha = float(opts.mixing)
+    if not (0.0 < alpha <= 1.0):
+        raise ValueError("GW mixing must lie in (0, 1].")
+
+    res_h = sigma_h_out - sigma_h
+    res_gw = sigma_gw_out - sigma_gw
+
+    if opts.mixing_method == "linear":
+        return sigma_h + alpha * res_h, sigma_gw + alpha * res_gw
+
+    history.append((
+        np.array(sigma_h_out, copy=True),
+        np.array(sigma_gw_out, copy=True),
+        np.array(res_h, copy=True),
+        np.array(res_gw, copy=True),
+    ))
+    keep = max(int(opts.pulay_history), 2)
+    if len(history) > keep:
+        del history[:-keep]
+
+    if it < int(opts.pulay_start) or len(history) < 2:
+        return sigma_h + alpha * res_h, sigma_gw + alpha * res_gw
+
+    coeff = _pulay_coefficients(history, opts.pulay_regularization)
+    h_diis = np.zeros_like(sigma_h)
+    gw_diis = np.zeros_like(sigma_gw)
+    for c, (hout, gout, _, _) in zip(coeff, history):
+        h_diis += c * hout
+        gw_diis += c * gout
+
+    # Damped DIIS: alpha=1 is standard DIIS, while smaller alpha blends the
+    # extrapolated solution with the current iterate for additional stability.
+    return (
+        (1.0 - alpha) * sigma_h + alpha * h_diis,
+        (1.0 - alpha) * sigma_gw + alpha * gw_diis,
+    )
+
+
 def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
              opts: GWOptions = GWOptions(),
              initial: GWResult | None = None) -> GWResult:
-    """Solve self-consistent GW and report the final fixed-point residual."""
+    """Solve self-consistent GW and report fixed-point/screening diagnostics."""
     backend = _check_backend(opts.momentum_backend)
+    method = _check_mixing_method(opts.mixing_method)
+    if opts.pulay_history < 2:
+        raise ValueError("pulay_history must be at least 2")
+    if opts.pulay_start < 1:
+        raise ValueError("pulay_start must be at least 1")
+
     kpts = grid.kmesh()
     qpts = grid.qmesh()
     h0 = build_h0(kpts, params)
@@ -352,57 +474,84 @@ def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
         mu = float(opts.mu)
 
     G = dyson_from_sigma(h0, grid, mu, sigma_h, sigma_gw)
+    if opts.target_filling is not None:
+        mu, G = _solve_mu(
+            h0, sigma_h, sigma_gw, grid, opts.target_filling,
+            mu, opts.mu_tol, opts.mu_max_iter
+        )
+
     W = np.zeros((grid.nb, grid.nk1, grid.nk2, NSUB, NSUB), dtype=complex)
     P = np.zeros_like(W)
+    history: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
 
     converged = False
     err = float("inf")
     it = 0
     for it in range(1, opts.max_iter + 1):
         density = density_from_G(G, grid, h0=h0, mu=mu, sigma_h=sigma_h)
-        sigma_h_new = hartree_self_energy(density, Vq0)
+        sigma_h_out = hartree_self_energy(density, Vq0)
         P = compute_polarization(G, grid, backend=backend)
         W = compute_screened_interaction(P, Vq, grid)
-        sigma_gw_new = compute_sigma_gw(G, W, grid, backend=backend)
+        sigma_gw_out = compute_sigma_gw(G, W, grid, backend=backend)
 
-        sigma_h = (1.0 - opts.mixing) * sigma_h + opts.mixing * sigma_h_new
-        sigma_gw_mixed = (1.0 - opts.mixing) * sigma_gw + opts.mixing * sigma_gw_new
-
-        if opts.target_filling is None:
-            Gnew = dyson_from_sigma(h0, grid, mu, sigma_h, sigma_gw_mixed)
-        else:
-            mu, Gnew = _solve_mu(
-                h0, sigma_h, sigma_gw_mixed, grid, opts.target_filling,
-                mu, opts.mu_tol, opts.mu_max_iter
-            )
-
-        err = max(
-            float(np.max(np.abs(Gnew - G))),
-            float(np.max(np.abs(sigma_gw_mixed - sigma_gw))),
-            float(np.max(np.abs(sigma_h_new - sigma_h))),
-        )
-        G = Gnew
-        sigma_gw = sigma_gw_mixed
-        density = density_from_G(G, grid, h0=h0, mu=mu, sigma_h=sigma_h)
+        res_h = sigma_h_out - sigma_h
+        res_gw = sigma_gw_out - sigma_gw
+        err = _residual_error(res_h, res_gw)
 
         if opts.verbose:
             print(
-                f"GW iter {it:4d}: err={err:.3e}, mu={mu:.10f}, "
-                f"n={np.sum(density):.10f}, backend={backend}"
+                f"GW iter {it:4d}: residual={err:.3e}, mu={mu:.10f}, "
+                f"n={np.sum(density):.10f}, method={method}, backend={backend}"
             )
         if err < opts.tol:
             converged = True
             break
 
+        sigma_h_next, sigma_gw_next = _mixed_self_energies(
+            sigma_h, sigma_gw, sigma_h_out, sigma_gw_out,
+            opts, it, history,
+        )
+
+        if opts.target_filling is None:
+            Gnext = dyson_from_sigma(h0, grid, mu, sigma_h_next, sigma_gw_next)
+        else:
+            mu, Gnext = _solve_mu(
+                h0, sigma_h_next, sigma_gw_next, grid, opts.target_filling,
+                mu, opts.mu_tol, opts.mu_max_iter
+            )
+
+        sigma_h = sigma_h_next
+        sigma_gw = sigma_gw_next
+        G = Gnext
+
+    # Re-evaluate the map on the returned iterate.  Do not overwrite the
+    # returned self-energies with the map output if the solve did not converge;
+    # that would make G and Sigma inconsistent and contaminate continuation.
     density = density_from_G(G, grid, h0=h0, mu=mu, sigma_h=sigma_h)
-    sigma_h = hartree_self_energy(density, Vq0)
+    sigma_h_out = hartree_self_energy(density, Vq0)
     P = compute_polarization(G, grid, backend=backend)
     W = compute_screened_interaction(P, Vq, grid)
-    sigma_gw = compute_sigma_gw(G, W, grid, backend=backend)
-    density = density_from_G(G, grid, h0=h0, mu=mu, sigma_h=sigma_h)
+    sigma_gw_out = compute_sigma_gw(G, W, grid, backend=backend)
+    err = _residual_error(sigma_h_out - sigma_h, sigma_gw_out - sigma_gw)
+    converged = bool(err < opts.tol)
+
+    smin, mmin, omin, q1min, q2min = screening_diagnostic(P, Vq, grid)
 
     return GWResult(
-        G=G, W=W, P=P, Sigma_H=sigma_h, Sigma_GW=sigma_gw,
-        mu=mu, density=density, converged=converged, iterations=it,
+        G=G,
+        W=W,
+        P=P,
+        Sigma_H=sigma_h,
+        Sigma_GW=sigma_gw,
+        mu=mu,
+        density=density,
+        converged=converged,
+        iterations=it,
         final_error=float(err),
+        mixing_method=method,
+        min_screening_singular_value=smin,
+        min_screening_m=mmin,
+        min_screening_Omega=omin,
+        min_screening_q1=q1min,
+        min_screening_q2=q2min,
     )
