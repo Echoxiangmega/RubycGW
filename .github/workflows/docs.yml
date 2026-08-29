@@ -42,6 +42,7 @@ jobs:
           pandoc \
             docs/tutorial.md \
             docs/convergence_scan.md \
+            docs/performance_and_reuse.md \
             --from=markdown+tex_math_dollars \
             --toc \
             --number-sections \
