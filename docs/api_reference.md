@@ -97,9 +97,12 @@ min_screening_m
 min_screening_Omega
 min_screening_q1
 min_screening_q2
+min_screening_mode
+min_density_mode
+min_density_mode_residual
 ```
 
-`final_error` 现在是未乘 mixing 的 raw self-energy fixed-point residual：
+`final_error` 是未乘 mixing 的 raw self-energy fixed-point residual：
 
 \[
 \max\left(
@@ -117,6 +120,24 @@ s_{\min}=\min_Q\sigma_{\min}[I-V(\mathbf q)P(Q)]
 \]
 
 以及该最小值出现的 bosonic index/frequency 和 reduced momentum。
+
+`min_screening_mode` 是该 Q 上 `I-VP` 的 unit-normalized right singular vector。`min_density_mode` 定义为归一化的
+
+\[
+P(Q_*)\,v_{\rm scr},
+\]
+
+它更适合解释为 density soft direction，因为
+
+\[
+(I-PV)P v_{\rm scr}=P(I-VP)v_{\rm scr}.
+\]
+
+两组 mode 都固定整体复相位：绝对值最大的分量被旋到实且为正。`min_density_mode_residual` 是同一 Q 上
+
+\[
+\|(I-PV)v_n\|_\infty.
+\]
 
 ### `build_g0_inverse(h0, grid, mu)`
 
@@ -140,7 +161,20 @@ s_{\min}=\min_Q\sigma_{\min}[I-V(\mathbf q)P(Q)]
 
 ### `screening_diagnostic(P, Vq, grid)`
 
-返回 `I-VP` 的全 Q 最小奇异值及其 `(m, Omega, q1, q2)` 位置。该 helper 当前位于 `rubycgw.gw` 模块。
+返回 `I-VP` 的全 Q 最小奇异值及其 `(m, Omega, q1, q2)` 位置。保留该接口用于只需要标量诊断的代码。
+
+### `screening_soft_modes(P, Vq, grid)`
+
+返回
+
+```text
+s_min, m, Omega, q1, q2,
+screening_mode,
+density_mode,
+density_mode_residual
+```
+
+其中 `screening_mode` 与 `density_mode` 均为 shape `(6,)` 的归一化 complex vectors。
 
 ### `compute_sigma_gw(G, W, grid, backend="fft")`
 
@@ -236,6 +270,8 @@ two filling continuation branches
 --no-gw-pulay
 ```
 
-每一个 V-ramp attempt 都写入 `v_ramp.csv`，包含 method/mixing、iterations、raw `final_error`、chemical potential、actual filling，以及 `min_screening_singular_value` 和其 Q 位置。正式 filling CSV 保存同类 GW diagnostics。
+每一个 V-ramp attempt 写入 `v_ramp.csv`，包含 method/mixing、iterations、raw `final_error`、chemical potential、actual filling，以及 `min_screening_singular_value` 和其 Q 位置。
+
+此外，每一个**收敛的** V-ramp 点写入 `screening_mode.csv`，保存 `screening_mode` 和更适合作为 charge-order seed 的 `density_mode` 六子格复振幅、模长和 phase。
 
 若所有 GW attempts 都失败，该 filling 跳过 vertex 并把 response 写成 NaN。
