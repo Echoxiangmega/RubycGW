@@ -572,14 +572,15 @@ def _parse_args():
     p.add_argument("--fail-fast", action="store_true")
     p.add_argument("--no-progress", action="store_true")
 
-    # V=3 is much stronger than the weak-coupling convergence benchmarks, so
-    # the default mixing is deliberately conservative.
+    # Continuation provides a good nearby seed, so a moderate mixing=0.20 is
+    # much faster than the previous over-conservative 0.08/0.10 defaults while
+    # retaining the same 1e-8 convergence tolerance.
     p.add_argument("--gw-max-iter", type=int, default=300)
     p.add_argument("--gw-tol", type=float, default=1e-8)
-    p.add_argument("--gw-mixing", type=float, default=0.08)
+    p.add_argument("--gw-mixing", type=float, default=0.20)
     p.add_argument("--vertex-max-iter", type=int, default=300)
     p.add_argument("--vertex-tol", type=float, default=1e-8)
-    p.add_argument("--vertex-mixing", type=float, default=0.10)
+    p.add_argument("--vertex-mixing", type=float, default=0.20)
     p.add_argument("--mu0", type=float, default=0.0)
     p.add_argument("--verbose-iterations", action="store_true")
     p.add_argument("--outdir", type=str, default=None)
@@ -629,6 +630,10 @@ def main():
     print(
         f"V={args.V}, T={args.T}, nk={args.nk}x{args.nk}, nw={args.nw}, "
         f"nOmega={args.nomega}, stage={args.vertex_stage}, backend={args.momentum_backend}"
+    )
+    print(
+        f"mixing: GW={args.gw_mixing:g}, vertex={args.vertex_mixing:g}; "
+        f"tol: GW={args.gw_tol:.1e}, vertex={args.vertex_tol:.1e}"
     )
     print(f"number of fillings: {len(fillings)}")
     print(f"anchor filling: {anchor:.8g} (requested {args.anchor_filling:g})")
