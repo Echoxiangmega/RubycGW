@@ -8,6 +8,11 @@ Equation convention used here:
     [Sigma_GW(k)]_ab = - int_Q G_ab(k+Q) W_ba(Q)
 
 with int_k = T/N_k sum_{k,n}, int_Q = T/N_k sum_{q,m}.
+
+The default ``momentum_backend='fft'`` evaluates the periodic two-dimensional
+momentum convolutions by FFT while retaining the Matsubara sums explicitly.
+``momentum_backend='direct'`` preserves the transparent reference loops for
+validation.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ class GWOptions:
     mu_tol: float = 1e-10
     mu_max_iter: int = 100
     verbose: bool = True
+    momentum_backend: str = "fft"  # "fft" or "direct"
 
 
 @dataclass
@@ -51,12 +57,33 @@ class NonInteractingResult:
     density: np.ndarray
 
 
+def _check_backend(backend: str) -> str:
+    backend = str(backend).lower()
+    if backend not in {"fft", "direct"}:
+        raise ValueError("momentum_backend must be 'fft' or 'direct'")
+    return backend
+
+
+def _reverse_fft_spectrum(field: np.ndarray, axes: tuple[int, int]) -> np.ndarray:
+    """Return the discrete spectrum F_hat(-r) on the chosen periodic axes.
+
+    For complex fields this is deliberately *not* a Hermitian conjugation:
+
+        F_hat(-r) = conj( FFT[conj(F)](r) ).
+
+    This is the factor needed for correlations of the form
+    ``sum_k A(k+q) B(k)`` without complex-conjugating B.
+    """
+    return np.conj(np.fft.fftn(np.conj(field), axes=axes))
+
+
 def build_g0_inverse(h0: np.ndarray, grid: MatsubaraGrid, mu: float) -> np.ndarray:
     eye = np.eye(NSUB, dtype=complex)
-    out = np.empty((grid.nf, grid.nk1, grid.nk2, NSUB, NSUB), dtype=complex)
-    for iw, omega in enumerate(grid.omega):
-        out[iw] = (1j * omega + mu) * eye - h0
-    return out
+    return (
+        (1j * grid.omega[:, None, None, None, None] + mu)
+        * eye[None, None, None, :, :]
+        - h0[None, :, :, :, :]
+    )
 
 
 def dyson_from_sigma(h0: np.ndarray, grid: MatsubaraGrid, mu: float,
@@ -84,8 +111,8 @@ def hartree_self_energy(density: np.ndarray, Vq0: np.ndarray) -> np.ndarray:
     return sigma
 
 
-def compute_polarization(G: np.ndarray, grid: MatsubaraGrid) -> np.ndarray:
-    """Compute P without allocating a full zero-padded G(k+Q) for every Q."""
+def compute_polarization_direct(G: np.ndarray, grid: MatsubaraGrid) -> np.ndarray:
+    """Reference explicit-q implementation of P(Q)."""
     P = np.zeros((grid.nb, grid.nk1, grid.nk2, NSUB, NSUB), dtype=complex)
     pref = grid.T / grid.nk
     for im, m in enumerate(grid.m_values):
@@ -103,22 +130,50 @@ def compute_polarization(G: np.ndarray, grid: MatsubaraGrid) -> np.ndarray:
     return P
 
 
+def compute_polarization_fft(G: np.ndarray, grid: MatsubaraGrid) -> np.ndarray:
+    """FFT implementation of P_ab(Q)=int_k G_ab(k+Q)G_ba(k).
+
+    Only the two periodic momentum axes are transformed.  The Matsubara sum is
+    kept explicit and uses exactly the same finite-frequency-window convention
+    as the direct implementation.
+    """
+    P = np.zeros((grid.nb, grid.nk1, grid.nk2, NSUB, NSUB), dtype=complex)
+    pref = grid.T / grid.nk
+    for im, m in enumerate(grid.m_values):
+        src, dst = frequency_shift_slices(grid.nf, int(m))
+        if src.stop == src.start:
+            continue
+
+        A = G[src]
+        B = np.swapaxes(G[dst], -1, -2)
+        Ahat = np.fft.fftn(A, axes=(1, 2))
+        Bhat_minus = _reverse_fft_spectrum(B, axes=(1, 2))
+        product = np.sum(Ahat * Bhat_minus, axis=0)
+        P[im] = pref * np.fft.ifftn(product, axes=(0, 1))
+    return P
+
+
+def compute_polarization(G: np.ndarray, grid: MatsubaraGrid,
+                         backend: str = "fft") -> np.ndarray:
+    backend = _check_backend(backend)
+    if backend == "fft":
+        return compute_polarization_fft(G, grid)
+    return compute_polarization_direct(G, grid)
+
+
 def compute_screened_interaction(P: np.ndarray, Vq: np.ndarray,
                                  grid: MatsubaraGrid) -> np.ndarray:
-    W = np.zeros_like(P)
+    """Solve [I - V(q)P(Q)] W(Q) = V(q) for all Q in one batched solve."""
     eye = np.eye(NSUB, dtype=complex)
-    for im in range(grid.nb):
-        for iq1 in range(grid.nk1):
-            for iq2 in range(grid.nk2):
-                V = Vq[iq1, iq2]
-                W[im, iq1, iq2] = np.linalg.solve(
-                    eye - V @ P[im, iq1, iq2], V
-                )
-    return W
+    Vbatch = Vq[None, :, :, :, :]
+    lhs = eye[None, None, None, :, :] - np.matmul(Vbatch, P)
+    rhs = np.broadcast_to(Vbatch, P.shape)
+    return np.linalg.solve(lhs, rhs)
 
 
-def compute_sigma_gw(G: np.ndarray, W: np.ndarray, grid: MatsubaraGrid) -> np.ndarray:
-    """Compute Sigma_GW using only the valid Matsubara window for each Q."""
+def compute_sigma_gw_direct(G: np.ndarray, W: np.ndarray,
+                            grid: MatsubaraGrid) -> np.ndarray:
+    """Reference explicit-q implementation of Sigma_GW."""
     sigma = np.zeros_like(G)
     pref = grid.T / grid.nk
     for im, m in enumerate(grid.m_values):
@@ -131,6 +186,33 @@ def compute_sigma_gw(G: np.ndarray, W: np.ndarray, grid: MatsubaraGrid) -> np.nd
                 Gq = roll_spatial(Gsrc, iq1, iq2)
                 sigma[dst] -= pref * Gq * W[im, iq1, iq2].T[None, None, None, :, :]
     return sigma
+
+
+def compute_sigma_gw_fft(G: np.ndarray, W: np.ndarray,
+                          grid: MatsubaraGrid) -> np.ndarray:
+    """FFT implementation of Sigma_GW(k)=-int_Q G(k+Q)W(Q)^T."""
+    sigma = np.zeros_like(G)
+    pref = grid.T / grid.nk
+    for im, m in enumerate(grid.m_values):
+        src, dst = frequency_shift_slices(grid.nf, int(m))
+        if src.stop == src.start:
+            continue
+
+        A = G[src]
+        B = np.swapaxes(W[im], -1, -2)[None, :, :, :, :]
+        Ahat = np.fft.fftn(A, axes=(1, 2))
+        Bhat_minus = _reverse_fft_spectrum(B, axes=(1, 2))
+        conv = np.fft.ifftn(Ahat * Bhat_minus, axes=(1, 2))
+        sigma[dst] -= pref * conv
+    return sigma
+
+
+def compute_sigma_gw(G: np.ndarray, W: np.ndarray, grid: MatsubaraGrid,
+                     backend: str = "fft") -> np.ndarray:
+    backend = _check_backend(backend)
+    if backend == "fft":
+        return compute_sigma_gw_fft(G, W, grid)
+    return compute_sigma_gw_direct(G, W, grid)
 
 
 def _solve_mu(h0, sigma_h, sigma_gw, grid, target, mu0, tol, max_iter):
@@ -204,6 +286,7 @@ def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
     the equations are always iterated to the requested tolerance for the new
     parameters.
     """
+    backend = _check_backend(opts.momentum_backend)
     kpts = grid.kmesh()
     qpts = grid.qmesh()
     h0 = build_h0(kpts, params)
@@ -227,9 +310,9 @@ def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
     for it in range(1, opts.max_iter + 1):
         density = density_from_G(G, grid)
         sigma_h_new = hartree_self_energy(density, Vq0)
-        P = compute_polarization(G, grid)
+        P = compute_polarization(G, grid, backend=backend)
         W = compute_screened_interaction(P, Vq, grid)
-        sigma_gw_new = compute_sigma_gw(G, W, grid)
+        sigma_gw_new = compute_sigma_gw(G, W, grid, backend=backend)
 
         sigma_h = (1.0 - opts.mixing) * sigma_h + opts.mixing * sigma_h_new
         sigma_gw_mixed = (1.0 - opts.mixing) * sigma_gw + opts.mixing * sigma_gw_new
@@ -254,7 +337,7 @@ def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
         if opts.verbose:
             print(
                 f"GW iter {it:4d}: err={err:.3e}, mu={mu:.10f}, "
-                f"n={np.sum(density):.10f}"
+                f"n={np.sum(density):.10f}, backend={backend}"
             )
         if err < opts.tol:
             converged = True
@@ -262,9 +345,9 @@ def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
 
     density = density_from_G(G, grid)
     sigma_h = hartree_self_energy(density, Vq0)
-    P = compute_polarization(G, grid)
+    P = compute_polarization(G, grid, backend=backend)
     W = compute_screened_interaction(P, Vq, grid)
-    sigma_gw = compute_sigma_gw(G, W, grid)
+    sigma_gw = compute_sigma_gw(G, W, grid, backend=backend)
 
     return GWResult(
         G=G, W=W, P=P, Sigma_H=sigma_h, Sigma_GW=sigma_gw,
