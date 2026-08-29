@@ -46,21 +46,35 @@ MatsubaraGrid(nk1=4, nk2=4, nw=16, nOmega=8, T=0.05)
 F_shifted[dst] = F[src]
 ```
 
-对应 `omega -> omega + Omega_m` 的有效 Matsubara window。hot loop 使用这个函数避免为每个 Q 分配完整 zero-padded array。
+对应 `omega -> omega + Omega_m` 的有效 Matsubara window。
 
 ### `roll_spatial(field, dq1, dq2)`
 
-只对两个 momentum axes 做 periodic `k -> k+q` shift。
+只对两个 momentum axes 做 periodic `k -> k+q` shift。direct reference backend 使用它。
 
 ### `shift_fermion_field(field, dq1, dq2, m)`
 
-保留原公开接口，返回完整 shape 的 `F(k+Q)`；超出 fermion box 的 frequency 设为零。主要用于通用调用和测试，性能关键代码现在直接使用前两个 allocation-light helper。
+保留原公开接口，返回完整 shape 的 `F(k+Q)`；超出 fermion box 的 frequency 设为零。
 
 ## `rubycgw.gw`
 
 ### `GWOptions`
 
-主要参数：`mu`, `target_filling`, `max_iter`, `tol`, `mixing`, `mu_tol`, `mu_max_iter`, `verbose`。
+主要参数：
+
+```text
+mu
+target_filling
+max_iter
+tol
+mixing
+mu_tol
+mu_max_iter
+verbose
+momentum_backend   # "fft" (default) or "direct"
+```
+
+`momentum_backend="fft"` 只对二维 periodic momentum convolution 使用 FFT；Matsubara sums 和 frequency cutoff convention 不变。
 
 ### `NonInteractingResult`
 
@@ -78,17 +92,33 @@ F_shifted[dst] = F[src]
 
 返回 length-6 orbital density。
 
-### `compute_polarization(G, grid)`
+### `compute_polarization(G, grid, backend="fft")`
 
-返回 `(Nb,Nk1,Nk2,6,6)` 的 `P(Q)`。当前实现只对每个 m 的有效 Matsubara slice 做 contraction。
+返回 `(Nb,Nk1,Nk2,6,6)` 的 `P(Q)`。
+
+另外保留：
+
+```python
+compute_polarization_direct(G, grid)
+compute_polarization_fft(G, grid)
+```
+
+用于回归。
 
 ### `compute_screened_interaction(P, Vq, grid)`
 
-返回同 shape 的 `W(Q)`。
+返回同 shape 的 `W(Q)`。当前使用 batch `np.linalg.solve` 一次处理全部 Q。
 
-### `compute_sigma_gw(G, W, grid)`
+### `compute_sigma_gw(G, W, grid, backend="fft")`
 
-返回 `(Nf,Nk1,Nk2,6,6)` 的 `Sigma_GW`，同样只处理有效 frequency window。
+返回 `(Nf,Nk1,Nk2,6,6)` 的 `Sigma_GW`。
+
+另外保留：
+
+```python
+compute_sigma_gw_direct(G, W, grid)
+compute_sigma_gw_fft(G, W, grid)
+```
 
 ### `solve_noninteracting(params, grid, mu=0.0, target_filling=None, ...)`
 
@@ -98,31 +128,48 @@ F_shifted[dst] = F[src]
 
 执行 self-consistent GW。`initial` 可以传上一个参数点的 `GWResult`：若 fermionic array shape 相同，则旧的 `Sigma_H`, `Sigma_GW`, `mu` 作为新点初值；若 shape 不同自动忽略。
 
-这适合 `V/filling/nOmega` 等 continuation scan。warm start 不改变新点方程，也不会跳过 convergence test。
-
 ## `rubycgw.cgw`
 
 ### `VertexOptions`
 
-字段：`max_iter`, `tol`, `mixing`, `include_hartree`, `include_mt`, `include_al`, `verbose`。
+字段：
+
+```text
+max_iter
+tol
+mixing
+include_hartree
+include_mt
+include_al
+verbose
+momentum_backend   # "fft" (default) or "direct"
+```
 
 ### `VertexResult`
 
 字段：`Gamma`, `Gamma_H`, `Gamma_MT`, `Gamma_AL1`, `Gamma_AL2`, `converged`, `iterations`。
 
-### `gamma_h_q0`, `gamma_mt_q0`, `gamma_al_q0`
+### `gamma_h_q0(G, Gamma, Vq0, grid)`
 
-分别计算 q=(0,0) Hartree、MT、AL1/AL2 correction。保留为独立诊断 API。
+计算 q=(0,0) Hartree correction。
+
+### `gamma_mt_q0(G, W, Gamma, grid, backend="fft")`
+
+计算 MT correction，可显式选择 `fft/direct`。
+
+### `gamma_al_q0(G, W, Gamma, grid, backend="fft")`
+
+返回 `(AL1, AL2)`，同样支持 `fft/direct`。
 
 ### `solve_vertex_q0(G, W, Vq0, K, grid, opts, initial_gamma=None)`
 
 解 q=(0,0) vertex equation。`initial_gamma` 可传：
 
 - shape `(Nf,Nk1,Nk2,6,6)` 的前一参数点 full vertex；
-- 当前点已经收敛的 MT-only vertex，用来 warm-start full MT+AL solve；
+- 当前点已经收敛的 MT-only vertex；
 - `6x6` matrix（会 broadcast）。
 
-solver 内部每轮只形成一次 `X=G Gamma G`，然后 Hartree/MT/AL 共用同一个 internal-Q loop。
+FFT backend 对 MT 与 AL 内部的所有二维 momentum convolutions批量处理；direct backend 保留显式 Q-loop。
 
 ## `rubycgw.susceptibility`
 
@@ -146,7 +193,7 @@ chi_eta(G, K, grid, Gamma=Gamma)  # cGW
 
 ### `run_ruby_cgw.py`
 
-完整 staged reference run。full cGW 自动从同一点已经收敛的 MT vertex 开始。
+完整 staged reference run。由于 `GWOptions` 和 `VertexOptions` 默认 `momentum_backend="fft"`，主程序现在默认使用 FFT backend。
 
 ### `convergence_scan.py`
 
@@ -160,4 +207,4 @@ chi_eta(G, K, grid, Gamma=Gamma)  # cGW
 --skip-hartree
 ```
 
-默认开启 compatible continuation，并把 `bare/GW/MT/full` 各阶段 wall time 写入 CSV。
+默认计算也使用 FFT backend，并把 `bare/GW/MT/full` 各阶段 wall time 写入 CSV。若需要严格 direct-vs-FFT debugging，可在 Python API 中把两个 Options 的 `momentum_backend` 都设为 `"direct"`。
