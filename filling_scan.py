@@ -8,19 +8,13 @@ The plotted quantities are
 
 where chi is the selected normal-state susceptibility (GW+MT by default, or
 full cGW when requested).  These r values are the curvature of the effective
-action written in terms of the physical loop-current order parameter eta.  They
-are not the auxiliary-field HS coefficient 3V-(V^2/2)chi0.
+action written in terms of the physical loop-current order parameter eta.
 
-For strong coupling the default scan is deliberately continuation based:
-
-1. choose the requested filling closest to ``--anchor-filling`` (default 3),
-2. obtain a GW seed there by ramping V from weak coupling to the target V,
-3. solve the target-V anchor point,
-4. continue from the anchor independently toward lower and higher fillings.
-
-If GW does not converge at a filling, the eta vertex is not evaluated there;
-response quantities are stored as NaN instead of reporting a divergent fixed-
-point iterate as a physical susceptibility.
+For strong coupling the default scan is continuation based.  It starts near
+half filling, ramps the interaction to the target V, and then scans filling in
+two branches.  GW uses adaptive linear-mixing retries: the fast default mixing
+is attempted first, then progressively smaller values are tried from the same
+last converged seed if necessary.
 """
 
 from __future__ import annotations
@@ -107,8 +101,7 @@ class _ProgressBar:
         completed = min(max(int(completed), 0), self.total)
         elapsed = time.perf_counter() - self.start
         fraction = completed / self.total
-        nfill = int(round(self.width * fraction))
-        nfill = min(max(nfill, 0), self.width)
+        nfill = min(max(int(round(self.width * fraction)), 0), self.width)
         bar = "#" * nfill + "-" * (self.width - nfill)
         eta = elapsed * (self.total - completed) / completed if completed > 0 else float("nan")
         filling_text = "" if filling is None else f" | filling={filling:.4f}"
@@ -141,16 +134,62 @@ def _vertex_options(args, include_al: bool) -> VertexOptions:
     )
 
 
-def _gw_options(args, filling: float, mu: float) -> GWOptions:
+def _gw_options(args, filling: float, mu: float, mixing: float) -> GWOptions:
     return GWOptions(
         mu=float(mu),
         target_filling=float(filling),
         max_iter=args.gw_max_iter,
         tol=args.gw_tol,
-        mixing=args.gw_mixing,
+        mixing=float(mixing),
         verbose=args.verbose_iterations,
         momentum_backend=args.momentum_backend,
     )
+
+
+def _gw_mixing_schedule(args) -> list[float]:
+    """Primary GW mixing followed by unique fallback values."""
+    values = [float(args.gw_mixing)] + [float(x) for x in args.gw_retry_mixings]
+    out: list[float] = []
+    for value in values:
+        if not (0.0 < value <= 1.0):
+            raise ValueError("GW mixing values must lie in (0, 1].")
+        if not any(np.isclose(value, old) for old in out):
+            out.append(value)
+    return out
+
+
+def _solve_gw_adaptive(args, params, grid, filling: float, mu_guess: float, initial):
+    """Try GW from the same seed with progressively safer mixing values."""
+    attempts = []
+    total_time = 0.0
+    last = None
+    schedule = _gw_mixing_schedule(args)
+
+    for i, mixing in enumerate(schedule, start=1):
+        t0 = time.perf_counter()
+        gw = solve_gw(
+            params,
+            grid,
+            _gw_options(args, filling, mu_guess, mixing),
+            initial=initial,
+        )
+        runtime = time.perf_counter() - t0
+        total_time += runtime
+        last = gw
+        attempts.append({
+            "attempt": i,
+            "mixing": float(mixing),
+            "converged": bool(gw.converged),
+            "iterations": int(gw.iterations),
+            "final_error": float(gw.final_error),
+            "mu": float(gw.mu),
+            "actual_filling": float(np.sum(gw.density)),
+            "runtime_s": float(runtime),
+        })
+        if gw.converged:
+            break
+
+    return last, attempts, total_time
 
 
 def _selected_stage_name(args) -> str:
@@ -174,6 +213,9 @@ def _base_row(args, filling: float, branch: str) -> dict:
         "actual_filling": np.nan,
         "GW_converged": False,
         "GW_iterations": np.nan,
+        "GW_final_error": np.nan,
+        "GW_mixing_used": np.nan,
+        "GW_attempts": np.nan,
         "selected_plus_converged": False,
         "selected_minus_converged": False,
         "selected_plus_iterations": np.nan,
@@ -217,13 +259,17 @@ def _v_ramp_schedule(target_v: float, explicit_values: list[float] | None) -> li
         if not np.isclose(values[-1], target_v):
             values.append(target_v)
         return values
-
     if np.isclose(target_v, 0.0):
         return [0.0]
 
     sign = 1.0 if target_v > 0 else -1.0
     target_abs = abs(target_v)
-    base = [0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 2.5]
+    # Denser steps around the region where the V=3 half-filling benchmark first
+    # became difficult, while keeping larger steps once a stable branch exists.
+    base = [
+        0.1, 0.25, 0.5, 0.6, 0.7, 0.75, 0.9, 1.0,
+        1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75,
+    ]
     values = [sign * v for v in base if v < target_abs - 1e-12]
     values.append(target_v)
     return values
@@ -239,56 +285,57 @@ def _write_v_ramp_csv(rows: list[dict], path: Path) -> None:
 
 
 def _prepare_anchor_gw_seed(args, grid, anchor_filling: float, outdir: Path):
-    """Ramp V at the anchor filling and return a converged target-V GW seed."""
+    """Ramp V at the anchor filling with adaptive GW mixing retries."""
     if args.no_v_ramp or args.no_continuation:
         return None, True
 
     schedule = _v_ramp_schedule(args.V, args.v_ramp_values)
     params_target = RubyParameters(ti=args.ti, t1=args.t1, t2=args.t2, V=args.V)
     bare = solve_noninteracting(
-        params_target,
-        grid,
-        mu=args.mu0,
-        target_filling=float(anchor_filling),
+        params_target, grid, mu=args.mu0, target_filling=float(anchor_filling)
     )
 
+    mixing_schedule = _gw_mixing_schedule(args)
     print("\nPreparing anchor GW seed by interaction continuation")
     print(f"anchor filling = {anchor_filling:.8g}")
     print("V ramp = " + " -> ".join(f"{v:g}" for v in schedule))
+    print("GW mixing attempts = " + " -> ".join(f"{x:g}" for x in mixing_schedule))
 
     previous = None
     ramp_rows: list[dict] = []
-    for i, value in enumerate(schedule, start=1):
+    for istep, value in enumerate(schedule, start=1):
         params_v = RubyParameters(ti=args.ti, t1=args.t1, t2=args.t2, V=float(value))
         mu_guess = bare.mu if previous is None else previous.mu
-        t0 = time.perf_counter()
-        gw = solve_gw(
-            params_v,
-            grid,
-            _gw_options(args, anchor_filling, mu_guess),
-            initial=previous,
+        gw, attempts, _ = _solve_gw_adaptive(
+            args, params_v, grid, anchor_filling, mu_guess, previous
         )
-        runtime = time.perf_counter() - t0
-        ramp_rows.append({
-            "step": i,
-            "V": float(value),
-            "filling": float(anchor_filling),
-            "converged": bool(gw.converged),
-            "iterations": int(gw.iterations),
-            "mu": float(gw.mu),
-            "actual_filling": float(np.sum(gw.density)),
-            "runtime_s": float(runtime),
-        })
-        print(
-            f"  [V-ramp {i:2d}/{len(schedule):2d}] V={value:7.4f}  "
-            f"converged={str(gw.converged):5s}  it={gw.iterations:3d}  "
-            f"mu={gw.mu: .8f}  time={runtime:.1f}s"
-        )
-        _write_v_ramp_csv(ramp_rows, outdir / "v_ramp.csv")
 
-        if not gw.converged:
+        for attempt in attempts:
+            ramp_rows.append({
+                "step": istep,
+                "attempt": attempt["attempt"],
+                "V": float(value),
+                "filling": float(anchor_filling),
+                "mixing": attempt["mixing"],
+                "converged": attempt["converged"],
+                "iterations": attempt["iterations"],
+                "final_error": attempt["final_error"],
+                "mu": attempt["mu"],
+                "actual_filling": attempt["actual_filling"],
+                "runtime_s": attempt["runtime_s"],
+            })
             print(
-                f"\nV-ramp stopped: GW failed to converge at V={value:g}. "
+                f"  [V-ramp {istep:2d}/{len(schedule):2d}, try {attempt['attempt']}/{len(mixing_schedule)}] "
+                f"V={value:7.4f}  mix={attempt['mixing']:.3f}  "
+                f"converged={str(attempt['converged']):5s}  it={attempt['iterations']:3d}  "
+                f"err={attempt['final_error']:.3e}  mu={attempt['mu']: .8f}  "
+                f"time={attempt['runtime_s']:.1f}s"
+            )
+            _write_v_ramp_csv(ramp_rows, outdir / "v_ramp.csv")
+
+        if gw is None or not gw.converged:
+            print(
+                f"\nV-ramp stopped: all GW mixing attempts failed at V={value:g}. "
                 "The filling scan will not cold-start at the target interaction."
             )
             return None, False
@@ -303,15 +350,10 @@ def _run_point(args, grid, params, filling: float, state: dict | None, branch: s
     row = _base_row(args, filling, branch)
     _, _, k_plus, k_minus = eta_vertices()
 
-    # Bare reference changes with filling.  The previous mu0 is only a scalar
-    # seed for the bisection and does not alter the target-filling equation.
     t0 = time.perf_counter()
     mu0_guess = previous_state.get("mu0", args.mu0)
     bare = solve_noninteracting(
-        params,
-        grid,
-        mu=float(mu0_guess),
-        target_filling=float(filling),
+        params, grid, mu=float(mu0_guess), target_filling=float(filling)
     )
     chi_plus_g0 = chi_eta(bare.G0, k_plus, grid)
     chi_minus_g0 = chi_eta(bare.G0, k_minus, grid)
@@ -320,36 +362,39 @@ def _run_point(args, grid, params, filling: float, state: dict | None, branch: s
     row["time_bare_s"] = float(time_bare)
     _store_pair(row, "G0G0", chi_plus_g0, chi_minus_g0)
 
-    # Interacting GW background.
-    t0 = time.perf_counter()
-    gw = solve_gw(
-        params,
-        grid,
-        _gw_options(args, filling, bare.mu),
-        initial=None if args.no_continuation else previous_state.get("gw"),
+    initial_gw = None if args.no_continuation else previous_state.get("gw")
+    gw, attempts, time_gw = _solve_gw_adaptive(
+        args, params, grid, filling, bare.mu, initial_gw
     )
-    time_gw = time.perf_counter() - t0
+    used = attempts[-1]
     row.update({
         "mu_GW": float(gw.mu),
         "actual_filling": float(np.sum(gw.density)),
         "GW_converged": bool(gw.converged),
         "GW_iterations": int(gw.iterations),
+        "GW_final_error": float(gw.final_error),
+        "GW_mixing_used": float(used["mixing"]),
+        "GW_attempts": int(len(attempts)),
         "time_GW_s": float(time_gw),
     })
+
+    if len(attempts) > 1:
+        for attempt in attempts:
+            print(
+                f"  GW retry filling={filling:.6g}: try {attempt['attempt']}/{len(_gw_mixing_schedule(args))} "
+                f"mix={attempt['mixing']:.3f} converged={attempt['converged']} "
+                f"it={attempt['iterations']} err={attempt['final_error']:.3e}"
+            )
 
     new_state = dict(previous_state)
     new_state["mu0"] = bare.mu
 
-    # A nonconverged GW fixed point is not a valid background for a covariant
-    # vertex calculation.  Do not propagate gigantic fixed-point iterates into
-    # chi; keep response quantities NaN and retain the last converged state as
-    # the seed for the next filling.
     if not gw.converged:
         row["vertex_skipped_because_GW_failed"] = True
         row["runtime_s"] = float(time.perf_counter() - point_start)
         print(
-            f"filling={filling:6.3f}  GW FAILED after {gw.iterations:3d} iterations; "
-            f"vertex skipped  time={row['runtime_s']:.1f}s"
+            f"filling={filling:6.3f}  GW FAILED after {len(attempts)} mixing attempt(s); "
+            f"last err={gw.final_error:.3e}; vertex skipped  time={row['runtime_s']:.1f}s"
         )
         return row, new_state
 
@@ -398,12 +443,10 @@ def _run_point(args, grid, params, filling: float, state: dict | None, branch: s
             init_p = None if prev_fp is None else prev_fp.Gamma
             init_m = None if prev_fm is None else prev_fm.Gamma
         vp_full = solve_vertex_q0(
-            gw.G, gw.W, vq0, k_plus, grid, full_opts,
-            initial_gamma=init_p,
+            gw.G, gw.W, vq0, k_plus, grid, full_opts, initial_gamma=init_p
         )
         vm_full = solve_vertex_q0(
-            gw.G, gw.W, vq0, k_minus, grid, full_opts,
-            initial_gamma=init_m,
+            gw.G, gw.W, vq0, k_minus, grid, full_opts, initial_gamma=init_m
         )
         time_full = time.perf_counter() - t0
         if vp_full.converged:
@@ -454,7 +497,7 @@ def _run_point(args, grid, params, filling: float, state: dict | None, branch: s
         f"chi_opp={_format_number(row['selected_opposite_re'])}  "
         f"chi_same={_format_number(row['selected_same_re'])}  "
         f"r_opp={_format_number(rp_re)}  r_same={_format_number(rm_re)}  "
-        f"GW it={gw.iterations:3d}  "
+        f"GW it={gw.iterations:3d} mix={row['GW_mixing_used']:.3f} err={gw.final_error:.2e}  "
         f"vertex it=({row['selected_plus_iterations']},{row['selected_minus_iterations']})  "
         f"time={row['runtime_s']:.1f}s"
     )
@@ -551,33 +594,25 @@ def _parse_args():
     p.add_argument("--filling-min", type=float, default=0.05)
     p.add_argument("--filling-max", type=float, default=5.95)
     p.add_argument("--num-fillings", type=int, default=241)
-    p.add_argument(
-        "--fillings", nargs="+", type=float, default=None,
-        help="Explicit filling list; overrides min/max/num-fillings.",
-    )
-    p.add_argument(
-        "--anchor-filling", type=float, default=3.0,
-        help="Start at the requested filling closest to this value, then scan downward/upward independently.",
-    )
+    p.add_argument("--fillings", nargs="+", type=float, default=None)
+    p.add_argument("--anchor-filling", type=float, default=3.0)
 
     p.add_argument("--vertex-stage", choices=["mt", "full", "both"], default="mt")
     p.add_argument("--momentum-backend", choices=["fft", "direct"], default="fft")
     p.add_argument("--no-continuation", action="store_true")
-    p.add_argument("--no-v-ramp", action="store_true", help="Cold-start the anchor directly at target V.")
-    p.add_argument(
-        "--v-ramp-values", nargs="+", type=float, default=None,
-        help="Explicit interaction continuation values. Target --V is appended if needed.",
-    )
+    p.add_argument("--no-v-ramp", action="store_true")
+    p.add_argument("--v-ramp-values", nargs="+", type=float, default=None)
     p.add_argument("--skip-hartree", action="store_true")
     p.add_argument("--fail-fast", action="store_true")
     p.add_argument("--no-progress", action="store_true")
 
-    # Continuation provides a good nearby seed, so a moderate mixing=0.20 is
-    # much faster than the previous over-conservative 0.08/0.10 defaults while
-    # retaining the same 1e-8 convergence tolerance.
     p.add_argument("--gw-max-iter", type=int, default=300)
     p.add_argument("--gw-tol", type=float, default=1e-8)
     p.add_argument("--gw-mixing", type=float, default=0.20)
+    p.add_argument(
+        "--gw-retry-mixings", nargs="+", type=float, default=[0.15, 0.10, 0.05],
+        help="Fallback GW linear-mixing values tried from the same converged seed.",
+    )
     p.add_argument("--vertex-max-iter", type=int, default=300)
     p.add_argument("--vertex-tol", type=float, default=1e-8)
     p.add_argument("--vertex-mixing", type=float, default=0.20)
@@ -609,11 +644,7 @@ def main():
 
     params = RubyParameters(ti=args.ti, t1=args.t1, t2=args.t2, V=args.V)
     grid = MatsubaraGrid(
-        nk1=args.nk,
-        nk2=args.nk,
-        nw=args.nw,
-        nOmega=args.nomega,
-        T=args.T,
+        nk1=args.nk, nk2=args.nk, nw=args.nw, nOmega=args.nomega, T=args.T
     )
 
     anchor_index = int(np.argmin(np.abs(fillings - args.anchor_filling)))
@@ -621,6 +652,7 @@ def main():
 
     settings = dict(vars(args))
     settings["resolved_anchor_filling"] = anchor
+    settings["resolved_gw_mixing_schedule"] = _gw_mixing_schedule(args)
     with (outdir / "settings.json").open("w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
 
@@ -632,9 +664,10 @@ def main():
         f"nOmega={args.nomega}, stage={args.vertex_stage}, backend={args.momentum_backend}"
     )
     print(
-        f"mixing: GW={args.gw_mixing:g}, vertex={args.vertex_mixing:g}; "
-        f"tol: GW={args.gw_tol:.1e}, vertex={args.vertex_tol:.1e}"
+        "GW mixing attempts: " + " -> ".join(f"{x:g}" for x in _gw_mixing_schedule(args))
+        + f"; vertex mixing={args.vertex_mixing:g}"
     )
+    print(f"tol: GW={args.gw_tol:.1e}, vertex={args.vertex_tol:.1e}")
     print(f"number of fillings: {len(fillings)}")
     print(f"anchor filling: {anchor:.8g} (requested {args.anchor_filling:g})")
     print("scan order: anchor -> lower fillings; anchor -> higher fillings")
@@ -653,7 +686,6 @@ def main():
     completed = 0
     progress.update(0)
 
-    # Anchor point.  If V-ramp was disabled, this is a deliberate cold start.
     progress.clear()
     try:
         anchor_row, anchor_state = _run_point(args, grid, params, anchor, anchor_seed, "anchor")
@@ -670,11 +702,8 @@ def main():
     _write_csv(rows, outdir / "filling_scan.csv")
     progress.update(completed, anchor)
 
-    # The two branches must start from the same anchor solution rather than
-    # contaminating the upper branch with the final lower-filling state.
     lower_state = dict(anchor_state)
     upper_state = dict(anchor_state)
-
     lower_fillings = fillings[:anchor_index][::-1]
     upper_fillings = fillings[anchor_index + 1:]
 
