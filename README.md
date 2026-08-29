@@ -13,11 +13,13 @@ The maintained documentation lives in [`docs/`](docs/README.md). In particular:
 - [`docs/cgw_theory.md`](docs/cgw_theory.md): Hartree, MT, AL1, AL2 and the cGW vertex equation;
 - [`docs/api_reference.md`](docs/api_reference.md): modules, classes, functions, inputs/outputs and array shapes;
 - [`docs/numerics_and_validation.md`](docs/numerics_and_validation.md): convergence and validation checks;
-- [`docs/tutorial.md`](docs/tutorial.md): complete tutorial and source for the PDF manual.
+- [`docs/convergence_scan.md`](docs/convergence_scan.md): automated `nw`, `nOmega`, and `nk` scans;
+- [`docs/tutorial.md`](docs/tutorial.md): complete theory tutorial and main PDF source.
 
 The GitHub Actions workflow `build tutorial PDF` automatically regenerates
-`RubycGW_Tutorial.pdf` from `docs/tutorial.md` whenever relevant code or
-documentation changes, and uploads it as the `RubycGW-Tutorial-PDF` artifact.
+`RubycGW_Tutorial.pdf` from the maintained tutorial Markdown files whenever
+relevant code or documentation changes, and uploads it as the
+`RubycGW-Tutorial-PDF` artifact.
 
 ## Conventions
 
@@ -71,6 +73,7 @@ checks pass.
 - `rubycgw/susceptibility.py`: `G0G0`, `GG`, and full-vertex eta response.
 - `rubycgw/cgw.py`: q=0 Hartree, MT, AL1, AL2 vertex corrections.
 - `run_ruby_cgw.py`: staged `G0G0 -> GG -> GW+MT -> full cGW` reference run.
+- `convergence_scan.py`: automated cutoff convergence scans with CSV/PNG output.
 - `tests/`: convention, filling, Hermiticity and V=0 regression checks.
 
 ## Run
@@ -79,6 +82,20 @@ checks pass.
 python -m pip install -r requirements.txt
 python -m pytest -q
 python run_ruby_cgw.py
+```
+
+For an automated convergence scan:
+
+```bash
+python convergence_scan.py --scan all
+```
+
+or scan one cutoff at a time:
+
+```bash
+python convergence_scan.py --scan nw
+python convergence_scan.py --scan nomega
+python convergence_scan.py --scan nk
 ```
 
 Start with the tiny defaults. Then perform convergence tests in this order:
