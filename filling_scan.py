@@ -53,6 +53,67 @@ def _parts(z: complex) -> tuple[float, float]:
     return float(z.real), float(z.imag)
 
 
+def _format_duration(seconds: float) -> str:
+    if not np.isfinite(seconds) or seconds < 0:
+        return "--"
+    seconds = int(round(seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours:d}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes:d}m{secs:02d}s"
+    return f"{secs:d}s"
+
+
+class _ProgressBar:
+    """Dependency-free single-line terminal progress bar with elapsed time/ETA."""
+
+    def __init__(self, total: int, enabled: bool = True, width: int = 28):
+        self.total = max(int(total), 1)
+        self.enabled = bool(enabled)
+        self.width = int(width)
+        self.start = time.perf_counter()
+        self.last_len = 0
+
+    def clear(self) -> None:
+        if not self.enabled or self.last_len == 0:
+            return
+        print("\r" + " " * self.last_len + "\r", end="", flush=True)
+        self.last_len = 0
+
+    def update(self, completed: int, filling: float | None = None) -> None:
+        if not self.enabled:
+            return
+        completed = min(max(int(completed), 0), self.total)
+        elapsed = time.perf_counter() - self.start
+        fraction = completed / self.total
+        nfill = int(round(self.width * fraction))
+        nfill = min(max(nfill, 0), self.width)
+        bar = "#" * nfill + "-" * (self.width - nfill)
+
+        if completed > 0:
+            eta = elapsed * (self.total - completed) / completed
+        else:
+            eta = float("nan")
+
+        filling_text = "" if filling is None else f" | filling={filling:.4f}"
+        text = (
+            f"[{bar}] {completed:3d}/{self.total:<3d} "
+            f"{100.0 * fraction:6.2f}% | elapsed {_format_duration(elapsed)} "
+            f"| ETA {_format_duration(eta)}{filling_text}"
+        )
+        padding = max(self.last_len - len(text), 0)
+        print("\r" + text + " " * padding, end="", flush=True)
+        self.last_len = len(text)
+
+    def finish(self) -> None:
+        if not self.enabled:
+            return
+        print()
+        self.last_len = 0
+
+
 def _vertex_options(args, include_al: bool) -> VertexOptions:
     return VertexOptions(
         max_iter=args.vertex_max_iter,
@@ -341,6 +402,10 @@ def _parse_args():
     p.add_argument("--no-continuation", action="store_true")
     p.add_argument("--skip-hartree", action="store_true")
     p.add_argument("--fail-fast", action="store_true")
+    p.add_argument(
+        "--no-progress", action="store_true",
+        help="Disable the single-line progress bar and ETA display.",
+    )
 
     # V=3 is much stronger than the convergence examples around V=0.1, so the
     # default mixing is deliberately conservative.
@@ -388,6 +453,7 @@ def main():
     rows: list[dict] = []
     state: dict | None = None
     total_start = time.perf_counter()
+    progress = _ProgressBar(len(fillings), enabled=not args.no_progress)
 
     print("=" * 78)
     print("RubycGW filling scan")
@@ -399,8 +465,12 @@ def main():
     print("r_eff is defined as 1/chi for the physical eta order parameter.")
     print("+ = physical opposite, - = physical same")
     print("=" * 78)
+    progress.update(0)
 
-    for filling in fillings:
+    for ipoint, filling in enumerate(fillings, start=1):
+        # Remove the dynamic bar before printing the detailed result/warnings for
+        # this point, then redraw it after the point has been written to disk.
+        progress.clear()
         try:
             row, new_state = _run_point(args, grid, params, float(filling), state)
             rows.append(row)
@@ -409,6 +479,7 @@ def main():
         except Exception as exc:
             print(f"ERROR at filling={filling:.6g}: {exc}")
             if args.fail_fast:
+                progress.finish()
                 raise
             rows.append({
                 "filling": float(filling),
@@ -463,7 +534,9 @@ def main():
             })
 
         _write_csv(rows, outdir / "filling_scan.csv")
+        progress.update(ipoint, float(filling))
 
+    progress.finish()
     stage_label = "GW+MT" if args.vertex_stage == "mt" else "full cGW"
     _plot(rows, outdir, args.V, stage_label)
 
