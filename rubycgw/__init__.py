@@ -11,10 +11,22 @@ from .gw import (
 )
 from .cgw import VertexOptions, VertexResult, solve_vertex_q0
 from .susceptibility import chi_eta, channel_summary
+from .supercell import (
+    NSUP,
+    build_supercell_h0,
+    build_supercell_interaction,
+    charge_order_parameter,
+    period3_complex_mode,
+    period3_real_pattern,
+)
+from .supercell_gw import solve_matrix_gw, solve_supercell_gw
 
 __all__ = [
     "RubyParameters", "MatsubaraGrid", "GWOptions", "GWResult",
     "NonInteractingResult", "VertexOptions", "VertexResult", "build_h0",
     "build_interaction", "eta_vertices", "solve_gw", "solve_noninteracting",
     "solve_vertex_q0", "chi_eta", "channel_summary",
+    "NSUP", "build_supercell_h0", "build_supercell_interaction",
+    "charge_order_parameter", "period3_complex_mode", "period3_real_pattern",
+    "solve_matrix_gw", "solve_supercell_gw",
 ]
