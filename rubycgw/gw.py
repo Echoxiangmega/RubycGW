@@ -13,6 +13,10 @@ The default ``momentum_backend='fft'`` evaluates the periodic two-dimensional
 momentum convolutions by FFT while retaining the Matsubara sums explicitly.
 ``momentum_backend='direct'`` preserves the transparent reference loops for
 validation.
+
+For fixed-filling calculations, densities use an analytic reference-Green-
+function tail subtraction.  This removes the low/high-filling pathology of a
+bare finite Matsubara sum with only a constant +1/2 tail correction.
 """
 
 from __future__ import annotations
@@ -77,6 +81,19 @@ def _reverse_fft_spectrum(field: np.ndarray, axes: tuple[int, int]) -> np.ndarra
     return np.conj(np.fft.fftn(np.conj(field), axes=axes))
 
 
+def _fermi(e_minus_mu: np.ndarray, T: float) -> np.ndarray:
+    """Numerically stable Fermi function f(e-mu)."""
+    x = np.asarray(e_minus_mu, dtype=float) / float(T)
+    out = np.empty_like(x)
+    high = x > 40.0
+    low = x < -40.0
+    mid = ~(high | low)
+    out[high] = 0.0
+    out[low] = 1.0
+    out[mid] = 1.0 / (np.exp(x[mid]) + 1.0)
+    return out
+
+
 def build_g0_inverse(h0: np.ndarray, grid: MatsubaraGrid, mu: float) -> np.ndarray:
     eye = np.eye(NSUB, dtype=complex)
     return (
@@ -94,15 +111,63 @@ def dyson_from_sigma(h0: np.ndarray, grid: MatsubaraGrid, mu: float,
     return np.linalg.inv(invg)
 
 
-def density_from_G(G: np.ndarray, grid: MatsubaraGrid) -> np.ndarray:
-    """Orbital density from a symmetric Matsubara box.
+def density_from_G(
+    G: np.ndarray,
+    grid: MatsubaraGrid,
+    h0: np.ndarray | None = None,
+    mu: float | None = None,
+    sigma_h: np.ndarray | None = None,
+) -> np.ndarray:
+    """Orbital density with analytic high-frequency tail subtraction.
 
-    The +1/2 is the analytic contribution of the 1/(i omega_n) high-frequency
-    tail that is missed by the naive symmetric finite sum.
+    If ``h0`` and ``mu`` are supplied, use the static reference
+
+        G_ref^{-1}(k,iw) = iw + mu - h0(k) - Sigma_H
+
+    whose infinite Matsubara sum is evaluated exactly from Fermi occupations.
+    The finite numerical sum is then applied only to ``G-G_ref``:
+
+        n_a = n_a^ref + (T/Nk) sum_{k,n} [G_aa-G_ref,aa].
+
+    Since Sigma_GW(iw) -> 0 at high frequency, the difference decays much
+    faster than G itself.  For a noninteracting Green function the correction
+    vanishes and the filling is exactly the finite-temperature band filling,
+    independent of the Matsubara cutoff.
+
+    The legacy ``density_from_G(G, grid)`` call is retained for external
+    compatibility and uses the old symmetric-box ``1/2 + sum G`` estimate.
+    Internal fixed-filling solvers always use the tail-subtracted form.
     """
     diag = np.diagonal(G, axis1=-2, axis2=-1)
-    n = 0.5 + (grid.T / grid.nk) * np.sum(diag, axis=(0, 1, 2)).real
-    return n
+
+    if h0 is None or mu is None:
+        return 0.5 + (grid.T / grid.nk) * np.sum(diag, axis=(0, 1, 2)).real
+
+    if sigma_h is None:
+        sigma_h = np.zeros((NSUB, NSUB), dtype=complex)
+
+    href = h0 + sigma_h[None, None, :, :]
+    # Numerical roundoff can leave O(1e-16) anti-Hermitian pieces.
+    href = 0.5 * (href + np.swapaxes(href.conj(), -1, -2))
+    evals, evecs = np.linalg.eigh(href)
+    weights = np.abs(evecs) ** 2  # (k1,k2,orbital,band)
+
+    occ = _fermi(evals - float(mu), grid.T)
+    n_ref = np.sum(weights * occ[..., None, :], axis=(0, 1, 3)) / grid.nk
+
+    denom = (
+        1j * grid.omega[:, None, None, None]
+        + float(mu)
+        - evals[None, :, :, :]
+    )
+    gref_diag = np.einsum(
+        "xyaj,nxyj->nxya", weights, 1.0 / denom, optimize=True
+    )
+    correction = (
+        (grid.T / grid.nk)
+        * np.sum(diag - gref_diag, axis=(0, 1, 2)).real
+    )
+    return n_ref + correction
 
 
 def hartree_self_energy(density: np.ndarray, Vq0: np.ndarray) -> np.ndarray:
@@ -218,7 +283,8 @@ def compute_sigma_gw(G: np.ndarray, W: np.ndarray, grid: MatsubaraGrid,
 def _solve_mu(h0, sigma_h, sigma_gw, grid, target, mu0, tol, max_iter):
     def f(mu):
         G = dyson_from_sigma(h0, grid, mu, sigma_h, sigma_gw)
-        return float(np.sum(density_from_G(G, grid)) - target), G
+        density = density_from_G(G, grid, h0=h0, mu=mu, sigma_h=sigma_h)
+        return float(np.sum(density) - target), G
 
     width = 2.0
     lo, hi = mu0 - width, mu0 + width
@@ -232,7 +298,10 @@ def _solve_mu(h0, sigma_h, sigma_gw, grid, target, mu0, tol, max_iter):
         flo, _ = f(lo)
         fhi, _ = f(hi)
     else:
-        raise RuntimeError("Could not bracket chemical potential for target filling")
+        raise RuntimeError(
+            "Could not bracket chemical potential for target filling; "
+            f"target={target}, f(lo)={flo}, f(hi)={fhi}"
+        )
 
     Gmid = None
     for _ in range(max_iter):
@@ -264,7 +333,8 @@ def solve_noninteracting(params: RubyParameters, grid: MatsubaraGrid,
             h0, sigma_h, sigma_gw, grid, target_filling,
             float(mu), mu_tol, mu_max_iter
         )
-    return NonInteractingResult(G0=G0, mu=mu0, density=density_from_G(G0, grid))
+    density = density_from_G(G0, grid, h0=h0, mu=mu0, sigma_h=sigma_h)
+    return NonInteractingResult(G0=G0, mu=mu0, density=density)
 
 
 def _compatible_initial(initial: GWResult | None, grid: MatsubaraGrid) -> bool:
@@ -308,7 +378,7 @@ def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
 
     converged = False
     for it in range(1, opts.max_iter + 1):
-        density = density_from_G(G, grid)
+        density = density_from_G(G, grid, h0=h0, mu=mu, sigma_h=sigma_h)
         sigma_h_new = hartree_self_energy(density, Vq0)
         P = compute_polarization(G, grid, backend=backend)
         W = compute_screened_interaction(P, Vq, grid)
@@ -332,7 +402,7 @@ def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
         )
         G = Gnew
         sigma_gw = sigma_gw_mixed
-        density = density_from_G(G, grid)
+        density = density_from_G(G, grid, h0=h0, mu=mu, sigma_h=sigma_h)
 
         if opts.verbose:
             print(
@@ -343,11 +413,16 @@ def solve_gw(params: RubyParameters, grid: MatsubaraGrid,
             converged = True
             break
 
-    density = density_from_G(G, grid)
+    density = density_from_G(G, grid, h0=h0, mu=mu, sigma_h=sigma_h)
     sigma_h = hartree_self_energy(density, Vq0)
     P = compute_polarization(G, grid, backend=backend)
     W = compute_screened_interaction(P, Vq, grid)
     sigma_gw = compute_sigma_gw(G, W, grid, backend=backend)
+
+    # Report density with the final static Hartree term used in the returned
+    # self-energy.  The difference from the last iterative density is at the
+    # convergence tolerance when converged.
+    density = density_from_G(G, grid, h0=h0, mu=mu, sigma_h=sigma_h)
 
     return GWResult(
         G=G, W=W, P=P, Sigma_H=sigma_h, Sigma_GW=sigma_gw,
