@@ -199,3 +199,19 @@ Delta r = 0 : quadratic-level degeneracy/crossing
 ```
 
 注意这仍是 normal-state quadratic-response criterion。若要严格判断深处 ordered phase 的最终基态，需要进一步做 finite-source / symmetry-broken free-energy comparison。
+
+## 7. 终端进度条
+
+扫描默认显示一个不依赖第三方库的单行进度条。例如：
+
+```text
+[########--------------------]  72/241  29.88% | elapsed 14m08s | ETA 33m12s | filling=1.7958
+```
+
+它显示已完成点数、百分比、累计时间、按当前平均速度估计的剩余时间以及刚完成的 filling。开始计算下一点前会先清掉动态进度条，因此每个 filling 原有的 `chi/r/iteration/time` 详细输出仍然保留。
+
+若不希望显示进度条，可运行：
+
+```bash
+python filling_scan.py --no-progress
+```
