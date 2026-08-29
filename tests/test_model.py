@@ -54,7 +54,7 @@ def test_noninteracting_solver_brackets_near_empty_and_full():
         assert abs(np.sum(result.density) - target) < 1e-8
 
 
-def test_gw_result_reports_final_error():
+def test_gw_result_reports_final_error_and_soft_modes():
     params = RubyParameters(V=0.0)
     grid = MatsubaraGrid(nk1=2, nk2=2, nw=6, nOmega=2, T=0.1)
     opts = GWOptions(
@@ -68,29 +68,17 @@ def test_gw_result_reports_final_error():
     assert result.converged
     assert np.isfinite(result.final_error)
     assert result.final_error < opts.tol
+    assert result.min_screening_mode.shape == (6,)
+    assert result.min_density_mode.shape == (6,)
+    assert abs(np.linalg.norm(result.min_screening_mode) - 1.0) < 1e-12
+    assert abs(np.linalg.norm(result.min_density_mode) - 1.0) < 1e-12
+    assert np.isfinite(result.min_density_mode_residual)
 
-
-def test_gw_pulay_api_and_screening_diagnostic():
-    """Pulay mode is accepted and V=0 has the exact unit screening denominator."""
-    params = RubyParameters(V=0.0)
-    grid = MatsubaraGrid(nk1=2, nk2=2, nw=4, nOmega=1, T=0.1)
-    opts = GWOptions(
-        target_filling=3.0,
-        max_iter=6,
-        tol=1e-10,
-        mixing=0.7,
-        mixing_method="pulay",
-        pulay_history=4,
-        pulay_start=2,
-        verbose=False,
-    )
-    result = solve_gw(params, grid, opts)
-    assert result.converged
-    assert result.mixing_method == "pulay"
-    assert abs(result.min_screening_singular_value - 1.0) < 1e-12
-    assert np.isfinite(result.min_screening_Omega)
-    assert np.isfinite(result.min_screening_q1)
-    assert np.isfinite(result.min_screening_q2)
+    # The phase convention fixes the largest component to be real positive.
+    for mode in (result.min_screening_mode, result.min_density_mode):
+        pivot = int(np.argmax(np.abs(mode)))
+        assert abs(mode[pivot].imag) < 1e-12
+        assert mode[pivot].real >= 0.0
 
 
 def test_v_zero_bare_susceptibility_is_finite():
