@@ -15,8 +15,8 @@ half filling, ramps the interaction to the target V, and then scans filling in
 two branches.  Each GW point first uses fast linear mixing and, if the linear
 fixed-point iterations fail, retries from the same last converged seed with a
 Pulay/DIIS accelerator.  Screening diagnostics monitor the smallest singular
-value of I-VP so numerical fixed-point failure can be distinguished from an
-interaction-driven near-singularity of W.
+value of I-VP.  During the V ramp, every converged point also exports the
+associated six-sublattice screening and density soft modes.
 """
 
 from __future__ import annotations
@@ -310,6 +310,53 @@ def _write_v_ramp_csv(rows: list[dict], path: Path) -> None:
         writer.writerows(rows)
 
 
+def _mode_fields(prefix: str, mode: np.ndarray) -> dict:
+    """Flatten one normalized six-sublattice complex mode into CSV columns."""
+    mode = np.asarray(mode, dtype=complex).reshape(6)
+    out = {
+        f"{prefix}_pivot_sublattice": int(np.argmax(np.abs(mode))),
+        f"{prefix}_norm": float(np.linalg.norm(mode)),
+        f"{prefix}_sum_re": float(np.sum(mode).real),
+        f"{prefix}_sum_im": float(np.sum(mode).imag),
+    }
+    for a, z in enumerate(mode):
+        out[f"{prefix}_{a}_re"] = float(z.real)
+        out[f"{prefix}_{a}_im"] = float(z.imag)
+        out[f"{prefix}_{a}_abs"] = float(abs(z))
+        out[f"{prefix}_{a}_phase_rad"] = float(np.angle(z))
+    return out
+
+
+def _screening_mode_row(step: int, value: float, filling: float, gw, used: dict) -> dict:
+    row = {
+        "step": int(step),
+        "V": float(value),
+        "filling": float(filling),
+        "method": used["method"],
+        "mixing": float(used["mixing"]),
+        "iterations": int(gw.iterations),
+        "final_error": float(gw.final_error),
+        "min_screening_singular_value": float(gw.min_screening_singular_value),
+        "screening_m": int(gw.min_screening_m),
+        "screening_Omega": float(gw.min_screening_Omega),
+        "screening_q1": float(gw.min_screening_q1),
+        "screening_q2": float(gw.min_screening_q2),
+        "density_mode_residual": float(gw.min_density_mode_residual),
+    }
+    row.update(_mode_fields("screening_mode", gw.min_screening_mode))
+    row.update(_mode_fields("density_mode", gw.min_density_mode))
+    return row
+
+
+def _write_screening_mode_csv(rows: list[dict], path: Path) -> None:
+    if not rows:
+        return
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def _prepare_anchor_gw_seed(args, grid, anchor_filling: float, outdir: Path):
     """Ramp V at the anchor filling with adaptive linear/Pulay GW retries."""
     if args.no_v_ramp or args.no_continuation:
@@ -332,6 +379,7 @@ def _prepare_anchor_gw_seed(args, grid, anchor_filling: float, outdir: Path):
 
     previous = None
     ramp_rows: list[dict] = []
+    mode_rows: list[dict] = []
     for istep, value in enumerate(schedule, start=1):
         params_v = RubyParameters(ti=args.ti, t1=args.t1, t2=args.t2, V=float(value))
         mu_guess = bare.mu if previous is None else previous.mu
@@ -375,7 +423,13 @@ def _prepare_anchor_gw_seed(args, grid, anchor_filling: float, outdir: Path):
                 f"\nV-ramp stopped: all GW attempts failed at V={value:g}. "
                 "Inspect both residual and min screening singular value in v_ramp.csv."
             )
+            if mode_rows:
+                print("Converged soft modes already saved to:", outdir / "screening_mode.csv")
             return None, False
+
+        used = attempts[-1]
+        mode_rows.append(_screening_mode_row(istep, value, anchor_filling, gw, used))
+        _write_screening_mode_csv(mode_rows, outdir / "screening_mode.csv")
         previous = gw
 
     return {"mu0": bare.mu, "gw": previous}, True
@@ -742,7 +796,9 @@ def main():
     anchor_seed, ramp_ok = _prepare_anchor_gw_seed(args, grid, anchor, outdir)
     if not ramp_ok:
         print("\nAborting before the filling scan because the anchor V-ramp did not reach the target interaction.")
-        print("See:", outdir / "v_ramp.csv")
+        print("V-ramp diagnostics:", outdir / "v_ramp.csv")
+        if (outdir / "screening_mode.csv").exists():
+            print("Converged screening modes:", outdir / "screening_mode.csv")
         return
 
     rows: list[dict] = []
@@ -803,6 +859,7 @@ def main():
     print("CSV:", outdir / "filling_scan.csv")
     if not args.no_v_ramp and not args.no_continuation:
         print("V-ramp diagnostics:", outdir / "v_ramp.csv")
+        print("Converged screening modes:", outdir / "screening_mode.csv")
     print("figure:", outdir / "r_eff_vs_filling.png")
     print("figure:", outdir / "chi_vs_filling.png")
     print("figure:", outdir / "delta_r_vs_filling.png")
