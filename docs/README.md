@@ -10,10 +10,11 @@
 - [cgw_theory.md](cgw_theory.md)：为什么对外源求导会得到 Hartree、MT、AL1、AL2，以及 q=(0,0) 版本在代码中的实现。
 - [api_reference.md](api_reference.md)：模块、类和主要函数的接口、输入输出 shape 和用途。
 - [numerics_and_validation.md](numerics_and_validation.md)：Matsubara cutoff、mixing、收敛测试、V=0 极限、时间反演检查和结果可信度判断。
-- [convergence_scan.md](convergence_scan.md)：自动扫描 `nw`、`nOmega`、`nk`，保存 CSV 和收敛图。
+- [convergence_scan.md](convergence_scan.md)：自动 `nw/nOmega/nk` convergence scan、fast MT 模式和 continuation。
+- [performance_and_reuse.md](performance_and_reuse.md)：性能瓶颈、warm start、参数扫描时哪些量可以复用，以及推荐的两级扫描策略。
 - [tutorial.md](tutorial.md)：将理论与主程序串起来的完整教程，也是 PDF manual 的主体源文件。
 - [maintenance.md](maintenance.md)：以后修改代码时需要同步更新哪些文档，以及 PDF 如何自动生成。
 
 ## 文档维护原则
 
-`docs/tutorial.md` 是完整理论教程的主体源文件；新增的独立操作章节可以作为附加 Markdown 一并进入 PDF build。模块化文档用于快速查阅；PDF 不手工编辑，而是由 GitHub Actions 从维护中的 Markdown 文档自动构建，以避免代码和 PDF 版本不一致。
+`docs/tutorial.md` 是完整理论教程的主体源文件；`convergence_scan.md` 与 `performance_and_reuse.md` 作为独立操作章节一并进入 PDF build。模块化文档用于快速查阅；PDF 不手工编辑，而是由 GitHub Actions 从维护中的 Markdown 文档自动构建，以避免代码和 PDF 版本不一致。
