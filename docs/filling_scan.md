@@ -62,19 +62,36 @@ GW tol = 1e-8
 vertex tol = 1e-8
 ```
 
-GW 首选 mixing 为 `0.20`。如果该固定点没有收敛，程序不会立刻失败，而是从**同一个最近已收敛 seed** 自动重试：
+GW 首先尝试 fast linear mixing：
 
 ```text
-0.20 -> 0.15 -> 0.10 -> 0.05
+linear:0.20 -> linear:0.10
 ```
 
-这使弱耦合点保持快速，而强耦合点才自动使用更保守的 under-relaxation。可自行改变 fallback：
+若同一个 GW 点仍未收敛，则程序从**同一个最近已收敛 seed** 自动切换到
+
+```text
+pulay:0.70
+```
+
+其中 `0.70` 是对 Pulay/DIIS extrapolated self-energy 的 damping，而不是重新定义方程。默认 Pulay history 为 6，第三步开始启用。
+
+可自行改变：
 
 ```bash
-python filling_scan.py --gw-retry-mixings 0.12 0.08 0.04
+python filling_scan.py \
+  --gw-retry-mixings 0.15 0.10 0.05 \
+  --gw-pulay-mixing 0.6 \
+  --gw-pulay-history 8
 ```
 
-vertex mixing 默认仍是 `0.20`，目前 vertex 尚未做相同的 adaptive retry。
+若需要完全关闭 Pulay 作为诊断：
+
+```bash
+python filling_scan.py --no-gw-pulay
+```
+
+vertex mixing 默认仍是 `0.20`，目前 vertex 尚未做同样的 Pulay fallback。
 
 ## 3. 运行
 
@@ -106,29 +123,21 @@ python filling_scan.py --vertex-stage both
 
 强耦合下默认从最接近 `--anchor-filling` 的 requested filling 开始；默认 anchor 是 `3.0`。
 
-对 `V=3`，默认 interaction path 现在加密为
+对 `V=3`，默认 interaction path 为
 
 ```text
 0.1 -> 0.25 -> 0.5 -> 0.6 -> 0.7 -> 0.75 -> 0.9 -> 1.0
     -> 1.25 -> 1.5 -> 1.75 -> 2.0 -> 2.25 -> 2.5 -> 2.75 -> 3.0
 ```
 
-每一级先用 `mixing=0.20`。若失败，则同一级 V 自动按 `0.15 -> 0.10 -> 0.05` 重试；每次 retry 都重新从**上一级 converged GW solution** 出发，而不是从失败 iterate 继续。
+每一级首先做 linear mixing；若失败，才切换 Pulay。所有 retry 都重新从**上一级 converged GW solution** 出发，不使用失败 iterate 作为 seed。
 
 例如终端可能显示：
 
 ```text
-[V-ramp  6/16, try 1/4] V=0.7500 mix=0.200 converged=False ... err=...
-[V-ramp  6/16, try 2/4] V=0.7500 mix=0.150 converged=False ... err=...
-[V-ramp  6/16, try 3/4] V=0.7500 mix=0.100 converged=True  ... err=...
-```
-
-只有当该 V 的所有 mixing 都失败时，V-ramp 才停止。
-
-可自定义 V path：
-
-```bash
-python filling_scan.py --v-ramp-values 0.1 0.25 0.5 0.6 0.7 0.75 1.0 1.5 2.0 2.5 3.0
+[V-ramp  6/16, try 1/3] V=0.7500 linear mix=0.200 conv=False ...
+[V-ramp  6/16, try 2/3] V=0.7500 linear mix=0.100 conv=False ...
+[V-ramp  6/16, try 3/3] V=0.7500 pulay  mix=0.700 conv=True  ...
 ```
 
 到达 target V 后，由同一个 anchor solution 分成两个独立 branch：
@@ -138,19 +147,102 @@ anchor -> lower fillings
 anchor -> higher fillings
 ```
 
-## 5. GW residual 与失败处理
+## 5. GW residual：现在使用真正的 fixed-point residual
 
-`GWResult` 现在额外保存
+GW 方程可写成
 
-```text
-final_error
-```
+\[
+X=(\Sigma_H,\Sigma_{GW}),\qquad F[X]=(\Sigma_H^{out},\Sigma_{GW}^{out}).
+\]
 
-即最后一次 self-consistency iteration 使用的 fixed-point error。对于 converged 点应满足
+当前 `final_error` 定义为未乘 mixing 的 raw residual：
+
+\[
+\boxed{
+\epsilon_{GW}
+=\max\left(
+\|\Sigma_H^{out}-\Sigma_H\|_\infty,
+\|\Sigma_{GW}^{out}-\Sigma_{GW}\|_\infty
+\right).
+}
+\]
+
+因此 `final_error` 不会因为把 linear mixing 从 `0.20` 改成 `0.05` 就人为变小。这比早期用 mixed-step 大小判断收敛更适合比较不同 mixing method。
+
+对于 converged 点必须满足
 
 \[
 \text{final_error}<\text{GW tol}.
 \]
+
+## 6. Pulay/DIIS 做了什么
+
+linear mixing 是
+
+\[
+X_{n+1}=X_n+\alpha R_n,
+\qquad
+R_n=F[X_n]-X_n.
+\]
+
+Pulay 保存最近若干步 residual，并寻找系数 `c_i` 使
+
+\[
+\sum_i c_i R_i
+\]
+
+尽可能小，同时满足
+
+\[
+\sum_i c_i=1.
+\]
+
+然后用这些系数对 fixed-point outputs 做 extrapolation。代码中 Hartree block 和 dynamic GW block 在 residual inner product 中分别按自身元素数归一化，避免巨大 `Sigma_GW(iw,k)` 数组完全淹没 6x6 Hartree block。
+
+Pulay 只改变数值求解路径，不改变 GW 方程本身。
+
+## 7. Screening stability diagnostic
+
+每个 GW result 还计算
+
+\[
+\boxed{
+s_{\min}
+=
+\min_Q\sigma_{\min}\left[I-V(\mathbf q)P(Q)\right].
+}
+\]
+
+由于
+
+\[
+W(Q)=\left[I-V(\mathbf q)P(Q)\right]^{-1}V(\mathbf q),
+\]
+
+所以 `s_min` 是判断 screened interaction 是否接近奇异的直接数值指标。
+
+程序同时记录出现最小值的
+
+```text
+screening_m
+screening_Omega
+screening_q1
+screening_q2
+```
+
+解释时要区分两种情况：
+
+```text
+final_error large, s_min still moderate
+    -> 更像 fixed-point solver 问题，Pulay 可能帮助
+
+s_min -> very small
+    -> I-VP 本身接近奇异，可能是 screening/RPA instability
+```
+
+不能仅因为 Pulay 最终把某个点收敛，就忽略 `s_min` 的物理信息。
+
+## 8. 输出
 
 `v_ramp.csv` 每一个 V / retry attempt 都保存：
 
@@ -158,61 +250,53 @@ final_error
 step
 attempt
 V
+method
 mixing
 converged
 iterations
 final_error
 mu
 actual_filling
+min_screening_singular_value
+screening_m
+screening_Omega
+screening_q1
+screening_q2
 runtime_s
 ```
 
-因此可以直接区分：
-
-```text
-err ~ 1e-7 : 已很接近，只差少量 iteration
-err ~ 1e-3 : 收敛很慢或振荡
-err ~ O(1) : fixed-point iteration 明显不稳定
-```
-
-正式 filling scan 同样会 adaptive retry GW，并保存
+正式 `filling_scan.csv` 也保存
 
 ```text
 GW_final_error
+GW_mixing_method_used
 GW_mixing_used
 GW_attempts
+GW_min_screening_singular_value
+GW_screening_m
+GW_screening_Omega
+GW_screening_q1
+GW_screening_q2
 ```
 
-如果所有 GW retry 都失败，则
+如果所有 GW attempt 都失败，则
 
 ```text
 GW not converged -> skip vertex -> chi/r_eff = NaN
 ```
 
-不会把发散 iterate 当作 susceptibility。
-
-## 6. 输出
-
-每次运行自动建立
+主要输出文件为
 
 ```text
-results/filling/<timestamp>/
+results/filling/<timestamp>/filling_scan.csv
+results/filling/<timestamp>/v_ramp.csv
+results/filling/<timestamp>/settings.json
+results/filling/<timestamp>/r_eff_vs_filling.png
+results/filling/<timestamp>/chi_vs_filling.png
+results/filling/<timestamp>/delta_r_vs_filling.png
 ```
 
-主要文件为
-
-```text
-filling_scan.csv
-v_ramp.csv
-settings.json
-r_eff_vs_filling.png
-chi_vs_filling.png
-delta_r_vs_filling.png
-```
-
-`filling_scan.csv` 最终始终按 filling 从小到大排列，即使实际计算顺序是从 anchor 向两侧展开。
-
-## 7. 图的解释
+## 9. 图的解释
 
 如果
 
@@ -238,7 +322,7 @@ Delta r = 0 : quadratic-level crossing
 
 这仍是 normal-state quadratic-response criterion；严格 ordered-state 基态比较需要进一步做 symmetry-broken free-energy calculation。
 
-## 8. 终端进度条
+## 10. 终端进度条
 
 正式 filling scan 默认显示：
 
@@ -246,7 +330,7 @@ Delta r = 0 : quadratic-level crossing
 [########--------------------]  72/241  29.88% | elapsed 14m08s | ETA 33m12s | filling=1.7958
 ```
 
-V-ramp 初始化会逐级打印 V、mixing、iteration count、`final_error`、chemical potential 和 runtime。关闭 filling 进度条：
+V-ramp 初始化会逐级打印 V、method、mixing、iteration count、`final_error`、`smin`、最危险的 Q、chemical potential 和 runtime。关闭 filling 进度条：
 
 ```bash
 python filling_scan.py --no-progress
