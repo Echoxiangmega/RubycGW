@@ -87,9 +87,19 @@ nw = 60
 nOmega = 12
 vertex-stage = mt
 momentum-backend = fft
+GW mixing = 0.20
+vertex mixing = 0.20
+GW tol = 1e-8
+vertex tol = 1e-8
 ```
 
-`V=3` 明显强于此前弱耦合 convergence benchmark，所以脚本默认把 GW mixing 降到 `0.08`，vertex mixing 降到 `0.10`，并把最大迭代次数提高到 300。
+早期 strong-coupling filling scan 曾把 mixing 设成 `GW=0.08`, `vertex=0.10`，结果即使在容易收敛的 V-ramp 点也需要约两百次 iteration。现在由于默认已经有 V-ramp 和 filling continuation 提供 nearby seed，mixing 提高到 `0.20/0.20`，同时保持 `1e-8` tolerance 不变。也就是说加速来自更少的 fixed-point iteration，而不是放宽收敛精度。
+
+若某个强耦合点出现明显振荡，可手动降低：
+
+```bash
+python filling_scan.py --gw-mixing 0.10 --vertex-mixing 0.10
+```
 
 ## 3. 运行
 
