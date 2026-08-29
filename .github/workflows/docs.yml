@@ -1,0 +1,54 @@
+name: build tutorial PDF
+
+on:
+  push:
+    paths:
+      - 'docs/**'
+      - 'rubycgw/**'
+      - 'run_ruby_cgw.py'
+      - 'README.md'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'rubycgw/**'
+      - 'run_ruby_cgw.py'
+      - 'README.md'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+jobs:
+  build-pdf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Pandoc, XeLaTeX, and CJK fonts
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            pandoc \
+            texlive-xetex \
+            texlive-lang-chinese \
+            fonts-noto-cjk
+
+      - name: Build tutorial PDF
+        run: |
+          mkdir -p build
+          pandoc docs/tutorial.md \
+            --from=markdown+tex_math_dollars \
+            --toc \
+            --number-sections \
+            --pdf-engine=xelatex \
+            -V CJKmainfont='Noto Sans CJK SC' \
+            -V mainfont='DejaVu Serif' \
+            -V monofont='DejaVu Sans Mono' \
+            -V geometry:margin=1in \
+            -o build/RubycGW_Tutorial.pdf
+
+      - name: Upload tutorial PDF
+        uses: actions/upload-artifact@v4
+        with:
+          name: RubycGW-Tutorial-PDF
+          path: build/RubycGW_Tutorial.pdf
+          if-no-files-found: error
