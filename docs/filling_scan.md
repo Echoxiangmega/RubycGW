@@ -79,8 +79,6 @@ filling = 0.05 ... 5.95
 n_j=0.05+j\frac{5.90}{240},\qquad j=0,\ldots,240.
 \]
 
-这正好给出步长 `0.0245833...`；旧脚本也采用 `np.linspace(0.05, 5.95, 241)`。
-
 many-body 数值默认参数为
 
 ```text
@@ -91,7 +89,7 @@ vertex-stage = mt
 momentum-backend = fft
 ```
 
-`V=3` 明显强于此前 `V=0.1` 的 convergence benchmark，所以脚本默认把 GW mixing 降到 `0.08`，vertex mixing 降到 `0.10`，并把最大迭代次数提高到 300。
+`V=3` 明显强于此前弱耦合 convergence benchmark，所以脚本默认把 GW mixing 降到 `0.08`，vertex mixing 降到 `0.10`，并把最大迭代次数提高到 300。
 
 ## 3. 运行
 
@@ -101,13 +99,13 @@ momentum-backend = fft
 python filling_scan.py
 ```
 
-建议第一次先做较粗的 61 点扫描，检查强耦合收敛与整体趋势：
+粗扫描：
 
 ```bash
 python filling_scan.py --num-fillings 61
 ```
 
-若只想检查整数 filling：
+只检查整数 filling：
 
 ```bash
 python filling_scan.py --fillings 1 2 3 4 5
@@ -121,25 +119,67 @@ python filling_scan.py --vertex-stage both
 
 `both` 会先求 GW+MT，再用当前 filling 已收敛的 MT vertex 作为 full MT+AL 的初值。
 
-## 4. Continuation
+## 4. 强耦合下的 anchor + V-ramp continuation
 
-扫描 filling 时 `h0(k)`, `V(q)`, `K_plus/K_minus` 和 grid 不变，但 chemical potential、`G0`、interacting `G/W/Sigma/Gamma` 都会变化。
+不能从 `filling=0.05, V=3` 直接 cold start：若第一个 GW 点没有收敛，后续点也没有可用 continuation seed，最终会得到毫无物理意义的巨大 fixed-point iterate。
 
-因此每个 filling 都重新求解对应方程，但默认使用前一个 filling 的解作为初值：
+因此当前默认流程改为：
 
-- 前一点 `mu0` 作为下一点 noninteracting chemical-potential bisection 的 seed；
-- 前一点 converged `Sigma_H`, `Sigma_GW`, `mu_GW` warm-start 下一点 GW；
-- 前一点 converged eta vertex warm-start 下一点 MT/full vertex。
+1. 在用户要求的 filling 网格中找到最接近 `--anchor-filling` 的点；默认 anchor 是 `3.0`。
+2. 在 anchor filling 固定粒子数，先做 interaction continuation。对 `V=3` 默认路径为
 
-这不改变每个 filling 的方程，只减少 fixed-point iteration 次数。可用
-
-```bash
-python filling_scan.py --no-continuation
+```text
+0.1 -> 0.25 -> 0.5 -> 0.75 -> 1.0 -> 1.5 -> 2.0 -> 2.5 -> 3.0
 ```
 
-关闭，用于验证 continuation 没有把程序锁在错误 branch。
+3. 每一级都把上一级 converged GW solution 作为下一步初值。
+4. 到达 target V 后，再求 anchor 的 eta vertex。
+5. 由同一个 anchor solution 分成两个独立 branch：
 
-## 5. 输出
+```text
+anchor -> lower fillings
+anchor -> higher fillings
+```
+
+这样 higher branch 不会使用 lower branch 最末端的状态作为初值。
+
+可改变 anchor：
+
+```bash
+python filling_scan.py --anchor-filling 2.0
+```
+
+可指定自己的 interaction ramp：
+
+```bash
+python filling_scan.py --v-ramp-values 0.1 0.3 0.6 1.0 1.5 2.0 2.5 3.0
+```
+
+如需故意测试 target V 的 cold start：
+
+```bash
+python filling_scan.py --no-v-ramp
+```
+
+`--no-continuation` 会同时关闭参数点 continuation；主要用于诊断，不推荐做强耦合 production scan。
+
+若 V-ramp 在某一级 GW 已不能收敛，程序会在那里停止，而不会继续 cold-start target V。`v_ramp.csv` 会记录最后能够到达的 interaction、iteration count、chemical potential 和 wall time。
+
+## 5. GW / vertex 失败时怎样处理
+
+一个没有收敛的 GW fixed point 不能作为 covariant response 的 background。因此现在的安全规则是：
+
+```text
+GW not converged -> skip vertex -> chi/r_eff = NaN
+```
+
+不会再把 `10^100`、`10^150` 一类发散的 fixed-point iterate 写成 susceptibility。
+
+如果 GW 收敛但某个 eta vertex 未收敛，则只把该 channel 的 susceptibility 与 `r_eff` 记为 NaN，并保留上一个 converged vertex 作为相邻 filling 的 continuation seed。
+
+这使 CSV 中的有限数值都具有明确的 convergence status。
+
+## 6. 输出
 
 每次运行自动建立
 
@@ -151,23 +191,26 @@ results/filling/<timestamp>/
 
 ```text
 filling_scan.csv
+v_ramp.csv
 settings.json
 r_eff_vs_filling.png
 chi_vs_filling.png
 delta_r_vs_filling.png
 ```
 
-`filling_scan.csv` 保存 bare `G0G0`、dressed `GG`、GW+MT、full cGW（若计算）以及 selected stage 的 susceptibility，同时保存
+`filling_scan.csv` 最终始终按 filling 从小到大排列，即使实际计算顺序是从 anchor 向两侧展开。新增字段包括：
 
 ```text
-r_eff_opposite_re/im
-r_eff_same_re/im
-delta_r_same_minus_opposite_re/im
+scan_branch
+vertex_skipped_because_GW_failed
+GW_converged
+selected_plus_converged
+selected_minus_converged
 ```
 
-以及 chemical potential、actual filling、GW/vertex convergence flag、iteration count 与各阶段 wall time。
+同时保存 chemical potential、actual filling、iteration count 与各阶段 wall time。
 
-## 6. 图的解释
+## 7. 图的解释
 
 主图是
 
@@ -198,19 +241,21 @@ Delta r > 0 : opposite softer
 Delta r = 0 : quadratic-level degeneracy/crossing
 ```
 
+未收敛点不会进入曲线。
+
 注意这仍是 normal-state quadratic-response criterion。若要严格判断深处 ordered phase 的最终基态，需要进一步做 finite-source / symmetry-broken free-energy comparison。
 
-## 7. 终端进度条
+## 8. 终端进度条
 
-扫描默认显示一个不依赖第三方库的单行进度条。例如：
+filling scan 默认显示单行进度条，例如：
 
 ```text
 [########--------------------]  72/241  29.88% | elapsed 14m08s | ETA 33m12s | filling=1.7958
 ```
 
-它显示已完成点数、百分比、累计时间、按当前平均速度估计的剩余时间以及刚完成的 filling。开始计算下一点前会先清掉动态进度条，因此每个 filling 原有的 `chi/r/iteration/time` 详细输出仍然保留。
+V-ramp 本身会逐级打印 `V`, convergence, iteration count, chemical potential 和 time。正式 filling scan 开始后，进度条 ETA 只统计 filling 点，不把一次性的 V-ramp 初始化时间混入平均每点耗时。
 
-若不希望显示进度条，可运行：
+若不希望显示进度条：
 
 ```bash
 python filling_scan.py --no-progress
