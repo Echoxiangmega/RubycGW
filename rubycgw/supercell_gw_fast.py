@@ -1,16 +1,22 @@
 """Performance-oriented 18-site period-three Ruby GW solver.
 
 This module keeps the physics and fixed-point equations of :mod:`supercell_gw`
-unchanged, but removes two expensive pieces of numerical overhead that become
-important for the 18-site problem:
+unchanged, but removes numerical overhead that is important for the 18-site
+problem:
 
 1. the Hartree-reference eigensystem used by the Matsubara tail subtraction is
    built once per self-consistency iterate rather than once per trial chemical
    potential;
-2. the fixed-filling chemical potential is solved by a warm-started,
-   safeguarded secant/bracketing method rather than a fresh wide bisection.
+2. the fixed-filling chemical potential is solved by a warm-started safeguarded
+   Newton method, using the analytic derivative of the numerical filling with
+   respect to ``mu``;
+3. intermediate GW iterates use an inexact inner ``mu`` tolerance.  The filling
+   solve is loose while the outer GW residual is large and tightens
+   automatically near the fixed point.  The returned state is always refined
+   once more at the requested strict ``GWOptions.mu_tol``.
 
-The returned object is the same ``GWResult`` used everywhere else in RubycGW.
+No physical approximation is changed by these optimizations.  The returned
+object is the same ``GWResult`` used elsewhere in RubycGW.
 """
 
 from __future__ import annotations
@@ -38,6 +44,12 @@ from .supercell_gw import (
     hartree_self_energy_matrix,
     screening_soft_modes_matrix,
 )
+
+
+# Inexact inner-solve defaults.  The exact requested ``opts.mu_tol`` remains the
+# floor and is always imposed again before a state is returned.
+_MU_LOOSE_TOL = 1.0e-4
+_MU_RESIDUAL_FACTOR = 1.0e-2
 
 
 @dataclass(frozen=True)
@@ -96,6 +108,60 @@ def density_from_G_cached(
     return n_ref + correction
 
 
+def _total_filling_slope(
+    G: np.ndarray,
+    grid: MatsubaraGrid,
+    mu: float,
+    cache: _TailCache,
+) -> float:
+    """Derivative dN/dmu of the same tail-subtracted numerical filling.
+
+    With fixed self-energies,
+
+        dG/dmu = -G^2.
+
+    The analytic reference contribution is differentiated exactly as well.  This
+    gives a Newton slope without another Dyson matrix inversion.
+    """
+    evals = cache.evals
+    occ = _fermi(evals - float(mu), grid.T)
+    d_ref = float(np.sum(occ * (1.0 - occ)) / (grid.T * grid.nk))
+
+    tr_g2 = np.einsum("nxyab,nxyba->nxy", G, G, optimize=True)
+    denom = (
+        1j * grid.omega[:, None, None, None]
+        + float(mu)
+        - evals[None, :, :, :]
+    )
+    tr_gref2 = np.sum(1.0 / (denom * denom), axis=-1)
+    d_corr = float(
+        (grid.T / grid.nk)
+        * np.sum(-tr_g2 + tr_gref2).real
+    )
+    return d_ref + d_corr
+
+
+def _effective_mu_tol(
+    strict_tol: float,
+    outer_residual: float | None,
+    loose_tol: float = _MU_LOOSE_TOL,
+    residual_factor: float = _MU_RESIDUAL_FACTOR,
+) -> float:
+    """Tolerance for an inexact fixed-filling inner solve.
+
+    Far from the GW fixed point it is wasteful to solve the particle number to
+    1e-8 at every outer iteration.  The tolerance is therefore at most
+    ``loose_tol`` and tightens proportionally to the previous/current outer
+    residual, with ``strict_tol`` as a hard floor.
+    """
+    strict = float(strict_tol)
+    loose = max(strict, float(loose_tol))
+    if outer_residual is None or not np.isfinite(float(outer_residual)):
+        return loose
+    dynamic = float(residual_factor) * max(float(outer_residual), 0.0)
+    return max(strict, min(loose, dynamic))
+
+
 def _solve_mu_matrix_fast(
     h0: np.ndarray,
     sigma_h: np.ndarray,
@@ -106,98 +172,103 @@ def _solve_mu_matrix_fast(
     tol: float,
     max_iter: int,
 ) -> tuple[float, np.ndarray, _TailCache, int]:
-    """Warm-started safeguarded secant solve for the fixed-filling chemical potential.
+    """Warm-started safeguarded Newton solve for the fixed-filling chemical potential.
 
-    The filling is monotone in ``mu`` for the converged Matsubara expression.
-    Starting from the previous GW iteration's chemical potential therefore lets
-    most self-consistency iterations bracket the root locally.  Secant steps are
-    accepted only inside the current bracket; otherwise a bisection step is used.
+    Newton uses the analytic derivative of the *same* tail-subtracted numerical
+    filling used in the root equation.  A sign bracket is accumulated whenever
+    possible; an unsafe Newton proposal is then replaced by bisection.  Before a
+    bracket exists, the Newton displacement is clipped to a local energy scale.
     """
     cache = _build_tail_cache(h0, sigma_h)
     neval = 0
 
-    def f(mu: float) -> tuple[float, np.ndarray]:
+    def evaluate(mu: float) -> tuple[float, np.ndarray, float]:
         nonlocal neval
-        G = dyson_from_sigma_matrix(h0, grid, float(mu), sigma_h, sigma_gw)
-        density = density_from_G_cached(G, grid, float(mu), cache)
+        value = float(mu)
+        G = dyson_from_sigma_matrix(h0, grid, value, sigma_h, sigma_gw)
+        density = density_from_G_cached(G, grid, value, cache)
+        residual = float(np.sum(density) - target)
+        slope = _total_filling_slope(G, grid, value, cache)
         neval += 1
-        return float(np.sum(density) - target), G
+        return residual, G, float(slope)
 
-    x0 = float(mu0)
-    f0, G0 = f(x0)
-    if abs(f0) < tol:
-        return x0, G0, cache, neval
+    x = float(mu0)
+    fx, Gx, dfx = evaluate(x)
+    if abs(fx) < tol:
+        return x, Gx, cache, neval
 
-    step = max(0.10, 4.0 * float(grid.T))
-    if f0 < 0.0:
-        lo, flo, Glo = x0, f0, G0
-        hi = x0 + step
-        fhi, Ghi = f(hi)
-        for _ in range(30):
-            if fhi >= 0.0:
-                break
-            lo, flo, Glo = hi, fhi, Ghi
-            step *= 2.0
-            hi = x0 + step
-            fhi, Ghi = f(hi)
-        else:
-            raise RuntimeError(
-                "Could not bracket supercell chemical potential above warm start; "
-                f"target={target}, f(mu0)={f0}, f(hi)={fhi}"
-            )
-    else:
-        hi, fhi, Ghi = x0, f0, G0
-        lo = x0 - step
-        flo, Glo = f(lo)
-        for _ in range(30):
-            if flo <= 0.0:
-                break
-            hi, fhi, Ghi = lo, flo, Glo
-            step *= 2.0
-            lo = x0 - step
-            flo, Glo = f(lo)
-        else:
-            raise RuntimeError(
-                "Could not bracket supercell chemical potential below warm start; "
-                f"target={target}, f(mu0)={f0}, f(lo)={flo}"
-            )
-
-    if abs(flo) <= abs(fhi):
-        best_mu, best_f, best_G = lo, flo, Glo
-    else:
-        best_mu, best_f, best_G = hi, fhi, Ghi
+    best_mu, best_f, best_G = x, fx, Gx
+    lo = None
+    hi = None
+    step_cap = max(0.25, 8.0 * float(grid.T))
 
     for _ in range(max(int(max_iter), 1)):
-        width = hi - lo
-        if width <= 0.0:
-            break
-
-        denom = fhi - flo
-        if np.isfinite(denom) and abs(denom) > 1e-16:
-            trial = hi - fhi * width / denom
+        if fx < 0.0:
+            lo = (x, fx, Gx)
+        elif fx > 0.0:
+            hi = (x, fx, Gx)
         else:
-            trial = 0.5 * (lo + hi)
+            return x, Gx, cache, neval
 
-        margin = 0.08 * width
-        if (
-            not np.isfinite(trial)
-            or trial <= lo + margin
-            or trial >= hi - margin
-        ):
-            trial = 0.5 * (lo + hi)
+        use_newton = bool(np.isfinite(dfx) and dfx > 1.0e-10)
+        if use_newton:
+            trial = x - fx / dfx
+        else:
+            trial = x + (step_cap if fx < 0.0 else -step_cap)
 
-        ftrial, Gtrial = f(float(trial))
+        if lo is not None and hi is not None:
+            xlo, _, _ = lo
+            xhi, _, _ = hi
+            width = xhi - xlo
+            margin = 0.02 * width
+            if (
+                not np.isfinite(trial)
+                or trial <= xlo + margin
+                or trial >= xhi - margin
+            ):
+                trial = 0.5 * (xlo + xhi)
+        else:
+            if not np.isfinite(trial):
+                trial = x + (step_cap if fx < 0.0 else -step_cap)
+            delta = float(np.clip(trial - x, -step_cap, step_cap))
+            if abs(delta) < 1.0e-12:
+                delta = step_cap if fx < 0.0 else -step_cap
+            trial = x + delta
+
+        ftrial, Gtrial, dftrial = evaluate(float(trial))
         if abs(ftrial) < abs(best_f):
             best_mu, best_f, best_G = float(trial), ftrial, Gtrial
         if abs(ftrial) < tol:
             return float(trial), Gtrial, cache, neval
 
-        if ftrial > 0.0:
-            hi, fhi, Ghi = float(trial), ftrial, Gtrial
-        else:
-            lo, flo, Glo = float(trial), ftrial, Gtrial
+        x, fx, Gx, dfx = float(trial), ftrial, Gtrial, dftrial
 
     return float(best_mu), best_G, cache, neval
+
+
+def _strict_refine_fixed_filling(
+    h0: np.ndarray,
+    sigma_h: np.ndarray,
+    sigma_gw: np.ndarray,
+    grid: MatsubaraGrid,
+    target: float | None,
+    mu: float,
+    strict_tol: float,
+    max_iter: int,
+) -> tuple[float, np.ndarray, _TailCache, int]:
+    if target is None:
+        G = dyson_from_sigma_matrix(h0, grid, mu, sigma_h, sigma_gw)
+        return float(mu), G, _build_tail_cache(h0, sigma_h), 0
+    return _solve_mu_matrix_fast(
+        h0,
+        sigma_h,
+        sigma_gw,
+        grid,
+        float(target),
+        float(mu),
+        float(strict_tol),
+        int(max_iter),
+    )
 
 
 def solve_matrix_gw_fast(
@@ -232,20 +303,32 @@ def solve_matrix_gw_fast(
         mu = float(initial.mu)
     else:
         sigma_h = np.zeros((norb, norb), dtype=complex)
-        sigma_gw = np.zeros((grid.nf, grid.nk1, grid.nk2, norb, norb), dtype=complex)
+        sigma_gw = np.zeros(
+            (grid.nf, grid.nk1, grid.nk2, norb, norb), dtype=complex
+        )
         mu = float(opts.mu)
 
+    initial_mu_tol = _effective_mu_tol(opts.mu_tol, None)
     if opts.target_filling is None:
         G = dyson_from_sigma_matrix(h0, grid, mu, sigma_h, sigma_gw)
         tail_cache = _build_tail_cache(h0, sigma_h)
         mu_neval = 0
     else:
         mu, G, tail_cache, mu_neval = _solve_mu_matrix_fast(
-            h0, sigma_h, sigma_gw, grid, float(opts.target_filling),
-            mu, opts.mu_tol, opts.mu_max_iter,
+            h0,
+            sigma_h,
+            sigma_gw,
+            grid,
+            float(opts.target_filling),
+            mu,
+            initial_mu_tol,
+            opts.mu_max_iter,
         )
+    mu_tol_used = initial_mu_tol
 
-    W = np.zeros((grid.nb, grid.nk1, grid.nk2, norb, norb), dtype=complex)
+    W = np.zeros(
+        (grid.nb, grid.nk1, grid.nk2, norb, norb), dtype=complex
+    )
     P = np.zeros_like(W)
     history: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
 
@@ -267,25 +350,39 @@ def solve_matrix_gw_fast(
             print(
                 f"SC-GW iter {it:4d}: residual={err:.3e}, mu={mu:.10f}, "
                 f"n={np.sum(density):.10f}, mu_eval={mu_neval}, "
-                f"method={method}, backend={backend}"
+                f"mu_tol={mu_tol_used:.1e}, method={method}, backend={backend}"
             )
         if err < opts.tol:
             converged = True
             break
 
         sigma_h_next, sigma_gw_next = _mixed_self_energies(
-            sigma_h, sigma_gw, sigma_h_out, sigma_gw_out,
-            opts, it, history,
+            sigma_h,
+            sigma_gw,
+            sigma_h_out,
+            sigma_gw_out,
+            opts,
+            it,
+            history,
         )
 
+        mu_tol_next = _effective_mu_tol(opts.mu_tol, err)
         if opts.target_filling is None:
-            Gnext = dyson_from_sigma_matrix(h0, grid, mu, sigma_h_next, sigma_gw_next)
+            Gnext = dyson_from_sigma_matrix(
+                h0, grid, mu, sigma_h_next, sigma_gw_next
+            )
             tail_cache_next = _build_tail_cache(h0, sigma_h_next)
             mu_neval_next = 0
         else:
             mu, Gnext, tail_cache_next, mu_neval_next = _solve_mu_matrix_fast(
-                h0, sigma_h_next, sigma_gw_next, grid, float(opts.target_filling),
-                mu, opts.mu_tol, opts.mu_max_iter,
+                h0,
+                sigma_h_next,
+                sigma_gw_next,
+                grid,
+                float(opts.target_filling),
+                mu,
+                mu_tol_next,
+                opts.mu_max_iter,
             )
 
         sigma_h = sigma_h_next
@@ -293,7 +390,20 @@ def solve_matrix_gw_fast(
         G = Gnext
         tail_cache = tail_cache_next
         mu_neval = mu_neval_next
+        mu_tol_used = mu_tol_next
 
+    # Always impose the strict fixed-filling tolerance on the returned state,
+    # then recompute the raw GW residual on that exact state.
+    mu, G, tail_cache, mu_neval_final = _strict_refine_fixed_filling(
+        h0,
+        sigma_h,
+        sigma_gw,
+        grid,
+        opts.target_filling,
+        mu,
+        opts.mu_tol,
+        opts.mu_max_iter,
+    )
     density = density_from_G_cached(G, grid, mu, tail_cache)
     sigma_h_out = hartree_self_energy_matrix(density, Vq0)
     P = compute_polarization_matrix(G, grid, backend=backend)
@@ -302,9 +412,22 @@ def solve_matrix_gw_fast(
     err = _residual_error(sigma_h_out - sigma_h, sigma_gw_out - sigma_gw)
     converged = bool(err < opts.tol)
 
+    if opts.verbose and opts.target_filling is not None:
+        print(
+            f"SC-GW strict mu refine: mu={mu:.10f}, "
+            f"n={np.sum(density):.10f}, mu_eval={mu_neval_final}, "
+            f"mu_tol={opts.mu_tol:.1e}, residual={err:.3e}"
+        )
+
     (
-        smin, mmin, omin, q1min, q2min,
-        screening_mode, density_mode, density_mode_residual,
+        smin,
+        mmin,
+        omin,
+        q1min,
+        q2min,
+        screening_mode,
+        density_mode,
+        density_mode_residual,
     ) = screening_soft_modes_matrix(P, Vq, grid)
 
     return GWResult(
@@ -338,7 +461,9 @@ def solve_supercell_gw_fast(
     initial: GWResult | None = None,
 ) -> GWResult:
     """Solve the 18-site Q=(1/3,1/3)-compatible supercell with fast numerics."""
-    h0 = build_supercell_h0(grid.kmesh(), params, source_strength=source_strength)
+    h0 = build_supercell_h0(
+        grid.kmesh(), params, source_strength=source_strength
+    )
     Vq = build_supercell_interaction(grid.qmesh(), params)
     if h0.shape[-1] != NSUP:
         raise RuntimeError("unexpected supercell matrix dimension")
