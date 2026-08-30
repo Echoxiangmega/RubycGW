@@ -20,6 +20,7 @@ from .supercell import (
     period3_real_pattern,
 )
 from .supercell_gw import solve_matrix_gw, solve_supercell_gw
+from .supercell_gw_fast import solve_matrix_gw_fast, solve_supercell_gw_fast
 
 __all__ = [
     "RubyParameters", "MatsubaraGrid", "GWOptions", "GWResult",
@@ -29,4 +30,5 @@ __all__ = [
     "NSUP", "build_supercell_h0", "build_supercell_interaction",
     "charge_order_parameter", "period3_complex_mode", "period3_real_pattern",
     "solve_matrix_gw", "solve_supercell_gw",
+    "solve_matrix_gw_fast", "solve_supercell_gw_fast",
 ]
