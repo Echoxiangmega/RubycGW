@@ -128,17 +128,15 @@ def _solve_mu_matrix_fast(
     if abs(f0) < tol:
         return x0, G0, cache, neval
 
-    # The previous GW iteration normally places x0 very close to the new root.
-    # Start locally; expand only in the direction indicated by the filling error.
     step = max(0.10, 4.0 * float(grid.T))
     if f0 < 0.0:
-        lo, flo = x0, f0
+        lo, flo, Glo = x0, f0, G0
         hi = x0 + step
         fhi, Ghi = f(hi)
         for _ in range(30):
             if fhi >= 0.0:
                 break
-            lo, flo = hi, fhi
+            lo, flo, Glo = hi, fhi, Ghi
             step *= 2.0
             hi = x0 + step
             fhi, Ghi = f(hi)
@@ -147,15 +145,14 @@ def _solve_mu_matrix_fast(
                 "Could not bracket supercell chemical potential above warm start; "
                 f"target={target}, f(mu0)={f0}, f(hi)={fhi}"
             )
-        Glo = G0
     else:
-        hi, fhi = x0, f0
+        hi, fhi, Ghi = x0, f0, G0
         lo = x0 - step
         flo, Glo = f(lo)
         for _ in range(30):
             if flo <= 0.0:
                 break
-            hi, fhi = lo, flo
+            hi, fhi, Ghi = lo, flo, Glo
             step *= 2.0
             lo = x0 - step
             flo, Glo = f(lo)
@@ -164,9 +161,7 @@ def _solve_mu_matrix_fast(
                 "Could not bracket supercell chemical potential below warm start; "
                 f"target={target}, f(mu0)={f0}, f(lo)={flo}"
             )
-        Ghi = G0
 
-    # Track the best evaluated point so that even a max-iteration return is useful.
     if abs(flo) <= abs(fhi):
         best_mu, best_f, best_G = lo, flo, Glo
     else:
@@ -183,8 +178,6 @@ def _solve_mu_matrix_fast(
         else:
             trial = 0.5 * (lo + hi)
 
-        # Regula-falsi can stick to one endpoint on a flat filling plateau.
-        # Force a bisection whenever the secant proposal hugs the bracket edge.
         margin = 0.08 * width
         if (
             not np.isfinite(trial)
@@ -301,7 +294,6 @@ def solve_matrix_gw_fast(
         tail_cache = tail_cache_next
         mu_neval = mu_neval_next
 
-    # Re-evaluate the fixed-point map on exactly the returned iterate.
     density = density_from_G_cached(G, grid, mu, tail_cache)
     sigma_h_out = hartree_self_energy_matrix(density, Vq0)
     P = compute_polarization_matrix(G, grid, backend=backend)
