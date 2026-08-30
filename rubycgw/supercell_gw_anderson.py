@@ -1,8 +1,12 @@
 """Adaptive Anderson acceleration for the 18-site period-three Ruby GW solver.
 
-This module keeps the same GW fixed-point map as :mod:`supercell_gw_fast`, but
-uses a safeguarded Type-II Anderson update after a short linear warm-up.
-No physical equation is changed; only the numerical fixed-point path is changed.
+This module keeps the same GW fixed-point map as :mod:`supercell_gw_fast`.
+Anderson acceleration is used only after a contractive basin has been reached;
+trial steps that make the raw GW residual substantially worse are rolled back
+and replaced by a conservative linear recovery step.
+
+No physical equation is changed.  Only the numerical path used to solve
+``Sigma = F[Sigma]`` is modified.
 """
 
 from __future__ import annotations
@@ -25,26 +29,30 @@ from .supercell_gw import (
 )
 from .supercell_gw_fast import (
     _build_tail_cache,
+    _effective_mu_tol,
     _solve_mu_matrix_fast,
+    _strict_refine_fixed_filling,
     density_from_G_cached,
 )
 
 
 @dataclass(frozen=True)
 class AndersonOptions:
-    """Controls for safeguarded Type-II Anderson acceleration."""
+    """Controls for conservative safeguarded Type-II Anderson acceleration."""
 
     history: int = 6
     start: int = 8
     warmup_beta: float = 0.20
-    beta: float = 0.70
-    beta_min: float = 0.15
-    beta_max: float = 0.90
-    regularization: float = 1e-8
-    growth_factor: float = 1.20
-    growth_patience: int = 3
+    beta: float = 0.30
+    beta_min: float = 0.08
+    beta_max: float = 0.70
+    regularization: float = 1e-7
+    enter_residual: float = 0.10
+    enter_ratio: float = 0.50
+    stable_steps: int = 5
+    reject_factor: float = 1.10
     recovery_steps: int = 4
-    step_cap: float = 5.0
+    step_cap: float = 3.0
     scale_floor: float = 1e-4
 
 
@@ -64,10 +72,16 @@ def _validate_anderson_options(aopts: AndersonOptions) -> None:
         raise ValueError("Require beta_min <= beta <= beta_max")
     if aopts.regularization < 0.0:
         raise ValueError("Anderson regularization must be non-negative")
-    if aopts.growth_factor <= 1.0:
-        raise ValueError("Anderson growth_factor must exceed 1")
-    if aopts.growth_patience < 1 or aopts.recovery_steps < 0:
-        raise ValueError("Invalid Anderson growth/recovery settings")
+    if aopts.enter_residual <= 0.0:
+        raise ValueError("Anderson enter_residual must be positive")
+    if not (0.0 < aopts.enter_ratio <= 1.0):
+        raise ValueError("Anderson enter_ratio must lie in (0,1]")
+    if aopts.stable_steps < 1:
+        raise ValueError("Anderson stable_steps must be positive")
+    if aopts.reject_factor <= 1.0:
+        raise ValueError("Anderson reject_factor must exceed 1")
+    if aopts.recovery_steps < 0:
+        raise ValueError("Anderson recovery_steps must be non-negative")
     if aopts.step_cap <= 1.0:
         raise ValueError("Anderson step_cap must exceed 1")
     if aopts.scale_floor <= 0.0:
@@ -121,11 +135,7 @@ def _anderson_type2_step(
     sg: float,
     step_cap: float,
 ) -> tuple[np.ndarray, np.ndarray, bool]:
-    """Safeguarded Type-II Anderson step.
-
-    History contains consecutive (X_H, X_GW, R_H, R_GW) states and already
-    includes the current state as its last entry.
-    """
+    """Return one locally safeguarded Type-II Anderson proposal."""
     linear_h = beta * res_h
     linear_gw = beta * res_gw
     if len(history) < 2:
@@ -180,6 +190,40 @@ def _anderson_type2_step(
     return sigma_h + step_h, sigma_gw + step_gw, True
 
 
+def _solve_next_G(
+    h0: np.ndarray,
+    grid: MatsubaraGrid,
+    opts: GWOptions,
+    sigma_h_next: np.ndarray,
+    sigma_gw_next: np.ndarray,
+    mu_guess: float,
+    outer_residual: float,
+):
+    mu_tol = _effective_mu_tol(opts.mu_tol, outer_residual)
+    if opts.target_filling is None:
+        Gnext = dyson_from_sigma_matrix(
+            h0, grid, mu_guess, sigma_h_next, sigma_gw_next
+        )
+        return (
+            float(mu_guess),
+            Gnext,
+            _build_tail_cache(h0, sigma_h_next),
+            0,
+            mu_tol,
+        )
+    mu, Gnext, cache, neval = _solve_mu_matrix_fast(
+        h0,
+        sigma_h_next,
+        sigma_gw_next,
+        grid,
+        float(opts.target_filling),
+        float(mu_guess),
+        mu_tol,
+        opts.mu_max_iter,
+    )
+    return mu, Gnext, cache, neval, mu_tol
+
+
 def solve_matrix_gw_anderson(
     h0: np.ndarray,
     Vq: np.ndarray,
@@ -188,7 +232,7 @@ def solve_matrix_gw_anderson(
     initial: GWResult | None = None,
     anderson: AndersonOptions = AndersonOptions(),
 ) -> GWResult:
-    """Solve matrix GW with warmup -> safeguarded Anderson -> recovery."""
+    """Solve matrix GW with basin finding, Anderson acceleration and rollback."""
     _validate_anderson_options(anderson)
     backend = _check_backend(opts.momentum_backend)
 
@@ -214,10 +258,9 @@ def solve_matrix_gw_anderson(
         )
         mu = float(opts.mu)
 
+    initial_mu_tol = _effective_mu_tol(opts.mu_tol, None)
     if opts.target_filling is None:
-        G = dyson_from_sigma_matrix(
-            h0, grid, mu, sigma_h, sigma_gw
-        )
+        G = dyson_from_sigma_matrix(h0, grid, mu, sigma_h, sigma_gw)
         tail_cache = _build_tail_cache(h0, sigma_h)
         mu_neval = 0
     else:
@@ -228,9 +271,10 @@ def solve_matrix_gw_anderson(
             grid,
             float(opts.target_filling),
             mu,
-            opts.mu_tol,
+            initial_mu_tol,
             opts.mu_max_iter,
         )
+    mu_tol_used = initial_mu_tol
 
     W = np.zeros(
         (grid.nb, grid.nk1, grid.nk2, norb, norb), dtype=complex
@@ -242,9 +286,11 @@ def solve_matrix_gw_anderson(
     ] = []
     beta = float(anderson.warmup_beta)
     entered_anderson = False
+    initial_err = None
     prev_err = float("inf")
-    growth_count = 0
+    stable_count = 0
     recovery_remaining = 0
+    pending_parent = None
     err = float("inf")
     converged = False
     it = 0
@@ -261,44 +307,103 @@ def solve_matrix_gw_anderson(
         res_h = sigma_h_out - sigma_h
         res_gw = sigma_gw_out - sigma_gw
         err = _residual_error(res_h, res_gw)
+        if initial_err is None and np.isfinite(err):
+            initial_err = float(err)
+
+        # A trial Anderson step is accepted only after its *actual* GW map has
+        # been evaluated.  If it made the residual substantially worse, roll
+        # back to the parent and take a small linear recovery step instead.
+        if pending_parent is not None:
+            parent_err = float(pending_parent[5])
+            if err > float(anderson.reject_factor) * parent_err:
+                if opts.verbose:
+                    print(
+                        f"SC-GW iter {it:4d}: reject Anderson trial "
+                        f"residual={err:.3e} > "
+                        f"{anderson.reject_factor:.2f}*{parent_err:.3e}; rollback"
+                    )
+                (
+                    parent_h,
+                    parent_gw,
+                    parent_rh,
+                    parent_rgw,
+                    parent_mu,
+                    parent_err,
+                ) = pending_parent
+                recovery_beta = max(
+                    float(anderson.beta_min),
+                    min(float(anderson.warmup_beta), 0.5 * beta),
+                )
+                sigma_h_next = parent_h + recovery_beta * parent_rh
+                sigma_gw_next = parent_gw + recovery_beta * parent_rgw
+                (
+                    mu,
+                    G,
+                    tail_cache,
+                    mu_neval,
+                    mu_tol_used,
+                ) = _solve_next_G(
+                    h0,
+                    grid,
+                    opts,
+                    sigma_h_next,
+                    sigma_gw_next,
+                    parent_mu,
+                    parent_err,
+                )
+                sigma_h = sigma_h_next
+                sigma_gw = sigma_gw_next
+                history.clear()
+                entered_anderson = False
+                stable_count = 0
+                recovery_remaining = int(anderson.recovery_steps)
+                beta = recovery_beta
+                prev_err = float(parent_err)
+                pending_parent = None
+                continue
+            pending_parent = None
 
         if np.isfinite(prev_err):
-            if err > float(anderson.growth_factor) * prev_err:
-                growth_count += 1
+            if err <= 1.02 * prev_err:
+                stable_count += 1
             else:
-                growth_count = 0
+                stable_count = 0
 
             if entered_anderson:
                 if err < 0.70 * prev_err:
                     beta = min(float(anderson.beta_max), 1.08 * beta)
                 elif err > prev_err:
-                    beta = max(float(anderson.beta_min), 0.70 * beta)
+                    beta = max(float(anderson.beta_min), 0.75 * beta)
 
-        if growth_count >= int(anderson.growth_patience):
-            history.clear()
-            recovery_remaining = int(anderson.recovery_steps)
-            beta = max(float(anderson.beta_min), 0.5 * beta)
-            growth_count = 0
-
-        if (
+        can_enter = bool(
             not entered_anderson
-            and it >= int(anderson.start)
             and recovery_remaining <= 0
-        ):
-            beta = float(anderson.beta)
+            and it >= int(anderson.start)
+            and (
+                err <= float(anderson.enter_residual)
+                or (
+                    initial_err is not None
+                    and stable_count >= int(anderson.stable_steps)
+                    and err <= float(anderson.enter_ratio) * initial_err
+                )
+            )
+        )
+        if can_enter:
             entered_anderson = True
+            beta = float(anderson.beta)
+            history.clear()
 
         phase = (
             "recovery"
             if recovery_remaining > 0
-            else ("warmup" if not entered_anderson else "anderson")
+            else ("anderson" if entered_anderson else "basin-linear")
         )
         if opts.verbose:
             print(
                 f"SC-GW iter {it:4d}: residual={err:.3e}, "
                 f"mu={mu:.10f}, n={np.sum(density):.10f}, "
-                f"mu_eval={mu_neval}, mixer={phase}, "
-                f"beta={beta:.3f}, backend={backend}"
+                f"mu_eval={mu_neval}, mu_tol={mu_tol_used:.1e}, "
+                f"mixer={phase}, beta={beta:.3f}, backend={backend}"
             )
 
         if err < opts.tol:
@@ -325,16 +430,17 @@ def solve_matrix_gw_anderson(
             anderson.scale_floor,
         )
 
-        use_anderson = (
+        use_anderson = bool(
             entered_anderson
             and recovery_remaining <= 0
             and len(history) >= 2
         )
+        accepted_proposal = False
         if use_anderson:
             (
                 sigma_h_next,
                 sigma_gw_next,
-                accepted_anderson,
+                accepted_proposal,
             ) = _anderson_type2_step(
                 sigma_h,
                 sigma_gw,
@@ -347,11 +453,19 @@ def solve_matrix_gw_anderson(
                 sg,
                 anderson.step_cap,
             )
-            if not accepted_anderson:
-                history.clear()
-                recovery_remaining = max(
-                    int(anderson.recovery_steps), 2
+            if accepted_proposal:
+                pending_parent = (
+                    np.array(sigma_h, copy=True),
+                    np.array(sigma_gw, copy=True),
+                    np.array(res_h, copy=True),
+                    np.array(res_gw, copy=True),
+                    float(mu),
+                    float(err),
                 )
+            else:
+                history.clear()
+                entered_anderson = False
+                recovery_remaining = max(int(anderson.recovery_steps), 2)
                 beta = max(float(anderson.beta_min), 0.5 * beta)
         else:
             sigma_h_next = sigma_h + beta * res_h
@@ -360,36 +474,42 @@ def solve_matrix_gw_anderson(
         if recovery_remaining > 0:
             recovery_remaining -= 1
 
-        if opts.target_filling is None:
-            Gnext = dyson_from_sigma_matrix(
-                h0, grid, mu, sigma_h_next, sigma_gw_next
-            )
-            tail_cache_next = _build_tail_cache(h0, sigma_h_next)
-            mu_neval_next = 0
-        else:
-            (
-                mu,
-                Gnext,
-                tail_cache_next,
-                mu_neval_next,
-            ) = _solve_mu_matrix_fast(
-                h0,
-                sigma_h_next,
-                sigma_gw_next,
-                grid,
-                float(opts.target_filling),
-                mu,
-                opts.mu_tol,
-                opts.mu_max_iter,
-            )
+        (
+            mu,
+            Gnext,
+            tail_cache_next,
+            mu_neval_next,
+            mu_tol_next,
+        ) = _solve_next_G(
+            h0,
+            grid,
+            opts,
+            sigma_h_next,
+            sigma_gw_next,
+            mu,
+            err,
+        )
 
         sigma_h = sigma_h_next
         sigma_gw = sigma_gw_next
         G = Gnext
         tail_cache = tail_cache_next
         mu_neval = mu_neval_next
+        mu_tol_used = mu_tol_next
         prev_err = float(err)
 
+    # The returned solution always satisfies the strict requested filling
+    # tolerance, even though intermediate iterations used inexact inner solves.
+    mu, G, tail_cache, mu_neval_final = _strict_refine_fixed_filling(
+        h0,
+        sigma_h,
+        sigma_gw,
+        grid,
+        opts.target_filling,
+        mu,
+        opts.mu_tol,
+        opts.mu_max_iter,
+    )
     density = density_from_G_cached(G, grid, mu, tail_cache)
     sigma_h_out = hartree_self_energy_matrix(density, Vq0)
     P = compute_polarization_matrix(G, grid, backend=backend)
@@ -399,6 +519,13 @@ def solve_matrix_gw_anderson(
         sigma_h_out - sigma_h, sigma_gw_out - sigma_gw
     )
     converged = bool(err < opts.tol)
+
+    if opts.verbose and opts.target_filling is not None:
+        print(
+            f"SC-GW strict mu refine: mu={mu:.10f}, "
+            f"n={np.sum(density):.10f}, mu_eval={mu_neval_final}, "
+            f"mu_tol={opts.mu_tol:.1e}, residual={err:.3e}"
+        )
 
     (
         smin,
