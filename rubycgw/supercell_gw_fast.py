@@ -1,22 +1,20 @@
 """Performance-oriented 18-site period-three Ruby GW solver.
 
-This module keeps the physics and fixed-point equations of :mod:`supercell_gw`
-unchanged, but removes numerical overhead that is important for the 18-site
-problem:
+This module keeps the infinite-frequency GW equations of :mod:`supercell_gw`
+but evaluates the self-energy as a static bare-V Fock term plus a finite
+Matsubara convolution of the decaying retarded part ``W-V``.  This removes the
+artificial bosonic-cutoff dependence caused by truncating the non-decaying bare
+interaction inside ``-G W``.
 
+The numerical optimizations are:
 1. the Hartree-reference eigensystem used by the Matsubara tail subtraction is
    built once per self-consistency iterate rather than once per trial chemical
    potential;
 2. the fixed-filling chemical potential is solved by a warm-started safeguarded
    Newton method, using the analytic derivative of the numerical filling with
    respect to ``mu``;
-3. intermediate GW iterates use an inexact inner ``mu`` tolerance.  The filling
-   solve is loose while the outer GW residual is large and tightens
-   automatically near the fixed point.  The returned state is always refined
-   once more at the requested strict ``GWOptions.mu_tol``.
-
-No physical approximation is changed by these optimizations.  The returned
-object is the same ``GWResult`` used elsewhere in RubycGW.
+3. intermediate GW iterates use an inexact inner ``mu`` tolerance and tighten
+   automatically near the fixed point.
 """
 
 from __future__ import annotations
@@ -39,11 +37,11 @@ from .supercell_gw import (
     _compatible_initial,
     compute_polarization_matrix,
     compute_screened_interaction_matrix,
-    compute_sigma_gw_matrix,
     dyson_from_sigma_matrix,
     hartree_self_energy_matrix,
     screening_soft_modes_matrix,
 )
+from .supercell_gw_split import compute_sigma_gw_split_matrix
 
 
 _MU_LOOSE_TOL = 1.0e-4
@@ -156,13 +154,7 @@ def _solve_mu_matrix_fast(
     tol: float,
     max_iter: int,
 ) -> tuple[float, np.ndarray, _TailCache, int]:
-    """Warm-started safeguarded Newton solve for fixed filling.
-
-    The derivative is analytic for the exact numerical filling expression used
-    here.  Newton steps are therefore accepted whenever they remain inside an
-    accumulated sign bracket.  Bisection is used only when Newton actually
-    leaves the bracket or the derivative becomes unusable.
-    """
+    """Warm-started safeguarded Newton solve for fixed filling."""
     cache = _build_tail_cache(h0, sigma_h)
     neval = 0
 
@@ -203,11 +195,7 @@ def _solve_mu_matrix_fast(
         if lo is not None and hi is not None:
             xlo, _, _ = lo
             xhi, _, _ = hi
-            if (
-                not np.isfinite(trial)
-                or trial <= xlo
-                or trial >= xhi
-            ):
+            if not np.isfinite(trial) or trial <= xlo or trial >= xhi:
                 trial = 0.5 * (xlo + xhi)
         else:
             if not np.isfinite(trial):
@@ -322,7 +310,9 @@ def solve_matrix_gw_fast(
         sigma_h_out = hartree_self_energy_matrix(density, Vq0)
         P = compute_polarization_matrix(G, grid, backend=backend)
         W = compute_screened_interaction_matrix(P, Vq)
-        sigma_gw_out = compute_sigma_gw_matrix(G, W, grid, backend=backend)
+        sigma_gw_out = compute_sigma_gw_split_matrix(
+            G, W, Vq, grid, h0, mu, sigma_h, backend=backend
+        )
 
         res_h = sigma_h_out - sigma_h
         res_gw = sigma_gw_out - sigma_gw
@@ -388,7 +378,9 @@ def solve_matrix_gw_fast(
     sigma_h_out = hartree_self_energy_matrix(density, Vq0)
     P = compute_polarization_matrix(G, grid, backend=backend)
     W = compute_screened_interaction_matrix(P, Vq)
-    sigma_gw_out = compute_sigma_gw_matrix(G, W, grid, backend=backend)
+    sigma_gw_out = compute_sigma_gw_split_matrix(
+        G, W, Vq, grid, h0, mu, sigma_h, backend=backend
+    )
     err = _residual_error(sigma_h_out - sigma_h, sigma_gw_out - sigma_gw)
     converged = bool(err < opts.tol)
 
