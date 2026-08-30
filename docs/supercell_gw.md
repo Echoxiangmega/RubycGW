@@ -86,7 +86,7 @@ W(Q)=[I-V(q)P(Q)]^{-1}V(q),
 =-\frac{T}{N_q}\sum_Q G_{AB}(k+Q)W_{BA}(Q).
 \]
 
-The same FFT momentum backend, fixed-filling analytic tail subtraction, raw fixed-point residual, linear mixing, and Pulay/DIIS fallback are used as in the six-site solver.
+The same FFT momentum backend, fixed-filling analytic tail subtraction and raw fixed-point residual are used as in the six-site solver.
 
 `--primitive-filling` is quoted per original six-site cell. Internally the 18-site target is three times larger. Thus half filling is
 
@@ -153,9 +153,9 @@ Therefore `abs(Phi)` measures the period-three charge amplitude independently of
 
 ## 6. Optimized continuation numerics
 
-`run_supercell_gw.py` now uses `rubycgw.supercell_gw_fast` by default. The GW equations are unchanged; only the numerical fixed-point path is optimized.
+The current driver combines fast fixed-filling solves, inexact inner tolerances, branch continuation and safeguarded Anderson acceleration. The GW equations themselves are unchanged.
 
-### Fast fixed filling
+### Cached analytic tail subtraction
 
 For fixed filling, the static reference
 
@@ -163,16 +163,51 @@ For fixed filling, the static reference
 h_{ref}(k)=h_0(k)+\Sigma_H
 \]
 
-is diagonalized once per GW iterate. The eigensystem is cached while the chemical potential is varied. The chemical potential itself is warm-started from the previous GW iterate and solved by a safeguarded secant/bracketing method rather than a fresh wide bisection.
+is diagonalized once per outer GW iterate. The eigensystem is cached while the chemical potential is varied.
 
-The defaults are
+### Safeguarded Newton chemical-potential solve
 
-```text
---mu-tol 1e-8
---mu-max-iter 40
-```
+For fixed self-energies define
 
-With `--verbose-iterations`, each GW iteration prints `mu_eval`, the number of Dyson evaluations used by that chemical-potential solve.
+\[
+F(\mu)=N(\mu)-N_{target}.
+\]
+
+The solver now evaluates the analytic derivative of the same tail-subtracted numerical filling. Since
+
+\[
+G^{-1}=i\omega+\mu-h_0-\Sigma_H-\Sigma_{GW},
+\]
+
+at fixed self-energy
+
+\[
+\frac{\partial G}{\partial\mu}=-G^2.
+\]
+
+The analytic reference-tail contribution is differentiated as well, so Newton steps require no extra Dyson inversion beyond evaluating the new trial `mu`. A sign bracket is accumulated as a safeguard; bisection is used only if Newton leaves the bracket or the derivative is unusable.
+
+With `--verbose-iterations`, `mu_eval` reports the number of Dyson evaluations used by the current chemical-potential solve.
+
+### Inexact inner filling solve
+
+It is wasteful to force
+
+\[
+|N-N_{target}|<10^{-8}
+\]
+
+while the outer GW residual is still of order `1e-1`. Intermediate iterations therefore use
+
+\[
+\tau_\mu=
+\max\left(\tau_{strict},
+\min\left(10^{-4},10^{-2}\epsilon_{GW}\right)\right),
+\]
+
+where `epsilon_GW` is the outer raw self-energy residual and `tau_strict=--mu-tol` (default `1e-8`). Thus a far-from-converged iterate typically solves filling only to `1e-4`; the tolerance automatically tightens to `1e-5`, `1e-6`, ... as the GW fixed point is approached.
+
+Before any GW state is returned, the chemical potential is refined once more at the strict requested `--mu-tol`, and the raw GW residual is recomputed on that exact state.
 
 ### Loose ramp, strict target
 
@@ -188,17 +223,33 @@ while the requested final `V` at `h=0` uses
 --gw-tol 1e-8
 ```
 
-This avoids spending hundreds of iterations polishing a state that will only be used as the seed of the next nearby continuation point.
+### Conservative Anderson acceleration
+
+The solver no longer switches to aggressive Anderson mixing merely because a fixed number of iterations has passed. It first performs ordinary linear basin finding. Anderson becomes eligible only when either
+
+\[
+\epsilon_{GW}\lesssim 0.1
+\]
+
+or a stable sequence has reduced the residual substantially relative to the starting value.
+
+When Anderson starts, the effective initial damping is at most about `0.3`. Recent states are used in a Type-II Anderson least-squares update with block scaling between the Hartree and dynamic GW self-energy sectors.
+
+Crucially, an Anderson proposal is checked using the *actual next GW map*. If it raises the residual by more than about 10%, the proposal is rejected, the state is rolled back to its parent, Anderson history is cleared and a conservative linear recovery step is taken. This prevents trajectories such as
+
+```text
+0.3 -> 0.6 -> 1.1 -> 0.3
+```
+
+from consuming many iterations.
 
 ### Retry continuation
 
-If one mixing strategy reaches a finite but not yet converged state, the next retry starts from the best state reached so far. A nearly converged broken-symmetry solution is therefore not discarded when switching from, for example,
+If an attempt remains finite but does not meet the requested tolerance, the next linear/Pulay fallback starts from the best state reached at the same `(V,h)` instead of discarding it.
 
-```text
-linear 0.20 -> linear 0.10 -> Pulay
-```
+### V predictor
 
-`supercell_scan.csv` records `requested_tol` and `carried_retry_seed` for every attempt.
+After two consecutive converged zero-source states are identified as the same charge-order branch, the next `V` may be initialized by a damped secant extrapolation of `Sigma_H`, `Sigma_GW` and `mu`. The predictor is disabled automatically across a normal-to-broken branch change.
 
 ## 7. First validation run
 
@@ -209,7 +260,8 @@ python run_supercell_gw.py \
   --V 1.0 \
   --primitive-filling 3 \
   --nk1 3 --nk2 3 \
-  --nw 55 --nomega 12
+  --nw 55 --nomega 12 \
+  --verbose-iterations
 ```
 
 The default V path is
@@ -219,6 +271,8 @@ The default V path is
 ```
 
 and the source is inserted at `V=0.78` then removed before continuation proceeds.
+
+After the latest optimization, a useful first diagnostic is that `mu_eval` should usually be small while the GW residual is large, with `mu_tol` printed near `1e-4`. Only close to the fixed point should `mu_tol` tighten toward `1e-8`.
 
 Once zero-source checkpoints exist, use
 
@@ -255,8 +309,8 @@ Main files:
 
 ```text
 supercell_scan.csv
-    every linear/Pulay attempt, residual, requested tolerance, retry-seed status,
-    source, mu, |Phi|, screening smin and soft supercell Q
+    every Anderson/linear/Pulay attempt, residual, requested tolerance,
+    retry-seed status, source, mu, |Phi|, screening smin and soft supercell Q
 
 density_profile.csv
     all 18 site densities for every converged V/source substep
@@ -271,7 +325,7 @@ settings.json
     complete numerical settings and resolved continuation schedules
 ```
 
-Converged zero-source continuation states are checkpointed for later restart. Failed attempts are never promoted to the next V/source point, but a finite low-residual failed attempt may seed the next *retry at the same V/source point*.
+Converged zero-source continuation states are checkpointed for later restart. Failed attempts are never promoted to the next V/source point, but a finite low-residual failed attempt may seed the next retry at the same point.
 
 ## 10. What this does not yet calculate
 
