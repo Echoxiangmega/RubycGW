@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Run 18-site periodic Ruby GW across the period-three charge instability.
+"""Run optimized 18-site periodic Ruby GW across the period-three charge instability.
 
-The supercell has translations T1=a1-a2 and T2=a1+2a2, so the primitive
-Q=(1/3,1/3) mode is folded to supercell q=0. A temporary period-three charge
-source can be turned on once the V ramp reaches ``--source-onset-V`` and is then
-adiabatically removed. Subsequent V points continue from the zero-source
-broken-symmetry solution.
+The supercell has translations T1=a1-a2 and T2=a1+2a2, so primitive
+Q=(1/3,1/3) folds to supercell q=0.  The driver uses three continuation
+optimizations by default:
 
-Every converged zero-source point is checkpointed by default. A later run can
-use ``--restart-from auto`` to start from the nearest compatible checkpoint at
-or below the requested target V, instead of repeating the ramp from V=0.7.
+* fast warm-started fixed-filling chemical-potential solves with cached tails;
+* a looser tolerance for intermediate/source-ramp points and a strict tolerance
+  only for the requested final zero-source point;
+* failed-but-finite retries continue from the best previous attempt rather than
+  restarting from the old V/source seed.
 
-``--primitive-filling`` is always quoted per original six-site Ruby unit cell;
-the internal 18-site target is three times larger.
+Every converged zero-source point is checkpointed by default.  Use
+``--restart-from auto`` to continue from the nearest compatible checkpoint.
+``--primitive-filling`` is quoted per original six-site Ruby unit cell; the
+internal 18-site filling is three times larger.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ from rubycgw.grids import MatsubaraGrid
 from rubycgw.gw import GWOptions
 from rubycgw.model import RubyParameters
 from rubycgw.supercell import NSUP, charge_order_parameter, period3_real_pattern
-from rubycgw.supercell_gw import solve_supercell_gw
+from rubycgw.supercell_gw_fast import solve_supercell_gw_fast
 
 
 def _v_schedule(target: float, explicit: list[float] | None) -> list[float]:
@@ -62,12 +64,10 @@ def _v_schedule_after_restart(
     explicit: list[float] | None,
     restart_V: float,
 ) -> list[float]:
-    """Continuation schedule after a checkpoint, preserving explicit order."""
     target = float(target)
     restart_V = float(restart_V)
     if np.isclose(target, restart_V):
         return []
-
     if explicit:
         values = [float(x) for x in explicit]
         if not np.isclose(values[-1], target):
@@ -75,11 +75,8 @@ def _v_schedule_after_restart(
         if target > restart_V:
             return [v for v in values if v > restart_V + 1e-12]
         return [v for v in values if v < restart_V - 1e-12]
-
     if target < restart_V:
-        # Downward continuation is allowed, but without an automatic dense ramp.
         return [target]
-
     return [v for v in _v_schedule(target, None) if v > restart_V + 1e-12]
 
 
@@ -107,17 +104,31 @@ def _attempt_schedule(args) -> list[tuple[str, float]]:
     return out
 
 
-def _gw_options(args, target_supercell: float, mu: float, method: str, mixing: float) -> GWOptions:
+def _point_tolerance(args, V: float, source: float) -> float:
+    is_final = np.isclose(float(V), float(args.V)) and np.isclose(float(source), 0.0)
+    return float(args.gw_tol if is_final else args.ramp_tol)
+
+
+def _gw_options(
+    args,
+    target_supercell: float,
+    mu: float,
+    method: str,
+    mixing: float,
+    tol: float,
+) -> GWOptions:
     return GWOptions(
         mu=float(mu),
         target_filling=float(target_supercell),
         max_iter=args.gw_max_iter,
-        tol=args.gw_tol,
+        tol=float(tol),
         mixing=float(mixing),
         mixing_method=str(method),
         pulay_history=args.gw_pulay_history,
         pulay_start=args.gw_pulay_start,
         pulay_regularization=args.gw_pulay_regularization,
+        mu_tol=args.mu_tol,
+        mu_max_iter=args.mu_max_iter,
         verbose=args.verbose_iterations,
         momentum_backend=args.momentum_backend,
     )
@@ -143,26 +154,51 @@ def _diagnostics(gw) -> dict:
     }
 
 
-def _solve_adaptive(args, params, grid, source: float, target_supercell: float,
-                    mu_guess: float, initial):
+def _finite_gw_state(gw) -> bool:
+    if gw is None or not np.isfinite(float(gw.final_error)):
+        return False
+    return bool(
+        np.all(np.isfinite(gw.Sigma_H))
+        and np.all(np.isfinite(gw.Sigma_GW))
+        and np.isfinite(float(gw.mu))
+    )
+
+
+def _solve_adaptive(
+    args,
+    params,
+    grid,
+    source: float,
+    target_supercell: float,
+    mu_guess: float,
+    initial,
+    tol: float,
+):
+    """Try mixing strategies while preserving the best finite retry state."""
     attempts = []
-    last = None
+    best = None
+    best_error = float("inf")
+    retry_seed = initial
+    local_mu = float(mu_guess)
+
     for i, (method, mixing) in enumerate(_attempt_schedule(args), start=1):
         t0 = time.perf_counter()
+        used_carried_seed = bool(i > 1 and retry_seed is not initial)
         try:
-            gw = solve_supercell_gw(
+            gw = solve_supercell_gw_fast(
                 params,
                 grid,
-                _gw_options(args, target_supercell, mu_guess, method, mixing),
+                _gw_options(args, target_supercell, local_mu, method, mixing, tol),
                 source_strength=source,
-                initial=initial,
+                initial=retry_seed,
             )
             runtime = time.perf_counter() - t0
-            last = gw
             row = {
                 "attempt": i,
                 "method": method,
                 "mixing": float(mixing),
+                "requested_tol": float(tol),
+                "carried_retry_seed": used_carried_seed,
                 "converged": bool(gw.converged),
                 "iterations": int(gw.iterations),
                 "final_error": float(gw.final_error),
@@ -170,12 +206,29 @@ def _solve_adaptive(args, params, grid, source: float, target_supercell: float,
                 "exception": "",
             }
             row.update(_diagnostics(gw))
+
+            if _finite_gw_state(gw) and float(gw.final_error) < best_error:
+                best = gw
+                best_error = float(gw.final_error)
+            if row["converged"]:
+                attempts.append(row)
+                return gw, attempts
+
+            # The next damping/mixer starts from the best state reached so far.
+            # This is essential near the broken-symmetry branch: a nearly
+            # converged charge-ordered state is not thrown away.
+            if best is not None:
+                retry_seed = best
+                local_mu = float(best.mu)
+
         except Exception as exc:
             runtime = time.perf_counter() - t0
             row = {
                 "attempt": i,
                 "method": method,
                 "mixing": float(mixing),
+                "requested_tol": float(tol),
+                "carried_retry_seed": used_carried_seed,
                 "converged": False,
                 "iterations": np.nan,
                 "final_error": np.nan,
@@ -197,9 +250,8 @@ def _solve_adaptive(args, params, grid, source: float, target_supercell: float,
                 "density_mode_residual": np.nan,
             }
         attempts.append(row)
-        if row["converged"]:
-            break
-    return last, attempts
+
+    return best, attempts
 
 
 def _write_csv(rows: list[dict], path: Path) -> None:
@@ -211,8 +263,14 @@ def _write_csv(rows: list[dict], path: Path) -> None:
         writer.writerows(rows)
 
 
-def _append_density_rows(rows: list[dict], gw, V: float, source: float,
-                         v_step: int, source_step: int) -> None:
+def _append_density_rows(
+    rows: list[dict],
+    gw,
+    V: float,
+    source: float,
+    v_step: int,
+    source_step: int,
+) -> None:
     pattern = period3_real_pattern()
     mean_density = float(np.mean(gw.density))
     for I, density in enumerate(gw.density):
@@ -265,8 +323,7 @@ def _plot_zero_source(rows: list[dict], outdir: Path) -> None:
 
 def _parse_args():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--V", type=float, default=1.0,
-                   help="Target interaction. Use --V 3 after the first validation run.")
+    p.add_argument("--V", type=float, default=1.0)
     p.add_argument("--V-values", nargs="+", type=float, default=None)
     p.add_argument("--T", type=float, default=0.05)
     p.add_argument("--ti", type=float, default=0.4)
@@ -281,11 +338,20 @@ def _parse_args():
     p.add_argument("--momentum-backend", choices=["fft", "direct"], default="fft")
 
     p.add_argument("--source-onset-V", type=float, default=0.78)
-    p.add_argument("--source-sequence", nargs="+", type=float,
-                   default=[1e-2, 5e-3, 1e-3, 0.0])
+    p.add_argument(
+        "--source-sequence", nargs="+", type=float,
+        default=[1e-2, 5e-3, 1e-3, 0.0],
+    )
 
     p.add_argument("--gw-max-iter", type=int, default=300)
-    p.add_argument("--gw-tol", type=float, default=1e-8)
+    p.add_argument(
+        "--gw-tol", type=float, default=1e-8,
+        help="Strict tolerance for the requested final zero-source V point.",
+    )
+    p.add_argument(
+        "--ramp-tol", type=float, default=1e-6,
+        help="Tolerance for intermediate V points and nonzero-source steps.",
+    )
     p.add_argument("--gw-mixing", type=float, default=0.20)
     p.add_argument("--gw-retry-mixings", nargs="+", type=float, default=[0.10])
     p.add_argument("--no-gw-pulay", action="store_true")
@@ -293,26 +359,23 @@ def _parse_args():
     p.add_argument("--gw-pulay-history", type=int, default=6)
     p.add_argument("--gw-pulay-start", type=int, default=3)
     p.add_argument("--gw-pulay-regularization", type=float, default=1e-10)
+    p.add_argument(
+        "--mu-tol", type=float, default=1e-8,
+        help="Fixed-filling tolerance for the warm-started chemical-potential solve.",
+    )
+    p.add_argument("--mu-max-iter", type=int, default=40)
     p.add_argument("--mu0", type=float, default=0.0)
     p.add_argument("--verbose-iterations", action="store_true")
 
     p.add_argument(
-        "--restart-from",
-        type=str,
-        default=None,
+        "--restart-from", type=str, default=None,
         help="Checkpoint .npz path, or 'auto' for nearest compatible V<=target.",
     )
     p.add_argument(
-        "--checkpoint-dir",
-        type=str,
+        "--checkpoint-dir", type=str,
         default="results/supercell18/checkpoints",
-        help="Persistent directory used for zero-source GW checkpoints.",
     )
-    p.add_argument(
-        "--no-checkpoints",
-        action="store_true",
-        help="Do not save converged zero-source continuation states.",
-    )
+    p.add_argument("--no-checkpoints", action="store_true")
     p.add_argument("--outdir", type=str, default=None)
     return p.parse_args()
 
@@ -321,9 +384,12 @@ def main():
     args = _parse_args()
     if not (0.0 < args.primitive_filling < 6.0):
         raise ValueError("--primitive-filling must lie between 0 and 6")
+    if not (0.0 < args.gw_tol <= args.ramp_tol):
+        raise ValueError("Require 0 < --gw-tol <= --ramp-tol.")
+    if args.mu_tol <= 0.0:
+        raise ValueError("--mu-tol must be positive.")
 
     target_supercell = 3.0 * float(args.primitive_filling)
-
     if args.outdir is None:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         outdir = Path("results") / "supercell18" / stamp
@@ -344,10 +410,10 @@ def main():
     mu_guess = float(args.mu0)
     restart_meta = None
     restart_path = None
-
     compatibility_params = RubyParameters(
         ti=args.ti, t1=args.t1, t2=args.t2, V=float(args.V)
     )
+
     if args.restart_from is not None:
         if args.restart_from.lower() == "auto":
             restart_path = find_nearest_compatible_checkpoint(
@@ -358,10 +424,7 @@ def main():
                 args.primitive_filling,
             )
             if restart_path is None:
-                print(
-                    "No compatible zero-source checkpoint found; "
-                    "falling back to the ordinary V ramp."
-                )
+                print("No compatible checkpoint found; using ordinary V ramp.")
         else:
             restart_path = Path(args.restart_from)
 
@@ -384,14 +447,21 @@ def main():
             restart_V >= args.source_onset_V - 1e-12
             and float(restart_meta.get("charge_order_abs", 0.0)) > 1e-6
         )
-        # If the checkpoint is already beyond onset but still symmetric, run the
-        # source-removal protocol at the checkpoint V before continuing.
         if (
             not source_has_been_used
             and restart_V >= args.source_onset_V - 1e-12
             and (not schedule or not np.isclose(schedule[0], restart_V))
         ):
             schedule = [restart_V] + schedule
+
+        # A checkpoint saved with ramp_tol is an excellent seed but should still
+        # be refined if it is exactly the requested final V and not at gw_tol.
+        if (
+            np.isclose(restart_V, args.V)
+            and float(restart_meta.get("final_error", np.inf)) > args.gw_tol
+            and not schedule
+        ):
+            schedule = [float(args.V)]
 
     source_sequence = _source_schedule(args.source_sequence)
 
@@ -402,36 +472,39 @@ def main():
     settings["matrix_dimension"] = NSUP
     settings["resolved_restart_path"] = None if restart_path is None else str(restart_path)
     settings["restart_metadata"] = restart_meta
+    settings["solver"] = "supercell_gw_fast"
     with (outdir / "settings.json").open("w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
 
-    print("=" * 84)
-    print("18-site periodic Ruby supercell GW")
-    print("T1=a1-a2, T2=a1+2a2; primitive Q=(1/3,1/3) is folded to q_sc=0")
+    print("=" * 88)
+    print("18-site periodic Ruby supercell GW (optimized)")
+    print("T1=a1-a2, T2=a1+2a2; primitive Q=(1/3,1/3) -> q_sc=0")
     print(
         f"primitive filling={args.primitive_filling:g}; supercell target={target_supercell:g}; "
         f"grid={args.nk1}x{args.nk2}, nw={args.nw}, nOmega={args.nomega}, T={args.T:g}"
     )
+    print(
+        f"tolerances: ramp={args.ramp_tol:.1e}, final={args.gw_tol:.1e}, "
+        f"mu={args.mu_tol:.1e}"
+    )
     if restart_meta is not None:
         print(
             f"restart: {restart_path}  (V={float(restart_meta['V']):g}, "
+            f"err={float(restart_meta.get('final_error', np.nan)):.2e}, "
             f"|Phi|={float(restart_meta.get('charge_order_abs', 0.0)):.3e})"
         )
-    print("V ramp:", " -> ".join(f"{v:g}" for v in schedule) if schedule else "already at target")
+    print("V ramp:", " -> ".join(f"{v:g}" for v in schedule) if schedule else "already strict-converged")
     print(
-        f"source first applied when needed at V>={args.source_onset_V:g}: "
+        f"source when needed at V>={args.source_onset_V:g}: "
         + " -> ".join(f"{h:g}" for h in source_sequence)
     )
-    print(
-        "GW attempts:",
-        " -> ".join(f"{m}:{x:g}" for m, x in _attempt_schedule(args)),
-    )
+    print("GW attempts:", " -> ".join(f"{m}:{x:g}" for m, x in _attempt_schedule(args)))
     if not args.no_checkpoints:
         print("checkpoint directory:", checkpoint_dir)
-    print("=" * 84)
+    print("=" * 88)
 
     if not schedule:
-        print("Target V is already available in the selected checkpoint; no GW iterations needed.")
+        print("Requested V is already available at the strict target tolerance.")
         print("checkpoint:", restart_path)
         return
 
@@ -448,9 +521,14 @@ def main():
             sources = [0.0]
 
         for ih, source in enumerate(sources, start=1):
-            print(f"\n[V {iv}/{len(schedule)}, source {ih}/{len(sources)}] V={V:g}, h={source:g}")
+            tol = _point_tolerance(args, V, source)
+            print(
+                f"\n[V {iv}/{len(schedule)}, source {ih}/{len(sources)}] "
+                f"V={V:g}, h={source:g}, tol={tol:.1e}"
+            )
             gw, attempts = _solve_adaptive(
-                args, params, grid, source, target_supercell, mu_guess, previous
+                args, params, grid, source, target_supercell,
+                mu_guess, previous, tol,
             )
 
             for att in attempts:
@@ -471,7 +549,8 @@ def main():
                 exc = "" if not att["exception"] else f" exception={att['exception']}"
                 print(
                     f"  try {att['attempt']}/{len(_attempt_schedule(args))}: "
-                    f"{att['method']} mix={att['mixing']:.3f} conv={att['converged']} "
+                    f"{att['method']} mix={att['mixing']:.3f} "
+                    f"carry={att['carried_retry_seed']} conv={att['converged']} "
                     f"it={att['iterations']} res={att['final_error']:.3e} "
                     f"|Phi|={att['charge_order_abs']:.3e} "
                     f"smin={att['min_screening_singular_value']:.3e} "
@@ -481,7 +560,13 @@ def main():
                 _write_csv(attempt_rows, outdir / "supercell_scan.csv")
 
             if gw is None or not gw.converged:
-                print("\nSTOP: all GW attempts failed at this V/source point.")
+                if gw is not None:
+                    print(
+                        f"\nSTOP: best retry state reached residual={gw.final_error:.3e}, "
+                        f"but requested tol={tol:.3e}."
+                    )
+                else:
+                    print("\nSTOP: all GW attempts failed at this V/source point.")
                 stopped = True
                 break
 
@@ -497,9 +582,7 @@ def main():
             )
 
             if np.isclose(source, 0.0) and not args.no_checkpoints:
-                ckpt = checkpoint_dir / checkpoint_filename(
-                    V, args.primitive_filling, grid
-                )
+                ckpt = checkpoint_dir / checkpoint_filename(V, args.primitive_filling, grid)
                 save_supercell_checkpoint(
                     ckpt,
                     gw,
