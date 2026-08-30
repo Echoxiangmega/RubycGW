@@ -46,8 +46,6 @@ from .supercell_gw import (
 )
 
 
-# Inexact inner-solve defaults.  The exact requested ``opts.mu_tol`` remains the
-# floor and is always imposed again before a state is returned.
 _MU_LOOSE_TOL = 1.0e-4
 _MU_RESIDUAL_FACTOR = 1.0e-2
 
@@ -114,15 +112,7 @@ def _total_filling_slope(
     mu: float,
     cache: _TailCache,
 ) -> float:
-    """Derivative dN/dmu of the same tail-subtracted numerical filling.
-
-    With fixed self-energies,
-
-        dG/dmu = -G^2.
-
-    The analytic reference contribution is differentiated exactly as well.  This
-    gives a Newton slope without another Dyson matrix inversion.
-    """
+    """Derivative dN/dmu of the same tail-subtracted numerical filling."""
     evals = cache.evals
     occ = _fermi(evals - float(mu), grid.T)
     d_ref = float(np.sum(occ * (1.0 - occ)) / (grid.T * grid.nk))
@@ -147,13 +137,7 @@ def _effective_mu_tol(
     loose_tol: float = _MU_LOOSE_TOL,
     residual_factor: float = _MU_RESIDUAL_FACTOR,
 ) -> float:
-    """Tolerance for an inexact fixed-filling inner solve.
-
-    Far from the GW fixed point it is wasteful to solve the particle number to
-    1e-8 at every outer iteration.  The tolerance is therefore at most
-    ``loose_tol`` and tightens proportionally to the previous/current outer
-    residual, with ``strict_tol`` as a hard floor.
-    """
+    """Tolerance for an inexact fixed-filling inner solve."""
     strict = float(strict_tol)
     loose = max(strict, float(loose_tol))
     if outer_residual is None or not np.isfinite(float(outer_residual)):
@@ -172,12 +156,12 @@ def _solve_mu_matrix_fast(
     tol: float,
     max_iter: int,
 ) -> tuple[float, np.ndarray, _TailCache, int]:
-    """Warm-started safeguarded Newton solve for the fixed-filling chemical potential.
+    """Warm-started safeguarded Newton solve for fixed filling.
 
-    Newton uses the analytic derivative of the *same* tail-subtracted numerical
-    filling used in the root equation.  A sign bracket is accumulated whenever
-    possible; an unsafe Newton proposal is then replaced by bisection.  Before a
-    bracket exists, the Newton displacement is clipped to a local energy scale.
+    The derivative is analytic for the exact numerical filling expression used
+    here.  Newton steps are therefore accepted whenever they remain inside an
+    accumulated sign bracket.  Bisection is used only when Newton actually
+    leaves the bracket or the derivative becomes unusable.
     """
     cache = _build_tail_cache(h0, sigma_h)
     neval = 0
@@ -200,7 +184,7 @@ def _solve_mu_matrix_fast(
     best_mu, best_f, best_G = x, fx, Gx
     lo = None
     hi = None
-    step_cap = max(0.25, 8.0 * float(grid.T))
+    step_cap = max(0.50, 12.0 * float(grid.T))
 
     for _ in range(max(int(max_iter), 1)):
         if fx < 0.0:
@@ -219,12 +203,10 @@ def _solve_mu_matrix_fast(
         if lo is not None and hi is not None:
             xlo, _, _ = lo
             xhi, _, _ = hi
-            width = xhi - xlo
-            margin = 0.02 * width
             if (
                 not np.isfinite(trial)
-                or trial <= xlo + margin
-                or trial >= xhi - margin
+                or trial <= xlo
+                or trial >= xhi
             ):
                 trial = 0.5 * (xlo + xhi)
         else:
@@ -392,8 +374,6 @@ def solve_matrix_gw_fast(
         mu_neval = mu_neval_next
         mu_tol_used = mu_tol_next
 
-    # Always impose the strict fixed-filling tolerance on the returned state,
-    # then recompute the raw GW residual on that exact state.
     mu, G, tail_cache, mu_neval_final = _strict_refine_fixed_filling(
         h0,
         sigma_h,
