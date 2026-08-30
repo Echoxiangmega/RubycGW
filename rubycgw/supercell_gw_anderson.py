@@ -1,18 +1,8 @@
 """Adaptive Anderson acceleration for the 18-site period-three Ruby GW solver.
 
 This module keeps the same GW fixed-point map as :mod:`supercell_gw_fast`, but
-uses a safeguarded Type-II Anderson update after a short linear warm-up.  The
-algorithm is deliberately conservative:
-
-* the first few steps use ordinary damped fixed-point iteration;
-* Anderson coefficients are obtained from a block-scaled residual metric so the
-  static Hartree block and the much larger dynamic GW block are both visible;
-* excessive residual growth clears the history and triggers a few recovery
-  linear steps with reduced damping;
-* an over-large Anderson proposal is rejected in favour of a linear step.
-
-No physical equation is changed.  Only the numerical path used to solve
-``Sigma = F[Sigma]`` is modified.
+uses a safeguarded Type-II Anderson update after a short linear warm-up.
+No physical equation is changed; only the numerical fixed-point path is changed.
 """
 
 from __future__ import annotations
@@ -42,10 +32,11 @@ from .supercell_gw_fast import (
 
 @dataclass(frozen=True)
 class AndersonOptions:
-    """Numerical controls for safeguarded Type-II Anderson acceleration."""
+    """Controls for safeguarded Type-II Anderson acceleration."""
 
     history: int = 6
     start: int = 8
+    warmup_beta: float = 0.20
     beta: float = 0.70
     beta_min: float = 0.15
     beta_max: float = 0.90
@@ -62,8 +53,15 @@ def _validate_anderson_options(aopts: AndersonOptions) -> None:
         raise ValueError("Anderson history must be at least 2")
     if aopts.start < 1:
         raise ValueError("Anderson start must be at least 1")
-    if not (0.0 < aopts.beta_min <= aopts.beta <= aopts.beta_max <= 1.0):
-        raise ValueError("Require 0 < beta_min <= beta <= beta_max <= 1")
+    if not (
+        0.0 < aopts.beta_min
+        <= aopts.warmup_beta
+        <= aopts.beta_max
+        <= 1.0
+    ):
+        raise ValueError("Require 0 < beta_min <= warmup_beta <= beta_max <= 1")
+    if not (aopts.beta_min <= aopts.beta <= aopts.beta_max):
+        raise ValueError("Require beta_min <= beta <= beta_max")
     if aopts.regularization < 0.0:
         raise ValueError("Anderson regularization must be non-negative")
     if aopts.growth_factor <= 1.0:
@@ -87,22 +85,28 @@ def _block_scales(
     sigma_gw_out: np.ndarray,
     floor: float,
 ) -> tuple[float, float]:
-    """Current scales used only in the Anderson least-squares metric."""
     sh = max(_rms(sigma_h), _rms(sigma_h_out), float(floor))
     sg = max(_rms(sigma_gw), _rms(sigma_gw_out), float(floor))
     return sh, sg
 
 
-def _metric_vector(h: np.ndarray, gw: np.ndarray, sh: float, sg: float) -> np.ndarray:
-    """Flatten two blocks with equal block weight and dynamic amplitude scaling."""
-    vh = np.asarray(h, dtype=complex).reshape(-1) / (sh * np.sqrt(max(h.size, 1)))
-    vg = np.asarray(gw, dtype=complex).reshape(-1) / (sg * np.sqrt(max(gw.size, 1)))
+def _metric_vector(
+    h: np.ndarray, gw: np.ndarray, sh: float, sg: float
+) -> np.ndarray:
+    """Equal-weight Hartree/GW block metric, with amplitude normalization."""
+    vh = np.asarray(h, dtype=complex).reshape(-1) / (
+        sh * np.sqrt(max(h.size, 1))
+    )
+    vg = np.asarray(gw, dtype=complex).reshape(-1) / (
+        sg * np.sqrt(max(gw.size, 1))
+    )
     return np.concatenate([vh, vg])
 
 
-def _metric_norm(h: np.ndarray, gw: np.ndarray, sh: float, sg: float) -> float:
-    v = _metric_vector(h, gw, sh, sg)
-    return float(np.linalg.norm(v))
+def _metric_norm(
+    h: np.ndarray, gw: np.ndarray, sh: float, sg: float
+) -> float:
+    return float(np.linalg.norm(_metric_vector(h, gw, sh, sg)))
 
 
 def _anderson_type2_step(
@@ -117,10 +121,10 @@ def _anderson_type2_step(
     sg: float,
     step_cap: float,
 ) -> tuple[np.ndarray, np.ndarray, bool]:
-    """Return a safeguarded Type-II Anderson update.
+    """Safeguarded Type-II Anderson step.
 
-    ``history`` contains consecutive ``(X_H, X_GW, R_H, R_GW)`` states and must
-    already include the current state as its last entry.
+    History contains consecutive (X_H, X_GW, R_H, R_GW) states and already
+    includes the current state as its last entry.
     """
     linear_h = beta * res_h
     linear_gw = beta * res_gw
@@ -128,17 +132,12 @@ def _anderson_type2_step(
         return sigma_h + linear_h, sigma_gw + linear_gw, False
 
     dR_cols = []
-    dX_h = []
-    dX_gw = []
-    dR_h = []
-    dR_gw = []
+    dX_h, dX_gw, dR_h, dR_gw = [], [], [], []
     for old, new in zip(history[:-1], history[1:]):
         xh0, xg0, rh0, rg0 = old
         xh1, xg1, rh1, rg1 = new
-        dxh = xh1 - xh0
-        dxg = xg1 - xg0
-        drh = rh1 - rh0
-        drg = rg1 - rg0
+        dxh, dxg = xh1 - xh0, xg1 - xg0
+        drh, drg = rh1 - rh0, rg1 - rg0
         dX_h.append(dxh)
         dX_gw.append(dxg)
         dR_h.append(drh)
@@ -153,8 +152,7 @@ def _anderson_type2_step(
         A_aug = np.vstack([A, np.sqrt(lam) * np.eye(m, dtype=complex)])
         rhs_aug = np.concatenate([rhs, np.zeros(m, dtype=complex)])
     else:
-        A_aug = A
-        rhs_aug = rhs
+        A_aug, rhs_aug = A, rhs
 
     try:
         gamma = np.linalg.lstsq(A_aug, rhs_aug, rcond=None)[0]
@@ -163,11 +161,15 @@ def _anderson_type2_step(
 
     step_h = np.array(linear_h, copy=True)
     step_gw = np.array(linear_gw, copy=True)
-    for c, dxh, dxg, drh, drg in zip(gamma, dX_h, dX_gw, dR_h, dR_gw):
+    for c, dxh, dxg, drh, drg in zip(
+        gamma, dX_h, dX_gw, dR_h, dR_gw
+    ):
         step_h -= c * (dxh + beta * drh)
         step_gw -= c * (dxg + beta * drg)
 
-    if not (np.all(np.isfinite(step_h)) and np.all(np.isfinite(step_gw))):
+    if not (
+        np.all(np.isfinite(step_h)) and np.all(np.isfinite(step_gw))
+    ):
         return sigma_h + linear_h, sigma_gw + linear_gw, False
 
     linear_norm = _metric_norm(linear_h, linear_gw, sh, sg)
@@ -186,7 +188,7 @@ def solve_matrix_gw_anderson(
     initial: GWResult | None = None,
     anderson: AndersonOptions = AndersonOptions(),
 ) -> GWResult:
-    """Solve matrix-valued periodic GW with safeguarded adaptive Anderson mixing."""
+    """Solve matrix GW with warmup -> safeguarded Anderson -> recovery."""
     _validate_anderson_options(anderson)
     backend = _check_backend(opts.momentum_backend)
 
@@ -207,24 +209,39 @@ def solve_matrix_gw_anderson(
         mu = float(initial.mu)
     else:
         sigma_h = np.zeros((norb, norb), dtype=complex)
-        sigma_gw = np.zeros((grid.nf, grid.nk1, grid.nk2, norb, norb), dtype=complex)
+        sigma_gw = np.zeros(
+            (grid.nf, grid.nk1, grid.nk2, norb, norb), dtype=complex
+        )
         mu = float(opts.mu)
 
     if opts.target_filling is None:
-        G = dyson_from_sigma_matrix(h0, grid, mu, sigma_h, sigma_gw)
+        G = dyson_from_sigma_matrix(
+            h0, grid, mu, sigma_h, sigma_gw
+        )
         tail_cache = _build_tail_cache(h0, sigma_h)
         mu_neval = 0
     else:
         mu, G, tail_cache, mu_neval = _solve_mu_matrix_fast(
-            h0, sigma_h, sigma_gw, grid, float(opts.target_filling),
-            mu, opts.mu_tol, opts.mu_max_iter,
+            h0,
+            sigma_h,
+            sigma_gw,
+            grid,
+            float(opts.target_filling),
+            mu,
+            opts.mu_tol,
+            opts.mu_max_iter,
         )
 
-    W = np.zeros((grid.nb, grid.nk1, grid.nk2, norb, norb), dtype=complex)
+    W = np.zeros(
+        (grid.nb, grid.nk1, grid.nk2, norb, norb), dtype=complex
+    )
     P = np.zeros_like(W)
 
-    history: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
-    beta = float(anderson.beta)
+    history: list[
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+    ] = []
+    beta = float(anderson.warmup_beta)
+    entered_anderson = False
     prev_err = float("inf")
     growth_count = 0
     recovery_remaining = 0
@@ -237,7 +254,9 @@ def solve_matrix_gw_anderson(
         sigma_h_out = hartree_self_energy_matrix(density, Vq0)
         P = compute_polarization_matrix(G, grid, backend=backend)
         W = compute_screened_interaction_matrix(P, Vq)
-        sigma_gw_out = compute_sigma_gw_matrix(G, W, grid, backend=backend)
+        sigma_gw_out = compute_sigma_gw_matrix(
+            G, W, grid, backend=backend
+        )
 
         res_h = sigma_h_out - sigma_h
         res_gw = sigma_gw_out - sigma_gw
@@ -249,10 +268,11 @@ def solve_matrix_gw_anderson(
             else:
                 growth_count = 0
 
-            if err < 0.70 * prev_err:
-                beta = min(float(anderson.beta_max), 1.08 * beta)
-            elif err > prev_err:
-                beta = max(float(anderson.beta_min), 0.70 * beta)
+            if entered_anderson:
+                if err < 0.70 * prev_err:
+                    beta = min(float(anderson.beta_max), 1.08 * beta)
+                elif err > prev_err:
+                    beta = max(float(anderson.beta_min), 0.70 * beta)
 
         if growth_count >= int(anderson.growth_patience):
             history.clear()
@@ -260,49 +280,79 @@ def solve_matrix_gw_anderson(
             beta = max(float(anderson.beta_min), 0.5 * beta)
             growth_count = 0
 
+        if (
+            not entered_anderson
+            and it >= int(anderson.start)
+            and recovery_remaining <= 0
+        ):
+            beta = float(anderson.beta)
+            entered_anderson = True
+
+        phase = (
+            "recovery"
+            if recovery_remaining > 0
+            else ("warmup" if not entered_anderson else "anderson")
+        )
         if opts.verbose:
-            phase = "recovery" if recovery_remaining > 0 else (
-                "warmup" if it < int(anderson.start) else "anderson"
-            )
             print(
-                f"SC-GW iter {it:4d}: residual={err:.3e}, mu={mu:.10f}, "
-                f"n={np.sum(density):.10f}, mu_eval={mu_neval}, "
-                f"mixer={phase}, beta={beta:.3f}, backend={backend}"
+                f"SC-GW iter {it:4d}: residual={err:.3e}, "
+                f"mu={mu:.10f}, n={np.sum(density):.10f}, "
+                f"mu_eval={mu_neval}, mixer={phase}, "
+                f"beta={beta:.3f}, backend={backend}"
             )
 
         if err < opts.tol:
             converged = True
             break
 
-        history.append((
-            np.array(sigma_h, copy=True),
-            np.array(sigma_gw, copy=True),
-            np.array(res_h, copy=True),
-            np.array(res_gw, copy=True),
-        ))
+        history.append(
+            (
+                np.array(sigma_h, copy=True),
+                np.array(sigma_gw, copy=True),
+                np.array(res_h, copy=True),
+                np.array(res_gw, copy=True),
+            )
+        )
         keep_states = max(int(anderson.history) + 1, 2)
         if len(history) > keep_states:
             del history[:-keep_states]
 
         sh, sg = _block_scales(
-            sigma_h, sigma_gw, sigma_h_out, sigma_gw_out, anderson.scale_floor
+            sigma_h,
+            sigma_gw,
+            sigma_h_out,
+            sigma_gw_out,
+            anderson.scale_floor,
         )
 
         use_anderson = (
-            recovery_remaining <= 0
-            and it >= int(anderson.start)
+            entered_anderson
+            and recovery_remaining <= 0
             and len(history) >= 2
         )
-        accepted_anderson = False
         if use_anderson:
-            sigma_h_next, sigma_gw_next, accepted_anderson = _anderson_type2_step(
-                sigma_h, sigma_gw, res_h, res_gw,
-                history, beta, anderson.regularization,
-                sh, sg, anderson.step_cap,
+            (
+                sigma_h_next,
+                sigma_gw_next,
+                accepted_anderson,
+            ) = _anderson_type2_step(
+                sigma_h,
+                sigma_gw,
+                res_h,
+                res_gw,
+                history,
+                beta,
+                anderson.regularization,
+                sh,
+                sg,
+                anderson.step_cap,
             )
             if not accepted_anderson:
                 history.clear()
-                recovery_remaining = max(int(anderson.recovery_steps), 2)
+                recovery_remaining = max(
+                    int(anderson.recovery_steps), 2
+                )
+                beta = max(float(anderson.beta_min), 0.5 * beta)
         else:
             sigma_h_next = sigma_h + beta * res_h
             sigma_gw_next = sigma_gw + beta * res_gw
@@ -311,13 +361,26 @@ def solve_matrix_gw_anderson(
             recovery_remaining -= 1
 
         if opts.target_filling is None:
-            Gnext = dyson_from_sigma_matrix(h0, grid, mu, sigma_h_next, sigma_gw_next)
+            Gnext = dyson_from_sigma_matrix(
+                h0, grid, mu, sigma_h_next, sigma_gw_next
+            )
             tail_cache_next = _build_tail_cache(h0, sigma_h_next)
             mu_neval_next = 0
         else:
-            mu, Gnext, tail_cache_next, mu_neval_next = _solve_mu_matrix_fast(
-                h0, sigma_h_next, sigma_gw_next, grid, float(opts.target_filling),
-                mu, opts.mu_tol, opts.mu_max_iter,
+            (
+                mu,
+                Gnext,
+                tail_cache_next,
+                mu_neval_next,
+            ) = _solve_mu_matrix_fast(
+                h0,
+                sigma_h_next,
+                sigma_gw_next,
+                grid,
+                float(opts.target_filling),
+                mu,
+                opts.mu_tol,
+                opts.mu_max_iter,
             )
 
         sigma_h = sigma_h_next
@@ -332,12 +395,20 @@ def solve_matrix_gw_anderson(
     P = compute_polarization_matrix(G, grid, backend=backend)
     W = compute_screened_interaction_matrix(P, Vq)
     sigma_gw_out = compute_sigma_gw_matrix(G, W, grid, backend=backend)
-    err = _residual_error(sigma_h_out - sigma_h, sigma_gw_out - sigma_gw)
+    err = _residual_error(
+        sigma_h_out - sigma_h, sigma_gw_out - sigma_gw
+    )
     converged = bool(err < opts.tol)
 
     (
-        smin, mmin, omin, q1min, q2min,
-        screening_mode, density_mode, density_mode_residual,
+        smin,
+        mmin,
+        omin,
+        q1min,
+        q2min,
+        screening_mode,
+        density_mode,
+        density_mode_residual,
     ) = screening_soft_modes_matrix(P, Vq, grid)
 
     return GWResult(
@@ -371,8 +442,9 @@ def solve_supercell_gw_anderson(
     initial: GWResult | None = None,
     anderson: AndersonOptions = AndersonOptions(),
 ) -> GWResult:
-    """Solve the 18-site Q=(1/3,1/3) supercell using adaptive Anderson mixing."""
-    h0 = build_supercell_h0(grid.kmesh(), params, source_strength=source_strength)
+    h0 = build_supercell_h0(
+        grid.kmesh(), params, source_strength=source_strength
+    )
     Vq = build_supercell_interaction(grid.qmesh(), params)
     if h0.shape[-1] != NSUP:
         raise RuntimeError("unexpected supercell matrix dimension")
