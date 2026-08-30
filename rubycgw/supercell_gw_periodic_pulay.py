@@ -1,9 +1,9 @@
 """GW-only periodic Pulay solver for the 18-site Ruby supercell.
 
-The physical GW equations are unchanged.  This module only changes the
-numerical fixed-point path.  It is designed for the long oscillatory cycles
-seen when ordinary positive linear mixing is already very small but the
-self-energy residual still does not contract.
+The infinite-frequency GW equations are unchanged, but the self-energy map is
+evaluated as a static bare-V Fock term plus a finite Matsubara convolution of
+``W-V``.  This avoids truncating the non-decaying instantaneous interaction in
+the bosonic frequency box.
 
 Strategy
 --------
@@ -16,12 +16,10 @@ Strategy
   effective when the raw GW residual has already fallen to 1e-5 and below;
 * optional residual diagnostics decompose a plateau into scalar-shift,
   low-frequency, frequency-edge and maximum-element contributions;
-* a bad Pulay pulse is detected on the next (single) GW-map evaluation, its
-  history is discarded, and a few cheap recovery-linear iterations are used;
-* there is no rollback and no multi-trial line search: every outer iteration
-  evaluates the expensive G -> P -> W -> Sigma_GW map exactly once;
-* the fixed-filling chemical potential keeps using the cached-tail safeguarded
-  Newton solver, with a strict refinement before returning.
+* a bad Pulay pulse is detected on the next single GW-map evaluation, its
+  history is discarded, and recovery-linear iterations are used;
+* the fixed-filling chemical potential uses the cached-tail safeguarded Newton
+  solver, with a strict refinement before returning.
 """
 
 from __future__ import annotations
@@ -37,11 +35,11 @@ from .supercell_gw import (
     _compatible_initial,
     compute_polarization_matrix,
     compute_screened_interaction_matrix,
-    compute_sigma_gw_matrix,
     dyson_from_sigma_matrix,
     hartree_self_energy_matrix,
     screening_soft_modes_matrix,
 )
+from .supercell_gw_split import compute_sigma_gw_split_matrix
 from .supercell_gw_fast import (
     _build_tail_cache,
     _effective_mu_tol,
@@ -53,12 +51,7 @@ from .supercell_gw_fast import (
 
 @dataclass(frozen=True)
 class AndersonOptions:
-    """Compatibility controls plus defaults for GW-only periodic Pulay.
-
-    The historical Anderson fields are retained because ``run_supercell_gw.py``
-    already constructs this object from those command-line options.  The active
-    periodic-Pulay controls are the fields at the end of the dataclass.
-    """
+    """Compatibility controls plus defaults for GW-only periodic Pulay."""
 
     history: int = 6
     start: int = 8
@@ -77,7 +70,6 @@ class AndersonOptions:
     growth_factor: float = 1.20
     growth_patience: int = 3
 
-    # Active block/periodic-Pulay controls.
     hartree_beta: float = 0.30
     gw_beta: float = 0.10
     recovery_gw_beta: float = 0.05
@@ -88,9 +80,6 @@ class AndersonOptions:
     spike_factor: float = 3.0
     diagnostic_interval: int = 10
 
-    # Zero-extra-map residual diagnostics.  These are deliberately disabled by
-    # default because they allocate a few temporary arrays and produce verbose
-    # output, but they do not evaluate G -> P -> W -> Sigma_GW again.
     residual_diagnostics: bool = False
     residual_diagnostic_every: int = 1
 
@@ -137,7 +126,6 @@ def _uniform_hartree_seed(
     norb: int,
     target_filling: float | None,
 ) -> np.ndarray:
-    """Uniform-density Hartree seed; at half filling it is exactly 2 V I_18."""
     if target_filling is None:
         return np.zeros((norb, norb), dtype=complex)
     nbar = float(target_filling) / float(norb)
@@ -153,18 +141,7 @@ def _gw_pulay_coefficients(
     history: list[tuple[np.ndarray, np.ndarray]],
     regularization: float,
 ) -> np.ndarray:
-    """DIIS coefficients for dynamic-GW residuals with sum(c)=1.
-
-    Each history entry is ``(Sigma_GW_out, R_GW)``.  The coefficients minimize
-    the norm of the residual combination; the extrapolated object is the fixed-
-    point output ``Sigma_GW_out`` rather than the input iterate.
-
-    The residual Gram block is normalized by its own diagonal scale before the
-    Tikhonov regularization is added.  This is important near convergence:
-    without the normalization a residual of order 1e-5 gives a Gram matrix of
-    order 1e-10, while an absolute 1e-8 regularizer overwhelms the physical
-    secant information and turns DIIS into little more than averaging.
-    """
+    """DIIS coefficients for dynamic-GW residuals with sum(c)=1."""
     m = len(history)
     if m < 2:
         raise ValueError("Pulay history needs at least two states")
@@ -208,7 +185,6 @@ def _gw_only_pulay_step(
     linear_beta: float,
     scale_floor: float,
 ) -> tuple[np.ndarray, bool]:
-    """Return one damped GW-only DIIS proposal without evaluating another map."""
     if len(history) < 2:
         return sigma_gw + float(linear_beta) * res_gw, False
 
@@ -242,13 +218,6 @@ def _gw_residual_mode_diagnostics(
     res_gw: np.ndarray,
     grid: MatsubaraGrid,
 ) -> dict:
-    """Decompose one raw GW residual without changing the fixed-point map.
-
-    ``scalar_shift`` is the orthogonal projection onto a real, frequency- and
-    momentum-independent orbital identity.  ``projected_max`` removes exactly
-    that one direction.  ``lowfreq_max`` uses the four Matsubara slices closest
-    to zero, while ``edge_max`` uses the four slices with largest |omega|.
-    """
     res = np.asarray(res_gw, dtype=complex)
     if res.ndim != 5:
         raise ValueError("Expected res_gw with shape (nf,nk1,nk2,norb,norb)")
@@ -306,7 +275,6 @@ def solve_matrix_gw_anderson(
     initial: GWResult | None = None,
     anderson: AndersonOptions = AndersonOptions(),
 ) -> GWResult:
-    """Solve matrix GW with GW-only periodic Pulay and one map per iteration."""
     _validate(anderson)
     backend = _check_backend(opts.momentum_backend)
     h0 = np.asarray(h0, dtype=complex)
@@ -371,7 +339,9 @@ def solve_matrix_gw_anderson(
         sigma_h_out = hartree_self_energy_matrix(density, Vq0)
         P = compute_polarization_matrix(G, grid, backend=backend)
         W = compute_screened_interaction_matrix(P, Vq)
-        sigma_gw_out = compute_sigma_gw_matrix(G, W, grid, backend=backend)
+        sigma_gw_out = compute_sigma_gw_split_matrix(
+            G, W, Vq, grid, h0, mu, sigma_h, backend=backend
+        )
 
         res_h = sigma_h_out - sigma_h
         res_gw = sigma_gw_out - sigma_gw
@@ -569,7 +539,9 @@ def solve_matrix_gw_anderson(
     sigma_h_out = hartree_self_energy_matrix(density, Vq0)
     P = compute_polarization_matrix(G, grid, backend=backend)
     W = compute_screened_interaction_matrix(P, Vq)
-    sigma_gw_out = compute_sigma_gw_matrix(G, W, grid, backend=backend)
+    sigma_gw_out = compute_sigma_gw_split_matrix(
+        G, W, Vq, grid, h0, mu, sigma_h, backend=backend
+    )
     res_h = sigma_h_out - sigma_h
     res_gw = sigma_gw_out - sigma_gw
     err_h = float(np.max(np.abs(res_h)))
