@@ -38,7 +38,12 @@ from .supercell_gw_fast import (
 
 @dataclass(frozen=True)
 class AndersonOptions:
-    """Controls for conservative safeguarded Type-II Anderson acceleration."""
+    """Controls for conservative safeguarded Type-II Anderson acceleration.
+
+    ``growth_factor`` and ``growth_patience`` are retained for CLI/backward
+    compatibility with the previous driver.  Actual rejection is now based on
+    ``reject_factor`` and rolls the state back instead of merely shrinking beta.
+    """
 
     history: int = 6
     start: int = 8
@@ -54,6 +59,8 @@ class AndersonOptions:
     recovery_steps: int = 4
     step_cap: float = 3.0
     scale_floor: float = 1e-4
+    growth_factor: float = 1.20
+    growth_patience: int = 3
 
 
 def _validate_anderson_options(aopts: AndersonOptions) -> None:
@@ -68,8 +75,8 @@ def _validate_anderson_options(aopts: AndersonOptions) -> None:
         <= 1.0
     ):
         raise ValueError("Require 0 < beta_min <= warmup_beta <= beta_max <= 1")
-    if not (aopts.beta_min <= aopts.beta <= aopts.beta_max):
-        raise ValueError("Require beta_min <= beta <= beta_max")
+    if not (aopts.beta_min <= aopts.beta <= 1.0):
+        raise ValueError("Require beta_min <= beta <= 1")
     if aopts.regularization < 0.0:
         raise ValueError("Anderson regularization must be non-negative")
     if aopts.enter_residual <= 0.0:
@@ -310,9 +317,6 @@ def solve_matrix_gw_anderson(
         if initial_err is None and np.isfinite(err):
             initial_err = float(err)
 
-        # A trial Anderson step is accepted only after its *actual* GW map has
-        # been evaluated.  If it made the residual substantially worse, roll
-        # back to the parent and take a small linear recovery step instead.
         if pending_parent is not None:
             parent_err = float(pending_parent[5])
             if err > float(anderson.reject_factor) * parent_err:
@@ -371,7 +375,7 @@ def solve_matrix_gw_anderson(
 
             if entered_anderson:
                 if err < 0.70 * prev_err:
-                    beta = min(float(anderson.beta_max), 1.08 * beta)
+                    beta = min(min(float(anderson.beta_max), 0.70), 1.08 * beta)
                 elif err > prev_err:
                     beta = max(float(anderson.beta_min), 0.75 * beta)
 
@@ -390,7 +394,9 @@ def solve_matrix_gw_anderson(
         )
         if can_enter:
             entered_anderson = True
-            beta = float(anderson.beta)
+            # Older driver versions supplied beta=0.7.  Start conservatively at
+            # no more than 0.3; successful accepted steps may grow it later.
+            beta = min(float(anderson.beta), 0.30)
             history.clear()
 
         phase = (
@@ -451,7 +457,7 @@ def solve_matrix_gw_anderson(
                 anderson.regularization,
                 sh,
                 sg,
-                anderson.step_cap,
+                min(float(anderson.step_cap), 3.0),
             )
             if accepted_proposal:
                 pending_parent = (
@@ -498,8 +504,6 @@ def solve_matrix_gw_anderson(
         mu_tol_used = mu_tol_next
         prev_err = float(err)
 
-    # The returned solution always satisfies the strict requested filling
-    # tolerance, even though intermediate iterations used inexact inner solves.
     mu, G, tail_cache, mu_neval_final = _strict_refine_fixed_filling(
         h0,
         sigma_h,
