@@ -10,6 +10,7 @@ from rubycgw.supercell_gw_anderson import (
 )
 from rubycgw.supercell_gw_periodic_pulay import (
     _gw_only_pulay_step,
+    _gw_pulay_coefficients,
     _uniform_hartree_seed,
 )
 
@@ -47,6 +48,26 @@ def test_gw_only_pulay_solves_scalar_unstable_linear_fixed_point():
     )
     assert valid
     assert np.allclose(xnext, -5.0, atol=1e-10)
+
+
+def test_gw_diis_regularization_is_scale_invariant_near_convergence():
+    # DIIS coefficients should not change merely because every residual becomes
+    # 1e-6 times smaller.  This guards against an absolute ridge overwhelming
+    # the Gram matrix at the 1e-5 -> 1e-8 finishing stage.
+    r0 = np.array([1.0, 0.2, -0.1], dtype=complex)
+    r1 = np.array([0.7, -0.1, 0.3], dtype=complex)
+    out0 = np.zeros_like(r0)
+    out1 = np.ones_like(r1)
+    reg = 1e-8
+
+    c_large = _gw_pulay_coefficients([(out0, r0), (out1, r1)], reg)
+    c_small = _gw_pulay_coefficients(
+        [(out0, 1e-6 * r0), (out1, 1e-6 * r1)], reg
+    )
+
+    assert np.all(np.isfinite(c_large))
+    assert np.allclose(c_large, c_small, rtol=1e-9, atol=1e-11)
+    assert abs(np.sum(c_small) - 1.0) < 1e-12
 
 
 def test_periodic_pulay_solver_keeps_v_zero_exact():
