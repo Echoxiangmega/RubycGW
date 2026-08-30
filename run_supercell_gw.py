@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+from contextlib import redirect_stdout
 from datetime import datetime
 import json
 from pathlib import Path
+import re
+import sys
 import time
 
 import matplotlib.pyplot as plt
@@ -40,6 +43,43 @@ from rubycgw.supercell_gw_anderson import (
     solve_supercell_gw_anderson,
 )
 from rubycgw.supercell_gw_fast import solve_supercell_gw_fast
+
+
+class _IterationPrintFilter:
+    """Forward solver stdout while thinning only per-iteration status lines.
+
+    Messages such as Pulay resets, residual spikes, bootstrap headers, strict
+    mu-refinement summaries and final diagnostics are never suppressed.  Only
+    lines beginning with ``SC-GW iter`` or ``GW iter`` are sampled.
+    """
+
+    _ITER_RE = re.compile(r"^(?:SC-)?GW iter\s+(\d+):")
+
+    def __init__(self, stream, every: int):
+        self.stream = stream
+        self.every = max(int(every), 1)
+        self._buffer = ""
+
+    def _emit_line(self, line: str) -> None:
+        match = self._ITER_RE.match(line)
+        if match is not None:
+            it = int(match.group(1))
+            if it != 1 and it % self.every != 0:
+                return
+        self.stream.write(line)
+
+    def write(self, text: str) -> int:
+        self._buffer += str(text)
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._emit_line(line + "\n")
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._emit_line(self._buffer)
+            self._buffer = ""
+        self.stream.flush()
 
 
 def _v_schedule(target: float, explicit: list[float] | None) -> list[float]:
@@ -208,23 +248,32 @@ def _solve_adaptive(
             opts = _gw_options(
                 args, target_supercell, local_mu, method, mixing, tol
             )
-            if method == "anderson":
-                gw = solve_supercell_gw_anderson(
+
+            def _run_solver():
+                if method == "anderson":
+                    return solve_supercell_gw_anderson(
+                        params,
+                        grid,
+                        opts,
+                        source_strength=source,
+                        initial=retry_seed,
+                        anderson=_anderson_options(args),
+                    )
+                return solve_supercell_gw_fast(
                     params,
                     grid,
                     opts,
                     source_strength=source,
                     initial=retry_seed,
-                    anderson=_anderson_options(args),
                 )
+
+            if args.verbose_iterations and int(args.verbose_every) > 1:
+                stream = _IterationPrintFilter(sys.stdout, args.verbose_every)
+                with redirect_stdout(stream):
+                    gw = _run_solver()
+                stream.flush()
             else:
-                gw = solve_supercell_gw_fast(
-                    params,
-                    grid,
-                    opts,
-                    source_strength=source,
-                    initial=retry_seed,
-                )
+                gw = _run_solver()
 
             runtime = time.perf_counter() - t0
             row = {
@@ -495,6 +544,15 @@ def _parse_args():
     p.add_argument("--mu-max-iter", type=int, default=40)
     p.add_argument("--mu0", type=float, default=0.0)
     p.add_argument("--verbose-iterations", action="store_true")
+    p.add_argument(
+        "--verbose-every",
+        type=int,
+        default=1,
+        help=(
+            "With --verbose-iterations, print one SC-GW/GW iteration line "
+            "every N outer iterations. Event and summary lines are always shown."
+        ),
+    )
 
     p.add_argument(
         "--restart-from",
@@ -520,6 +578,8 @@ def main():
         raise ValueError("Require 0 < --gw-tol <= --ramp-tol.")
     if args.mu_tol <= 0.0:
         raise ValueError("--mu-tol must be positive.")
+    if int(args.verbose_every) < 1:
+        raise ValueError("--verbose-every must be a positive integer.")
     if not (0.0 < args.predictor_damping <= 1.5):
         raise ValueError("--predictor-damping must lie in (0,1.5].")
 
@@ -639,6 +699,8 @@ def main():
         f"tolerances: ramp={args.ramp_tol:.1e}, "
         f"final={args.gw_tol:.1e}, mu={args.mu_tol:.1e}"
     )
+    if args.verbose_iterations:
+        print(f"verbose iterations: every {args.verbose_every} outer step(s)")
     print(
         f"Anderson: warmup={args.anderson_start} steps at "
         f"{args.anderson_warmup_mixing:g}, history={args.anderson_history}, "
