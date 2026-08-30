@@ -11,7 +11,9 @@ Optimizations used by default:
 6. failed-but-finite retries always continue from the best state reached;
 7. auto restart preloads the two nearest compatible zero-source checkpoints so
    the first new V point can already use a secant predictor;
-8. strong-coupling continuation is automatically densified to avoid large V jumps.
+8. strong-coupling continuation is automatically densified to avoid large V jumps;
+9. an optional diagnostic-only mode resolves the structure of a slow GW residual
+   without adding any extra GW fixed-point map evaluations.
 
 Every converged zero-source state is checkpointed by default.  Use
 ``--restart-from auto`` to continue from the nearest compatible checkpoints.
@@ -55,7 +57,7 @@ class _IterationPrintFilter:
     """Forward solver stdout while thinning only per-iteration status lines.
 
     Messages such as Pulay resets, residual spikes, bootstrap headers, strict
-    mu-refinement summaries and final diagnostics are never suppressed.  Only
+    mu-refinement summaries and residual diagnostics are never suppressed.  Only
     lines beginning with ``SC-GW iter`` or ``GW iter`` are sampled.
     """
 
@@ -132,14 +134,7 @@ def _densify_strong_v_schedule(
     onset: float,
     max_step: float,
 ) -> list[float]:
-    """Insert extra forward-V points once the continuation is in strong coupling.
-
-    Explicit user ``--V-values`` are never passed through this helper.  For the
-    default continuation, any forward segment whose starting point is at or
-    above ``onset`` is subdivided so every step is at most ``max_step``.  Thus a
-    restart at V=1 followed by target V=1.2 becomes 1.1 -> 1.2 for the default
-    ``max_step=0.1``.
-    """
+    """Insert extra forward-V points once the continuation is in strong coupling."""
     if not values:
         return []
     max_step = float(max_step)
@@ -255,6 +250,8 @@ def _anderson_options(args) -> AndersonOptions:
         growth_patience=args.anderson_growth_patience,
         recovery_steps=args.anderson_recovery_steps,
         step_cap=args.anderson_step_cap,
+        residual_diagnostics=bool(args.residual_diagnostics),
+        residual_diagnostic_every=int(args.residual_diagnostic_every),
     )
 
 
@@ -298,15 +295,7 @@ def _solve_adaptive(
     initial,
     tol: float,
 ):
-    """Use a long primary solve, local near refinement, then short fallbacks.
-
-    A state already within ``near_converged_threshold`` is never handed to the
-    ordinary linear fallbacks.  Instead the active periodic-Pulay solver is
-    restarted from that state, which clears its old history and builds a fresh
-    local history.  If the local refinement still misses the strict tolerance,
-    the best near-converged state is returned rather than spending another full
-    ``gw_max_iter`` in a less suitable mixer.
-    """
+    """Use a long primary solve, local near refinement, then short fallbacks."""
     attempts: list[dict] = []
     best = None
     best_error = float("inf")
@@ -420,17 +409,29 @@ def _solve_adaptive(
             local_mu = float(gw.mu)
 
     primary_method, primary_mix = _primary_attempt(args)
+    primary_budget = (
+        int(args.diagnostic_steps)
+        if args.diagnostic_only
+        else int(args.gw_max_iter)
+    )
     gw, row = _run_attempt(
-        "primary",
+        "diagnostic" if args.diagnostic_only else "primary",
         primary_method,
         primary_mix,
-        int(args.gw_max_iter),
+        primary_budget,
         initial,
         local_mu,
     )
     _record(gw, row)
     if gw is not None and gw.converged:
         return gw, attempts
+
+    if args.diagnostic_only:
+        print(
+            f"  diagnostic-only mode: stop after {primary_budget} primary iteration(s); "
+            "no near-refine or fallback attempts will be launched"
+        )
+        return best, attempts
 
     near_refined = False
     if best is not None and _near_converged(best_error, args) and not args.no_anderson:
@@ -755,6 +756,35 @@ def _parse_args():
             "every N outer iterations. Event and summary lines are always shown."
         ),
     )
+    p.add_argument(
+        "--residual-diagnostics",
+        action="store_true",
+        help=(
+            "Print zero-extra-map diagnostics of the raw GW residual: scalar identity "
+            "projection, low-frequency/edge maxima, Dyson-combination drift, and the "
+            "largest residual element."
+        ),
+    )
+    p.add_argument(
+        "--residual-diagnostic-every",
+        type=int,
+        default=1,
+        help="Print the detailed GW residual diagnostic every N outer iterations.",
+    )
+    p.add_argument(
+        "--diagnostic-only",
+        action="store_true",
+        help=(
+            "Run only one primary periodic-Pulay attempt and stop afterwards, even if "
+            "the requested tolerance is not reached. Intended for residual diagnosis."
+        ),
+    )
+    p.add_argument(
+        "--diagnostic-steps",
+        type=int,
+        default=20,
+        help="Number of outer iterations in --diagnostic-only mode.",
+    )
 
     p.add_argument(
         "--restart-from",
@@ -790,6 +820,15 @@ def main():
         raise ValueError("--near-converged-threshold must be positive.")
     if int(args.verbose_every) < 1:
         raise ValueError("--verbose-every must be a positive integer.")
+    if int(args.residual_diagnostic_every) < 1:
+        raise ValueError("--residual-diagnostic-every must be positive.")
+    if int(args.diagnostic_steps) < 1:
+        raise ValueError("--diagnostic-steps must be positive.")
+    if args.diagnostic_only and args.no_anderson:
+        raise ValueError("--diagnostic-only currently requires the periodic-Pulay solver.")
+    if args.diagnostic_only:
+        args.residual_diagnostics = True
+        args.verbose_iterations = True
     if not (0.0 < args.predictor_damping <= 1.5):
         raise ValueError("--predictor-damping must lie in (0,1.5].")
     if float(args.strong_v_max_step) <= 0.0:
@@ -843,9 +882,6 @@ def main():
             restart_history_paths = [restart_path]
 
         if restart_path is not None:
-            # For auto restart, preload the previous compatible V point first.
-            # This gives _predictor_seed two same-branch history entries before
-            # the first new V point is solved.
             if len(restart_history_paths) >= 2:
                 older_path = restart_history_paths[-2]
                 older_seed, older_meta, _ = load_supercell_checkpoint(
@@ -947,6 +983,14 @@ def main():
     )
     if args.verbose_iterations:
         print(f"verbose iterations: every {args.verbose_every} outer step(s)")
+    if args.residual_diagnostics:
+        print(
+            f"GW residual diagnostics: every {args.residual_diagnostic_every} outer step(s)"
+        )
+    if args.diagnostic_only:
+        print(
+            f"diagnostic-only mode: exactly one primary attempt, <= {args.diagnostic_steps} iterations"
+        )
     primary_method, primary_mix = _primary_attempt(args)
     print(
         f"GW retry policy: primary={primary_method}:{primary_mix:g} "
@@ -1100,10 +1144,10 @@ def main():
 
             if gw is None or not gw.converged:
                 if gw is not None:
+                    label = "DIAGNOSTIC STOP" if args.diagnostic_only else "STOP"
                     print(
-                        f"\nSTOP: best retry state reached "
-                        f"residual={gw.final_error:.3e}, "
-                        f"but requested tol={tol:.3e}."
+                        f"\n{label}: best state reached residual={gw.final_error:.3e}, "
+                        f"requested tol={tol:.3e}."
                     )
                 else:
                     print(
