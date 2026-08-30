@@ -12,6 +12,8 @@ Strategy
 * dynamic Sigma_GW uses a modest linear step on ordinary iterations;
 * every few eligible iterations, a small-history Pulay/DIIS extrapolation is
   applied to Sigma_GW only;
+* the DIIS Gram matrix is normalized before regularization, so Pulay remains
+  effective when the raw GW residual has already fallen to 1e-5 and below;
 * a bad Pulay pulse is detected on the next (single) GW-map evaluation, its
   history is discarded, and a few cheap recovery-linear iterations are used;
 * there is no rollback and no multi-trial line search: every outer iteration
@@ -146,22 +148,38 @@ def _gw_pulay_coefficients(
     Each history entry is ``(Sigma_GW_out, R_GW)``.  The coefficients minimize
     the norm of the residual combination; the extrapolated object is the fixed-
     point output ``Sigma_GW_out`` rather than the input iterate.
+
+    The residual Gram block is normalized by its own diagonal scale before the
+    Tikhonov regularization is added.  This is important near convergence:
+    without the normalization a residual of order 1e-5 gives a Gram matrix of
+    order 1e-10, while an absolute 1e-8 regularizer overwhelms the physical
+    secant information and turns DIIS into little more than averaging.
     """
     m = len(history)
     if m < 2:
         raise ValueError("Pulay history needs at least two states")
 
-    B = np.zeros((m + 1, m + 1), dtype=float)
+    gram = np.zeros((m, m), dtype=float)
     for i in range(m):
         _, ri = history[i]
         for j in range(i, m):
             _, rj = history[j]
             val = _gw_residual_inner(ri, rj)
-            B[i, j] = val
-            B[j, i] = val
+            gram[i, j] = val
+            gram[j, i] = val
 
-    diag_scale = max(float(np.max(np.abs(np.diag(B[:m, :m])))), 1.0)
-    B[:m, :m] += float(regularization) * diag_scale * np.eye(m)
+    diag_scale = float(np.max(np.abs(np.diag(gram))))
+    if not np.isfinite(diag_scale) or diag_scale <= np.finfo(float).tiny:
+        return np.full(m, 1.0 / float(m), dtype=float)
+
+    # Work with an O(1) Gram matrix.  The user-facing regularization is now a
+    # dimensionless relative ridge and therefore does not switch off Pulay as
+    # the residual becomes small.
+    gram /= diag_scale
+    gram += float(regularization) * np.eye(m)
+
+    B = np.zeros((m + 1, m + 1), dtype=float)
+    B[:m, :m] = gram
     B[:m, m] = 1.0
     B[m, :m] = 1.0
     rhs = np.zeros(m + 1, dtype=float)
@@ -299,7 +317,7 @@ def solve_matrix_gw_anderson(
 
         # A Pulay pulse is judged only when its next single map has been seen.
         # No rollback is attempted; a bad pulse simply resets the small history
-        # and triggers a few conservative linear recovery updates.
+        # and triggers a few cheap recovery-linear updates.
         bad_pulay = bool(
             last_step_kind == "gw-pulay"
             and np.isfinite(prev_err_gw)
