@@ -1,15 +1,16 @@
 """Compatibility layer for the active 18-site GW solver.
 
 Historically the driver imported this module for the Anderson implementation.
-The active solver now lives in :mod:`rubycgw.supercell_gw_periodic_pulay`: it
-keeps the same public solver API while using an analytic Hartree cold start,
-separate Hartree/GW treatment, GW-only periodic Pulay acceleration, and exactly
-one expensive GW map per outer iteration.
+The active solver now lives behind :mod:`rubycgw.supercell_gw_bootstrap`: it
+keeps the same public solver API, uses an analytic Hartree cold start, performs
+an internal weak-V continuation only for a true strong-coupling cold start, and
+then uses conservative GW-only periodic Pulay with one expensive GW map per
+outer iteration.
 """
 
 import numpy as np
 
-from .supercell_gw_periodic_pulay import (
+from .supercell_gw_bootstrap import (
     AndersonOptions,
     solve_matrix_gw_anderson,
     solve_supercell_gw_anderson,
