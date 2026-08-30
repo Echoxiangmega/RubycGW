@@ -179,17 +179,17 @@ def load_supercell_checkpoint(
     return seed, meta, density
 
 
-def find_nearest_compatible_checkpoint(
+def _compatible_zero_source_candidates(
     directory: str | Path,
     target_V: float,
     params: RubyParameters,
     grid: MatsubaraGrid,
     primitive_filling: float,
-) -> Path | None:
-    """Find the largest compatible zero-source V not exceeding target_V."""
+) -> list[tuple[float, Path]]:
+    """Return compatible converged zero-source checkpoints with V<=target_V."""
     directory = Path(directory)
     if not directory.exists():
-        return None
+        return []
 
     candidates: list[tuple[float, Path]] = []
     for path in directory.glob("*.npz"):
@@ -207,7 +207,48 @@ def find_nearest_compatible_checkpoint(
         if np.isfinite(V) and V <= float(target_V) + 1e-12:
             candidates.append((V, path))
 
-    if not candidates:
-        return None
     candidates.sort(key=lambda item: item[0])
-    return candidates[-1][1]
+    return candidates
+
+
+def find_recent_compatible_checkpoints(
+    directory: str | Path,
+    target_V: float,
+    params: RubyParameters,
+    grid: MatsubaraGrid,
+    primitive_filling: float,
+    limit: int = 2,
+) -> list[Path]:
+    """Return the most recent compatible V checkpoints, ordered low to high.
+
+    The default returns the two largest converged zero-source checkpoints with
+    ``V <= target_V``.  Loading two points lets the driver reconstruct a local
+    V-secant direction immediately after restart instead of waiting for another
+    freshly converged V point.
+    """
+    limit = int(limit)
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    candidates = _compatible_zero_source_candidates(
+        directory, target_V, params, grid, primitive_filling
+    )
+    return [path for _, path in candidates[-limit:]]
+
+
+def find_nearest_compatible_checkpoint(
+    directory: str | Path,
+    target_V: float,
+    params: RubyParameters,
+    grid: MatsubaraGrid,
+    primitive_filling: float,
+) -> Path | None:
+    """Find the largest compatible zero-source V not exceeding target_V."""
+    paths = find_recent_compatible_checkpoints(
+        directory,
+        target_V,
+        params,
+        grid,
+        primitive_filling,
+        limit=1,
+    )
+    return paths[-1] if paths else None
