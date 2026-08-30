@@ -2,10 +2,14 @@
 """Run 18-site periodic Ruby GW across the period-three charge instability.
 
 The supercell has translations T1=a1-a2 and T2=a1+2a2, so the primitive
-Q=(1/3,1/3) mode is folded to supercell q=0.  A temporary period-three charge
+Q=(1/3,1/3) mode is folded to supercell q=0. A temporary period-three charge
 source can be turned on once the V ramp reaches ``--source-onset-V`` and is then
-adiabatically removed.  Subsequent V points continue from the zero-source
+adiabatically removed. Subsequent V points continue from the zero-source
 broken-symmetry solution.
+
+Every converged zero-source point is checkpointed by default. A later run can
+use ``--restart-from auto`` to start from the nearest compatible checkpoint at
+or below the requested target V, instead of repeating the ramp from V=0.7.
 
 ``--primitive-filling`` is always quoted per original six-site Ruby unit cell;
 the internal 18-site target is three times larger.
@@ -23,6 +27,12 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 
+from rubycgw.checkpoint import (
+    checkpoint_filename,
+    find_nearest_compatible_checkpoint,
+    load_supercell_checkpoint,
+    save_supercell_checkpoint,
+)
 from rubycgw.grids import MatsubaraGrid
 from rubycgw.gw import GWOptions
 from rubycgw.model import RubyParameters
@@ -45,6 +55,32 @@ def _v_schedule(target: float, explicit: list[float] | None) -> list[float]:
     values = [v for v in base if v < target - 1e-12]
     values.append(float(target))
     return values
+
+
+def _v_schedule_after_restart(
+    target: float,
+    explicit: list[float] | None,
+    restart_V: float,
+) -> list[float]:
+    """Continuation schedule after a checkpoint, preserving explicit order."""
+    target = float(target)
+    restart_V = float(restart_V)
+    if np.isclose(target, restart_V):
+        return []
+
+    if explicit:
+        values = [float(x) for x in explicit]
+        if not np.isclose(values[-1], target):
+            values.append(target)
+        if target > restart_V:
+            return [v for v in values if v > restart_V + 1e-12]
+        return [v for v in values if v < restart_V - 1e-12]
+
+    if target < restart_V:
+        # Downward continuation is allowed, but without an automatic dense ramp.
+        return [target]
+
+    return [v for v in _v_schedule(target, None) if v > restart_V + 1e-12]
 
 
 def _source_schedule(values: list[float]) -> list[float]:
@@ -196,7 +232,6 @@ def _append_density_rows(rows: list[dict], gw, V: float, source: float,
 
 def _plot_zero_source(rows: list[dict], outdir: Path) -> None:
     good = [r for r in rows if r["converged"] and np.isclose(r["source"], 0.0)]
-    # Keep only the final successful attempt for each V/source step.
     by_key = {}
     for row in good:
         by_key[(row["v_step"], row["source_step"])] = row
@@ -260,6 +295,24 @@ def _parse_args():
     p.add_argument("--gw-pulay-regularization", type=float, default=1e-10)
     p.add_argument("--mu0", type=float, default=0.0)
     p.add_argument("--verbose-iterations", action="store_true")
+
+    p.add_argument(
+        "--restart-from",
+        type=str,
+        default=None,
+        help="Checkpoint .npz path, or 'auto' for nearest compatible V<=target.",
+    )
+    p.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default="results/supercell18/checkpoints",
+        help="Persistent directory used for zero-source GW checkpoints.",
+    )
+    p.add_argument(
+        "--no-checkpoints",
+        action="store_true",
+        help="Do not save converged zero-source continuation states.",
+    )
     p.add_argument("--outdir", type=str, default=None)
     return p.parse_args()
 
@@ -269,8 +322,6 @@ def main():
     if not (0.0 < args.primitive_filling < 6.0):
         raise ValueError("--primitive-filling must lie between 0 and 6")
 
-    schedule = _v_schedule(args.V, args.V_values)
-    source_sequence = _source_schedule(args.source_sequence)
     target_supercell = 3.0 * float(args.primitive_filling)
 
     if args.outdir is None:
@@ -287,12 +338,70 @@ def main():
         nOmega=args.nomega,
         T=args.T,
     )
+    checkpoint_dir = Path(args.checkpoint_dir)
+
+    previous = None
+    mu_guess = float(args.mu0)
+    restart_meta = None
+    restart_path = None
+
+    compatibility_params = RubyParameters(
+        ti=args.ti, t1=args.t1, t2=args.t2, V=float(args.V)
+    )
+    if args.restart_from is not None:
+        if args.restart_from.lower() == "auto":
+            restart_path = find_nearest_compatible_checkpoint(
+                checkpoint_dir,
+                args.V,
+                compatibility_params,
+                grid,
+                args.primitive_filling,
+            )
+            if restart_path is None:
+                print(
+                    "No compatible zero-source checkpoint found; "
+                    "falling back to the ordinary V ramp."
+                )
+        else:
+            restart_path = Path(args.restart_from)
+
+        if restart_path is not None:
+            previous, restart_meta, _ = load_supercell_checkpoint(
+                restart_path,
+                compatibility_params,
+                grid,
+                args.primitive_filling,
+            )
+            mu_guess = float(previous.mu)
+
+    if restart_meta is None:
+        schedule = _v_schedule(args.V, args.V_values)
+        source_has_been_used = False
+    else:
+        restart_V = float(restart_meta["V"])
+        schedule = _v_schedule_after_restart(args.V, args.V_values, restart_V)
+        source_has_been_used = bool(
+            restart_V >= args.source_onset_V - 1e-12
+            and float(restart_meta.get("charge_order_abs", 0.0)) > 1e-6
+        )
+        # If the checkpoint is already beyond onset but still symmetric, run the
+        # source-removal protocol at the checkpoint V before continuing.
+        if (
+            not source_has_been_used
+            and restart_V >= args.source_onset_V - 1e-12
+            and (not schedule or not np.isclose(schedule[0], restart_V))
+        ):
+            schedule = [restart_V] + schedule
+
+    source_sequence = _source_schedule(args.source_sequence)
 
     settings = dict(vars(args))
     settings["resolved_V_schedule"] = schedule
     settings["resolved_source_sequence"] = source_sequence
     settings["target_supercell_filling"] = target_supercell
     settings["matrix_dimension"] = NSUP
+    settings["resolved_restart_path"] = None if restart_path is None else str(restart_path)
+    settings["restart_metadata"] = restart_meta
     with (outdir / "settings.json").open("w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
 
@@ -303,22 +412,31 @@ def main():
         f"primitive filling={args.primitive_filling:g}; supercell target={target_supercell:g}; "
         f"grid={args.nk1}x{args.nk2}, nw={args.nw}, nOmega={args.nomega}, T={args.T:g}"
     )
-    print("V ramp:", " -> ".join(f"{v:g}" for v in schedule))
+    if restart_meta is not None:
+        print(
+            f"restart: {restart_path}  (V={float(restart_meta['V']):g}, "
+            f"|Phi|={float(restart_meta.get('charge_order_abs', 0.0)):.3e})"
+        )
+    print("V ramp:", " -> ".join(f"{v:g}" for v in schedule) if schedule else "already at target")
     print(
-        f"source first applied at V>={args.source_onset_V:g}: "
+        f"source first applied when needed at V>={args.source_onset_V:g}: "
         + " -> ".join(f"{h:g}" for h in source_sequence)
     )
     print(
         "GW attempts:",
         " -> ".join(f"{m}:{x:g}" for m, x in _attempt_schedule(args)),
     )
+    if not args.no_checkpoints:
+        print("checkpoint directory:", checkpoint_dir)
     print("=" * 84)
+
+    if not schedule:
+        print("Target V is already available in the selected checkpoint; no GW iterations needed.")
+        print("checkpoint:", restart_path)
+        return
 
     attempt_rows: list[dict] = []
     density_rows: list[dict] = []
-    previous = None
-    mu_guess = float(args.mu0)
-    source_has_been_used = False
     stopped = False
 
     for iv, V in enumerate(schedule, start=1):
@@ -378,6 +496,20 @@ def main():
                 f"|Phi|={d['charge_order_abs']:.4e}, density_rms={d['density_rms_modulation']:.4e}"
             )
 
+            if np.isclose(source, 0.0) and not args.no_checkpoints:
+                ckpt = checkpoint_dir / checkpoint_filename(
+                    V, args.primitive_filling, grid
+                )
+                save_supercell_checkpoint(
+                    ckpt,
+                    gw,
+                    params,
+                    grid,
+                    args.primitive_filling,
+                    source=0.0,
+                )
+                print("  checkpoint:", ckpt)
+
         if stopped:
             break
 
@@ -388,6 +520,8 @@ def main():
     print("site densities:", outdir / "density_profile.csv")
     print("charge plot:", outdir / "charge_order_vs_V.png")
     print("screening plot:", outdir / "screening_smin_vs_V.png")
+    if not args.no_checkpoints:
+        print("checkpoints:", checkpoint_dir)
 
 
 if __name__ == "__main__":
