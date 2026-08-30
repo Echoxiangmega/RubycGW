@@ -14,6 +14,8 @@ Strategy
   applied to Sigma_GW only;
 * the DIIS Gram matrix is normalized before regularization, so Pulay remains
   effective when the raw GW residual has already fallen to 1e-5 and below;
+* optional residual diagnostics decompose a plateau into scalar-shift,
+  low-frequency, frequency-edge and maximum-element contributions;
 * a bad Pulay pulse is detected on the next (single) GW-map evaluation, its
   history is discarded, and a few cheap recovery-linear iterations are used;
 * there is no rollback and no multi-trial line search: every outer iteration
@@ -86,6 +88,12 @@ class AndersonOptions:
     spike_factor: float = 3.0
     diagnostic_interval: int = 10
 
+    # Zero-extra-map residual diagnostics.  These are deliberately disabled by
+    # default because they allocate a few temporary arrays and produce verbose
+    # output, but they do not evaluate G -> P -> W -> Sigma_GW again.
+    residual_diagnostics: bool = False
+    residual_diagnostic_every: int = 1
+
 
 def _validate(a: AndersonOptions) -> None:
     if a.history < 2:
@@ -116,6 +124,8 @@ def _validate(a: AndersonOptions) -> None:
         raise ValueError("scale_floor must be positive")
     if a.diagnostic_interval < 1:
         raise ValueError("diagnostic_interval must be positive")
+    if int(a.residual_diagnostic_every) < 1:
+        raise ValueError("residual_diagnostic_every must be positive")
 
 
 def _rms(x: np.ndarray) -> float:
@@ -172,9 +182,6 @@ def _gw_pulay_coefficients(
     if not np.isfinite(diag_scale) or diag_scale <= np.finfo(float).tiny:
         return np.full(m, 1.0 / float(m), dtype=float)
 
-    # Work with an O(1) Gram matrix.  The user-facing regularization is now a
-    # dimensionless relative ridge and therefore does not switch off Pulay as
-    # the residual becomes small.
     gram /= diag_scale
     gram += float(regularization) * np.eye(m)
 
@@ -214,9 +221,6 @@ def _gw_only_pulay_step(
     if not np.all(np.isfinite(step)):
         return sigma_gw + float(linear_beta) * res_gw, False
 
-    # Cheap local trust cap only; unlike the old solver this does not launch
-    # trial GW maps.  The small floor tied to |Sigma_GW| prevents an otherwise
-    # useful DIIS correction from being rejected merely because R_GW is tiny.
     linear_rms = float(linear_beta) * _rms(res_gw)
     state_rms = max(_rms(sigma_gw), float(scale_floor))
     reference = max(linear_rms, 0.02 * state_rms, float(scale_floor))
@@ -232,6 +236,66 @@ def _screening_min(P: np.ndarray, Vq: np.ndarray) -> float:
     lhs = eye[None, None, None, :, :] - np.matmul(Vq[None, :, :, :, :], P)
     vals = np.linalg.svd(lhs, compute_uv=False)
     return float(np.min(vals[..., -1]))
+
+
+def _gw_residual_mode_diagnostics(
+    res_gw: np.ndarray,
+    grid: MatsubaraGrid,
+) -> dict:
+    """Decompose one raw GW residual without changing the fixed-point map.
+
+    ``scalar_shift`` is the orthogonal projection onto a real, frequency- and
+    momentum-independent orbital identity.  ``projected_max`` removes exactly
+    that one direction.  ``lowfreq_max`` uses the four Matsubara slices closest
+    to zero, while ``edge_max`` uses the four slices with largest |omega|.
+    """
+    res = np.asarray(res_gw, dtype=complex)
+    if res.ndim != 5:
+        raise ValueError("Expected res_gw with shape (nf,nk1,nk2,norb,norb)")
+    nf, nk1, nk2, norb, norb2 = res.shape
+    if norb != norb2:
+        raise ValueError("GW residual matrices must be square")
+
+    diag = np.diagonal(res, axis1=-2, axis2=-1)
+    scalar_shift = float(np.mean(diag.real))
+    eye = np.eye(norb, dtype=complex)
+    projected = res - scalar_shift * eye[None, None, None, :, :]
+
+    raw_norm2 = float(np.vdot(res, res).real)
+    scalar_norm2 = float((scalar_shift ** 2) * nf * nk1 * nk2 * norb)
+    scalar_fraction = 0.0 if raw_norm2 <= 0.0 else scalar_norm2 / raw_norm2
+    scalar_fraction = float(np.clip(scalar_fraction, 0.0, 1.0))
+
+    freq_max = np.max(np.abs(res), axis=(1, 2, 3, 4))
+    nsel = min(4, nf)
+    low_idx = np.argsort(np.abs(grid.omega))[:nsel]
+    edge_idx = np.argsort(np.abs(grid.omega))[-nsel:]
+
+    flat_index = int(np.argmax(np.abs(res)))
+    imax = np.unravel_index(flat_index, res.shape)
+    iw, ik1, ik2, ia, ib = [int(x) for x in imax]
+    kmesh = grid.kmesh()
+    kval = kmesh[ik1, ik2]
+    value = complex(res[imax])
+
+    return {
+        "raw_max": float(np.max(np.abs(res))),
+        "projected_max": float(np.max(np.abs(projected))),
+        "scalar_shift": scalar_shift,
+        "scalar_fraction": scalar_fraction,
+        "lowfreq_max": float(np.max(freq_max[low_idx])),
+        "edge_max": float(np.max(freq_max[edge_idx])),
+        "max_iw": iw,
+        "max_omega": float(grid.omega[iw]),
+        "max_k1_index": ik1,
+        "max_k2_index": ik2,
+        "max_k1": float(kval[0]),
+        "max_k2": float(kval[1]),
+        "max_a": ia,
+        "max_b": ib,
+        "max_value_re": float(value.real),
+        "max_value_im": float(value.imag),
+    }
 
 
 def solve_matrix_gw_anderson(
@@ -293,6 +357,7 @@ def solve_matrix_gw_anderson(
     prev_err_gw = float("inf")
     last_smin = float("nan")
     mu_tol_used = initial_mu_tol
+    previous_dyson_effective = None
 
     W = np.zeros((grid.nb, grid.nk1, grid.nk2, norb, norb), dtype=complex)
     P = np.zeros_like(W)
@@ -302,7 +367,6 @@ def solve_matrix_gw_anderson(
     it = 0
 
     for it in range(1, opts.max_iter + 1):
-        # Exactly one expensive GW fixed-point map is evaluated here.
         density = density_from_G_cached(G, grid, mu, cache)
         sigma_h_out = hartree_self_energy_matrix(density, Vq0)
         P = compute_polarization_matrix(G, grid, backend=backend)
@@ -315,9 +379,20 @@ def solve_matrix_gw_anderson(
         err_gw = float(np.max(np.abs(res_gw)))
         err = _residual_error(res_h, res_gw)
 
-        # A Pulay pulse is judged only when its next single map has been seen.
-        # No rollback is attempted; a bad pulse simply resets the small history
-        # and triggers a few cheap recovery-linear updates.
+        current_dyson_effective = None
+        dyson_drift_max = float("nan")
+        if anderson.residual_diagnostics:
+            eye = np.eye(norb, dtype=complex)
+            current_dyson_effective = (
+                float(mu) * eye[None, None, None, :, :]
+                - sigma_h[None, None, None, :, :]
+                - sigma_gw
+            )
+            if previous_dyson_effective is not None:
+                dyson_drift_max = float(
+                    np.max(np.abs(current_dyson_effective - previous_dyson_effective))
+                )
+
         bad_pulay = bool(
             last_step_kind == "gw-pulay"
             and np.isfinite(prev_err_gw)
@@ -361,12 +436,38 @@ def solve_matrix_gw_anderson(
                     f"enter recovery-linear"
                 )
 
+        if (
+            anderson.residual_diagnostics
+            and (it == 1 or it % int(anderson.residual_diagnostic_every) == 0)
+        ):
+            diag = _gw_residual_mode_diagnostics(res_gw, grid)
+            ddyson = (
+                f"{dyson_drift_max:.3e}"
+                if np.isfinite(dyson_drift_max)
+                else "--"
+            )
+            print(
+                "  GW-resdiag: "
+                f"raw={diag['raw_max']:.3e}, "
+                f"nonscalar={diag['projected_max']:.3e}, "
+                f"scalar_shift={diag['scalar_shift']:+.3e}, "
+                f"scalar_fraction={diag['scalar_fraction']:.3f}, "
+                f"lowfreq={diag['lowfreq_max']:.3e}, "
+                f"edge={diag['edge_max']:.3e}, dDyson={ddyson}"
+            )
+            print(
+                "    max@ "
+                f"iw={diag['max_iw']} omega={diag['max_omega']:+.6e}, "
+                f"kidx=({diag['max_k1_index']},{diag['max_k2_index']}), "
+                f"k=({diag['max_k1']:.6f},{diag['max_k2']:.6f}), "
+                f"orb=({diag['max_a']},{diag['max_b']}), "
+                f"R={diag['max_value_re']:+.3e}{diag['max_value_im']:+.3e}i"
+            )
+
         if err < opts.tol:
             converged = True
             break
 
-        # Store only the dynamic-GW output/residual.  Hartree never enters the
-        # DIIS metric, because the observed slow/oscillatory mode is in Sigma_GW.
         history.append(
             (np.array(sigma_gw_out, copy=True), np.array(res_gw, copy=True))
         )
@@ -416,8 +517,6 @@ def solve_matrix_gw_anderson(
             else:
                 sigma_gw_next = sigma_gw + float(anderson.gw_beta) * res_gw
                 next_step_kind = "block-linear"
-                # Ill-conditioned/oversized extrapolation should not poison the
-                # next pulse; keep only the newest physical map.
                 history[:] = history[-1:]
                 eligible_count = 0
         else:
@@ -444,6 +543,8 @@ def solve_matrix_gw_anderson(
                 opts.mu_max_iter,
             )
 
+        if anderson.residual_diagnostics:
+            previous_dyson_effective = current_dyson_effective
         prev_err = float(err)
         prev_err_gw = float(err_gw)
         sigma_h = sigma_h_next
@@ -454,7 +555,6 @@ def solve_matrix_gw_anderson(
         mu_neval = int(mu_neval_next)
         last_step_kind = next_step_kind
 
-    # Strict fixed-filling polish and an exact residual on the returned state.
     mu, G, cache, mu_neval_final = _strict_refine_fixed_filling(
         h0,
         sigma_h,
@@ -482,6 +582,16 @@ def solve_matrix_gw_anderson(
             f"SC-GW strict mu refine: mu={mu:.10f}, n={np.sum(density):.10f}, "
             f"mu_eval={mu_neval_final}, mu_tol={opts.mu_tol:.1e}, "
             f"residual={err:.3e}, rH={err_h:.3e}, rGW={err_gw:.3e}"
+        )
+
+    if anderson.residual_diagnostics:
+        diag = _gw_residual_mode_diagnostics(res_gw, grid)
+        print(
+            "  GW-resdiag-final: "
+            f"raw={diag['raw_max']:.3e}, nonscalar={diag['projected_max']:.3e}, "
+            f"scalar_shift={diag['scalar_shift']:+.3e}, "
+            f"scalar_fraction={diag['scalar_fraction']:.3f}, "
+            f"lowfreq={diag['lowfreq_max']:.3e}, edge={diag['edge_max']:.3e}"
         )
 
     (
