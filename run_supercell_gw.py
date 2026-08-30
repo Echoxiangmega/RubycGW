@@ -4,9 +4,12 @@
 Optimizations used by default:
 1. warm-started fixed-filling mu solves with cached high-frequency tails;
 2. loose ramp tolerance for intermediate V/source points and strict final tolerance;
-3. safeguarded Type-II Anderson mixing with linear warmup and recovery;
-4. failed-but-finite retries continue from the best state reached;
-5. secant prediction in V once two consecutive zero-source states are on the same branch.
+3. GW-only periodic Pulay with weak-V bootstrap and conservative recovery;
+4. near-converged states are refined with a fresh local Pulay history instead
+   of being handed immediately to ordinary linear mixing;
+5. expensive fallback attempts have their own bounded iteration budget;
+6. failed-but-finite retries always continue from the best state reached;
+7. secant prediction in V once two consecutive zero-source states are on the same branch.
 
 Every converged zero-source state is checkpointed by default.  Use
 ``--restart-from auto`` to continue from the nearest compatible checkpoint.
@@ -129,15 +132,22 @@ def _source_schedule(values: list[float]) -> list[float]:
     return out
 
 
-def _attempt_schedule(args) -> list[tuple[str, float]]:
-    out: list[tuple[str, float]] = []
+def _primary_attempt(args) -> tuple[str, float]:
     if not args.no_anderson:
-        out.append(("anderson", float(args.anderson_beta)))
+        return "anderson", float(args.anderson_beta)
+    return "linear", float(args.gw_mixing)
 
+
+def _fallback_schedule(args) -> list[tuple[str, float]]:
+    """Fallbacks used only when the best state is not already near converged."""
+    out: list[tuple[str, float]] = []
+    primary_method, primary_mix = _primary_attempt(args)
     for mixing in [args.gw_mixing] + list(args.gw_retry_mixings):
         mixing = float(mixing)
         if not (0.0 < mixing <= 1.0):
             raise ValueError("GW mixing must lie in (0,1].")
+        if primary_method == "linear" and np.isclose(primary_mix, mixing):
+            continue
         if not any(m == "linear" and np.isclose(x, mixing) for m, x in out):
             out.append(("linear", mixing))
 
@@ -153,6 +163,13 @@ def _point_tolerance(args, V: float, source: float) -> float:
     return float(args.gw_tol if is_final else args.ramp_tol)
 
 
+def _near_converged(error: float, args) -> bool:
+    return bool(
+        np.isfinite(float(error))
+        and float(error) <= float(args.near_converged_threshold)
+    )
+
+
 def _gw_options(
     args,
     target_supercell: float,
@@ -160,11 +177,12 @@ def _gw_options(
     method: str,
     mixing: float,
     tol: float,
+    max_iter: int | None = None,
 ) -> GWOptions:
     return GWOptions(
         mu=float(mu),
         target_filling=float(target_supercell),
-        max_iter=args.gw_max_iter,
+        max_iter=int(args.gw_max_iter if max_iter is None else max_iter),
         tol=float(tol),
         mixing=float(mixing),
         mixing_method=str(method),
@@ -234,19 +252,42 @@ def _solve_adaptive(
     initial,
     tol: float,
 ):
-    """Try Anderson first, then conservative linear/Pulay fallbacks."""
-    attempts = []
+    """Use a long primary solve, local near refinement, then short fallbacks.
+
+    A state already within ``near_converged_threshold`` is never handed to the
+    ordinary linear fallbacks.  Instead the active periodic-Pulay solver is
+    restarted from that state, which clears its old history and builds a fresh
+    local history.  If the local refinement still misses the strict tolerance,
+    the best near-converged state is returned rather than spending another full
+    ``gw_max_iter`` in a less suitable mixer.
+    """
+    attempts: list[dict] = []
     best = None
     best_error = float("inf")
-    retry_seed = initial
     local_mu = float(mu_guess)
+    attempt_index = 0
 
-    for i, (method, mixing) in enumerate(_attempt_schedule(args), start=1):
+    def _run_attempt(
+        role: str,
+        method: str,
+        mixing: float,
+        budget: int,
+        seed,
+        mu_start: float,
+    ):
+        nonlocal attempt_index
+        attempt_index += 1
         t0 = time.perf_counter()
-        used_carried_seed = bool(i > 1 and retry_seed is not initial)
+        used_carried_seed = bool(seed is not initial)
         try:
             opts = _gw_options(
-                args, target_supercell, local_mu, method, mixing, tol
+                args,
+                target_supercell,
+                mu_start,
+                method,
+                mixing,
+                tol,
+                max_iter=budget,
             )
 
             def _run_solver():
@@ -256,7 +297,7 @@ def _solve_adaptive(
                         grid,
                         opts,
                         source_strength=source,
-                        initial=retry_seed,
+                        initial=seed,
                         anderson=_anderson_options(args),
                     )
                 return solve_supercell_gw_fast(
@@ -264,7 +305,7 @@ def _solve_adaptive(
                     grid,
                     opts,
                     source_strength=source,
-                    initial=retry_seed,
+                    initial=seed,
                 )
 
             if args.verbose_iterations and int(args.verbose_every) > 1:
@@ -277,9 +318,11 @@ def _solve_adaptive(
 
             runtime = time.perf_counter() - t0
             row = {
-                "attempt": i,
+                "attempt": attempt_index,
+                "role": role,
                 "method": method,
                 "mixing": float(mixing),
+                "max_iter_budget": int(budget),
                 "requested_tol": float(tol),
                 "carried_retry_seed": used_carried_seed,
                 "converged": bool(gw.converged),
@@ -289,25 +332,15 @@ def _solve_adaptive(
                 "exception": "",
             }
             row.update(_diagnostics(gw))
-
-            if _finite_gw_state(gw) and float(gw.final_error) < best_error:
-                best = gw
-                best_error = float(gw.final_error)
-
-            if row["converged"]:
-                attempts.append(row)
-                return gw, attempts
-
-            if best is not None:
-                retry_seed = best
-                local_mu = float(best.mu)
-
+            return gw, row
         except Exception as exc:
             runtime = time.perf_counter() - t0
             row = {
-                "attempt": i,
+                "attempt": attempt_index,
+                "role": role,
                 "method": method,
                 "mixing": float(mixing),
+                "max_iter_budget": int(budget),
                 "requested_tol": float(tol),
                 "carried_retry_seed": used_carried_seed,
                 "converged": False,
@@ -330,7 +363,102 @@ def _solve_adaptive(
                 "screening_q_sc2": np.nan,
                 "density_mode_residual": np.nan,
             }
+            return None, row
+
+    def _record(gw, row) -> None:
+        nonlocal best, best_error, local_mu
         attempts.append(row)
+        if _finite_gw_state(gw) and float(gw.final_error) < best_error:
+            best = gw
+            best_error = float(gw.final_error)
+            local_mu = float(gw.mu)
+
+    primary_method, primary_mix = _primary_attempt(args)
+    gw, row = _run_attempt(
+        "primary",
+        primary_method,
+        primary_mix,
+        int(args.gw_max_iter),
+        initial,
+        local_mu,
+    )
+    _record(gw, row)
+    if gw is not None and gw.converged:
+        return gw, attempts
+
+    # If the expensive primary solve has already reached the local fixed-point
+    # neighbourhood, reset only its Pulay history and continue there.  Do not
+    # switch to ordinary positive linear mixing, which can re-excite a marginal
+    # GW mode and destroy a good 1e-5-level state.
+    near_refined = False
+    if best is not None and _near_converged(best_error, args) and not args.no_anderson:
+        near_refined = True
+        print(
+            f"  near-converged state: residual={best_error:.3e} <= "
+            f"{args.near_converged_threshold:.3e}; restart periodic Pulay with "
+            f"fresh local history for at most {args.near_refine_max_iter} iterations"
+        )
+        gw, row = _run_attempt(
+            "near-refine",
+            "anderson",
+            float(args.anderson_beta),
+            int(args.near_refine_max_iter),
+            best,
+            local_mu,
+        )
+        _record(gw, row)
+        if gw is not None and gw.converged:
+            return gw, attempts
+        if best is not None and _near_converged(best_error, args):
+            print(
+                f"  near-refine stopped at best residual={best_error:.3e}; "
+                "skip ordinary linear fallbacks to preserve the near-fixed-point state"
+            )
+            return best, attempts
+
+    # Only genuinely non-near states are handed to alternative mixers.  Each
+    # fallback gets a much smaller budget than the primary solve.
+    for method, mixing in _fallback_schedule(args):
+        seed = best if best is not None else initial
+        gw, row = _run_attempt(
+            "fallback",
+            method,
+            mixing,
+            int(args.fallback_max_iter),
+            seed,
+            local_mu,
+        )
+        _record(gw, row)
+        if gw is not None and gw.converged:
+            return gw, attempts
+
+        # If a short fallback succeeds in entering the near-converged basin,
+        # hand it back once to the active periodic-Pulay solver for local polish.
+        if (
+            best is not None
+            and _near_converged(best_error, args)
+            and not args.no_anderson
+            and not near_refined
+        ):
+            near_refined = True
+            print(
+                f"  fallback reached near-converged residual={best_error:.3e}; "
+                f"switch to local periodic-Pulay refinement for at most "
+                f"{args.near_refine_max_iter} iterations"
+            )
+            gw, row = _run_attempt(
+                "near-refine",
+                "anderson",
+                float(args.anderson_beta),
+                int(args.near_refine_max_iter),
+                best,
+                local_mu,
+            )
+            _record(gw, row)
+            if gw is not None and gw.converged:
+                return gw, attempts
+            if best is not None and _near_converged(best_error, args):
+                return best, attempts
 
     return best, attempts
 
@@ -512,6 +640,27 @@ def _parse_args():
     p.add_argument("--gw-max-iter", type=int, default=300)
     p.add_argument("--gw-tol", type=float, default=1e-8)
     p.add_argument("--ramp-tol", type=float, default=1e-6)
+    p.add_argument(
+        "--near-converged-threshold",
+        type=float,
+        default=1e-3,
+        help=(
+            "If the best raw GW residual is at or below this value, skip ordinary "
+            "linear fallbacks and restart periodic Pulay with fresh local history."
+        ),
+    )
+    p.add_argument(
+        "--near-refine-max-iter",
+        type=int,
+        default=400,
+        help="Maximum iterations for one fresh-history near-converged Pulay refinement.",
+    )
+    p.add_argument(
+        "--fallback-max-iter",
+        type=int,
+        default=150,
+        help="Maximum iterations for each linear/legacy-Pulay fallback attempt.",
+    )
     p.add_argument("--gw-mixing", type=float, default=0.20)
     p.add_argument(
         "--gw-retry-mixings", nargs="+", type=float, default=[0.10]
@@ -578,6 +727,14 @@ def main():
         raise ValueError("Require 0 < --gw-tol <= --ramp-tol.")
     if args.mu_tol <= 0.0:
         raise ValueError("--mu-tol must be positive.")
+    if int(args.gw_max_iter) < 1:
+        raise ValueError("--gw-max-iter must be positive.")
+    if int(args.near_refine_max_iter) < 1:
+        raise ValueError("--near-refine-max-iter must be positive.")
+    if int(args.fallback_max_iter) < 1:
+        raise ValueError("--fallback-max-iter must be positive.")
+    if float(args.near_converged_threshold) <= 0.0:
+        raise ValueError("--near-converged-threshold must be positive.")
     if int(args.verbose_every) < 1:
         raise ValueError("--verbose-every must be a positive integer.")
     if not (0.0 < args.predictor_damping <= 1.5):
@@ -682,12 +839,12 @@ def main():
         None if restart_path is None else str(restart_path)
     )
     settings["restart_metadata"] = restart_meta
-    settings["solver"] = "anderson + fast fallback"
+    settings["solver"] = "periodic Pulay + near refinement + bounded fallbacks"
     with (outdir / "settings.json").open("w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
 
     print("=" * 92)
-    print("18-site periodic Ruby supercell GW (predictor + adaptive Anderson)")
+    print("18-site periodic Ruby supercell GW (continuation + periodic Pulay)")
     print("T1=a1-a2, T2=a1+2a2; primitive Q=(1/3,1/3) -> q_sc=0")
     print(
         f"primitive filling={args.primitive_filling:g}; "
@@ -701,10 +858,13 @@ def main():
     )
     if args.verbose_iterations:
         print(f"verbose iterations: every {args.verbose_every} outer step(s)")
+    primary_method, primary_mix = _primary_attempt(args)
     print(
-        f"Anderson: warmup={args.anderson_start} steps at "
-        f"{args.anderson_warmup_mixing:g}, history={args.anderson_history}, "
-        f"beta={args.anderson_beta:g}"
+        f"GW retry policy: primary={primary_method}:{primary_mix:g} "
+        f"for <= {args.gw_max_iter} iterations; near if residual <= "
+        f"{args.near_converged_threshold:.1e}, then fresh-history periodic Pulay "
+        f"for <= {args.near_refine_max_iter}; each fallback <= "
+        f"{args.fallback_max_iter} iterations"
     )
     print(
         f"V predictor: enabled={not args.no_v_predictor}, "
@@ -728,9 +888,12 @@ def main():
         f"source when needed at V>={args.source_onset_V:g}: "
         + " -> ".join(f"{h:g}" for h in source_sequence)
     )
+    fallbacks = _fallback_schedule(args)
     print(
-        "GW attempts:",
-        " -> ".join(f"{m}:{x:g}" for m, x in _attempt_schedule(args)),
+        "fallbacks:",
+        " -> ".join(f"{m}:{x:g}" for m, x in fallbacks)
+        if fallbacks
+        else "disabled",
     )
     if not args.no_checkpoints:
         print("checkpoint directory:", checkpoint_dir)
@@ -823,8 +986,9 @@ def main():
                     else f" exception={att['exception']}"
                 )
                 print(
-                    f"  try {att['attempt']}/{len(_attempt_schedule(args))}: "
+                    f"  try {att['attempt']}: role={att['role']} "
                     f"{att['method']} mix={att['mixing']:.3f} "
+                    f"budget={att['max_iter_budget']} "
                     f"carry={att['carried_retry_seed']} "
                     f"conv={att['converged']} "
                     f"it={att['iterations']} "
