@@ -9,10 +9,12 @@ Optimizations used by default:
    of being handed immediately to ordinary linear mixing;
 5. expensive fallback attempts have their own bounded iteration budget;
 6. failed-but-finite retries always continue from the best state reached;
-7. secant prediction in V once two consecutive zero-source states are on the same branch.
+7. auto restart preloads the two nearest compatible zero-source checkpoints so
+   the first new V point can already use a secant predictor;
+8. strong-coupling continuation is automatically densified to avoid large V jumps.
 
 Every converged zero-source state is checkpointed by default.  Use
-``--restart-from auto`` to continue from the nearest compatible checkpoint.
+``--restart-from auto`` to continue from the nearest compatible checkpoints.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from rubycgw.checkpoint import (
     GWCheckpointSeed,
     checkpoint_filename,
     find_nearest_compatible_checkpoint,
+    find_recent_compatible_checkpoints,
     load_supercell_checkpoint,
     save_supercell_checkpoint,
 )
@@ -121,6 +124,49 @@ def _v_schedule_after_restart(
     if target < restart_V:
         return [target]
     return [v for v in _v_schedule(target, None) if v > restart_V + 1e-12]
+
+
+def _densify_strong_v_schedule(
+    restart_V: float,
+    values: list[float],
+    onset: float,
+    max_step: float,
+) -> list[float]:
+    """Insert extra forward-V points once the continuation is in strong coupling.
+
+    Explicit user ``--V-values`` are never passed through this helper.  For the
+    default continuation, any forward segment whose starting point is at or
+    above ``onset`` is subdivided so every step is at most ``max_step``.  Thus a
+    restart at V=1 followed by target V=1.2 becomes 1.1 -> 1.2 for the default
+    ``max_step=0.1``.
+    """
+    if not values:
+        return []
+    max_step = float(max_step)
+    if max_step <= 0.0:
+        raise ValueError("max_step must be positive")
+
+    current = float(restart_V)
+    out: list[float] = []
+    for raw in values:
+        value = float(raw)
+        if value <= current + 1e-12:
+            if not np.isclose(value, current):
+                out.append(value)
+            current = value
+            continue
+
+        gap = value - current
+        if current >= float(onset) - 1e-12 and gap > max_step + 1e-12:
+            nseg = int(np.ceil(gap / max_step))
+            for j in range(1, nseg + 1):
+                x = current + gap * j / nseg
+                if not out or not np.isclose(out[-1], x):
+                    out.append(float(x))
+        else:
+            out.append(value)
+        current = value
+    return out
 
 
 def _source_schedule(values: list[float]) -> list[float]:
@@ -386,10 +432,6 @@ def _solve_adaptive(
     if gw is not None and gw.converged:
         return gw, attempts
 
-    # If the expensive primary solve has already reached the local fixed-point
-    # neighbourhood, reset only its Pulay history and continue there.  Do not
-    # switch to ordinary positive linear mixing, which can re-excite a marginal
-    # GW mode and destroy a good 1e-5-level state.
     near_refined = False
     if best is not None and _near_converged(best_error, args) and not args.no_anderson:
         near_refined = True
@@ -416,8 +458,6 @@ def _solve_adaptive(
             )
             return best, attempts
 
-    # Only genuinely non-near states are handed to alternative mixers.  Each
-    # fallback gets a much smaller budget than the primary solve.
     for method, mixing in _fallback_schedule(args):
         seed = best if best is not None else initial
         gw, row = _run_attempt(
@@ -432,8 +472,6 @@ def _solve_adaptive(
         if gw is not None and gw.converged:
             return gw, attempts
 
-        # If a short fallback succeeds in entering the near-converged basin,
-        # hand it back once to the active periodic-Pulay solver for local polish.
         if (
             best is not None
             and _near_converged(best_error, args)
@@ -688,6 +726,21 @@ def _parse_args():
     p.add_argument("--predictor-damping", type=float, default=0.80)
     p.add_argument("--predictor-max-ratio", type=float, default=2.0)
     p.add_argument("--predictor-order-threshold", type=float, default=1e-4)
+    p.add_argument(
+        "--strong-v-onset",
+        type=float,
+        default=1.0,
+        help="Start automatically limiting default forward V-continuation step size here.",
+    )
+    p.add_argument(
+        "--strong-v-max-step",
+        type=float,
+        default=0.10,
+        help=(
+            "Maximum default forward V step after --strong-v-onset when restarting. "
+            "Explicit --V-values are respected exactly and are not densified."
+        ),
+    )
 
     p.add_argument("--mu-tol", type=float, default=1e-8)
     p.add_argument("--mu-max-iter", type=int, default=40)
@@ -739,6 +792,8 @@ def main():
         raise ValueError("--verbose-every must be a positive integer.")
     if not (0.0 < args.predictor_damping <= 1.5):
         raise ValueError("--predictor-damping must lie in (0,1.5].")
+    if float(args.strong_v_max_step) <= 0.0:
+        raise ValueError("--strong-v-max-step must be positive.")
 
     target_supercell = 3.0 * float(args.primitive_filling)
     if args.outdir is None:
@@ -764,6 +819,7 @@ def main():
     mu_guess = float(args.mu0)
     restart_meta = None
     restart_path = None
+    restart_history_paths: list[Path] = []
 
     compatibility_params = RubyParameters(
         ti=args.ti, t1=args.t1, t2=args.t2, V=float(args.V)
@@ -771,19 +827,44 @@ def main():
 
     if args.restart_from is not None:
         if args.restart_from.lower() == "auto":
-            restart_path = find_nearest_compatible_checkpoint(
+            restart_history_paths = find_recent_compatible_checkpoints(
                 checkpoint_dir,
                 args.V,
                 compatibility_params,
                 grid,
                 args.primitive_filling,
+                limit=2,
             )
+            restart_path = restart_history_paths[-1] if restart_history_paths else None
             if restart_path is None:
                 print("No compatible checkpoint found; using ordinary V ramp.")
         else:
             restart_path = Path(args.restart_from)
+            restart_history_paths = [restart_path]
 
         if restart_path is not None:
+            # For auto restart, preload the previous compatible V point first.
+            # This gives _predictor_seed two same-branch history entries before
+            # the first new V point is solved.
+            if len(restart_history_paths) >= 2:
+                older_path = restart_history_paths[-2]
+                older_seed, older_meta, _ = load_supercell_checkpoint(
+                    older_path,
+                    compatibility_params,
+                    grid,
+                    args.primitive_filling,
+                )
+                older_phi = complex(
+                    float(older_meta.get("charge_order_re", 0.0)),
+                    float(older_meta.get("charge_order_im", 0.0)),
+                )
+                _update_zero_history(
+                    zero_history,
+                    float(older_meta["V"]),
+                    older_seed,
+                    phi=older_phi,
+                )
+
             previous, restart_meta, _ = load_supercell_checkpoint(
                 restart_path,
                 compatibility_params,
@@ -810,6 +891,13 @@ def main():
         schedule = _v_schedule_after_restart(
             args.V, args.V_values, restart_V
         )
+        if args.V_values is None and args.V > restart_V + 1e-12:
+            schedule = _densify_strong_v_schedule(
+                restart_V,
+                schedule,
+                onset=args.strong_v_onset,
+                max_step=args.strong_v_max_step,
+            )
         source_has_been_used = bool(
             restart_V >= args.source_onset_V - 1e-12
             and float(restart_meta.get("charge_order_abs", 0.0)) > 1e-6
@@ -838,8 +926,9 @@ def main():
     settings["resolved_restart_path"] = (
         None if restart_path is None else str(restart_path)
     )
+    settings["resolved_restart_history"] = [str(p) for p in restart_history_paths]
     settings["restart_metadata"] = restart_meta
-    settings["solver"] = "periodic Pulay + near refinement + bounded fallbacks"
+    settings["solver"] = "periodic Pulay + checkpoint secant + bounded fallbacks"
     with (outdir / "settings.json").open("w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
 
@@ -869,7 +958,8 @@ def main():
     print(
         f"V predictor: enabled={not args.no_v_predictor}, "
         f"damping={args.predictor_damping:g}, "
-        f"max_ratio={args.predictor_max_ratio:g}"
+        f"max_ratio={args.predictor_max_ratio:g}; strong-V max step="
+        f"{args.strong_v_max_step:g} for V>={args.strong_v_onset:g}"
     )
     if restart_meta is not None:
         print(
@@ -878,6 +968,11 @@ def main():
             f"err={float(restart_meta.get('final_error', np.nan)):.2e}, "
             f"|Phi|={float(restart_meta.get('charge_order_abs', 0.0)):.3e})"
         )
+        if len(restart_history_paths) >= 2:
+            print(
+                "restart secant history:",
+                " -> ".join(str(p) for p in restart_history_paths[-2:]),
+            )
     print(
         "V ramp:",
         " -> ".join(f"{v:g}" for v in schedule)
