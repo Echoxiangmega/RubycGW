@@ -1,28 +1,32 @@
 #!/usr/bin/env python3
-"""Search a small, physically focused set of 18-site GW branches.
+"""Search a small, physically focused set of 18-site CO/LC branches.
 
 The default branch set is deliberately small:
 
-    normal    primitive-translation-symmetric seed, no source
+    normal    primitive-translation-symmetric branch, no source
     co        period-3 charge source, then h_CO -> 0
     same      physical-same uniform loop-current source, then h_eta -> 0
     opposite  physical-opposite uniform loop-current source, then h_eta -> 0
 
-All branches are solved at the same (V,T,N,k-grid,Matsubara-grid).  By default,
-the LC branches start from the input checkpoint after projecting out primitive
-+/-Q self-energy components, while the CO branch starts from the original
-checkpoint.  With ``--hf-seed`` this history dependence is removed at the first
-source point of every branch: the code first solves a fully self-consistent
-18-site static Hartree-Fock Green function for that branch Hamiltonian and uses
-that HF solution as the initial full-GW self-energy.
+By default the script solves the full split-GW equations.  The CO branch starts
+from the input checkpoint, while normal/same/opposite start from its primitive-
+translation-symmetric projection.
 
-Charge order is never constrained away during the full-GW LC solves, so an LC
-seed is allowed to end in a mixed CO+LC state.
+With ``--hf-only`` the approximation itself is changed: no polarization P, no
+screened interaction W, no dynamic Sigma_c, and no GW iteration is performed.
+Instead each branch is followed entirely within self-consistent static
+Hartree-Fock,
 
-For every converged zero-source endpoint the script evaluates the split-GW
-Luttinger-Ward functional and ranks states by the fixed-filling Helmholtz free
-energy F=Omega+mu*N.  Thus the output distinguishes "which seed converged" from
-"which zero-source basin has the lowest free energy".
+    G_HF^{-1} = iw + mu - h0 - Sigma_H^HF - Sigma_F^HF.
+
+The first source point of each HF branch starts from zero HF self-energy; later
+source points use the previous HF solution, so a source-selected CO/LC branch
+can be followed adiabatically to h=0.  The input checkpoint then supplies only
+(V,T,filling, hopping/grid parameters) and an initial chemical-potential guess.
+
+Only zero-source endpoints are ranked thermodynamically.  GW mode uses the
+split-GW Luttinger-Ward free energy; HF-only mode uses the finite-temperature
+Hartree-Fock free energy evaluated directly from the static density matrix.
 """
 
 from __future__ import annotations
@@ -47,6 +51,7 @@ from rubycgw.gw import GWOptions
 from rubycgw.lc_branch import (
     add_current_source,
     current_diagnostics,
+    current_vertex_q0,
     remove_charge_order_from_seed,
 )
 from rubycgw.model import RubyParameters
@@ -56,7 +61,10 @@ from rubycgw.supercell import (
     charge_order_parameter,
 )
 from rubycgw.supercell_gw_bootstrap import AndersonOptions, solve_matrix_gw_anderson
-from rubycgw.supercell_hf import solve_supercell_hf_seed
+from rubycgw.supercell_hf import (
+    evaluate_supercell_hf_free_energy,
+    solve_supercell_hf,
+)
 
 
 DEFAULT_BRANCHES = ("normal", "co", "same", "opposite")
@@ -78,9 +86,9 @@ def _parse_args():
         required=True,
         type=str,
         help=(
-            "Compatible converged zero-source 18-site checkpoint.  Normally it is "
-            "also the common GW seed; with --hf-seed its self-energies are ignored "
-            "and it supplies only model/numerical parameters and an initial mu guess."
+            "Compatible converged zero-source 18-site GW checkpoint. In normal GW "
+            "mode it also seeds the branches. With --hf-only its self-energies are "
+            "ignored; only model/numerical parameters and the mu guess are used."
         ),
     )
     p.add_argument(
@@ -105,12 +113,11 @@ def _parse_args():
         help="Temporary uniform current source ladder for same/opposite branches.",
     )
     p.add_argument(
-        "--hf-seed",
+        "--hf-only",
         action="store_true",
         help=(
-            "At the first source point of each branch, ignore checkpoint self-energies, "
-            "solve self-consistent static Hartree-Fock for that branch Hamiltonian, "
-            "and use the converged HF Green function/self-energy as the full-GW seed."
+            "Use self-consistent static Hartree-Fock for the entire branch search. "
+            "Do not enter GW at any source point."
         ),
     )
     p.add_argument("--hf-max-iter", type=int, default=500)
@@ -188,6 +195,18 @@ def _classify(phi: complex, currents: dict[str, complex], threshold: float) -> s
     return "+".join(pieces) if pieces else "normal"
 
 
+def _hf_current_diagnostics(rho: np.ndarray, grid: MatsubaraGrid) -> dict[str, complex]:
+    """Exact static-HF q=0 currents from rho, with no Matsubara truncation."""
+    out: dict[str, complex] = {}
+    for channel in ("same", "opposite"):
+        K = current_vertex_q0(channel)
+        value = (1.0 / grid.nk) * np.einsum(
+            "ab,xyba->", K, np.asarray(rho, dtype=complex), optimize=True
+        )
+        out[f"{channel}_q0"] = complex(value)
+    return out
+
+
 def _checkpoint_name(
     V: float,
     primitive_filling: float,
@@ -200,12 +219,26 @@ def _checkpoint_name(
     return f"{stem}_branch-{branch}_h{float(h):.6g}.npz"
 
 
+def _failed_endpoint_row(branch: str, method: str) -> dict:
+    return {
+        "method": method,
+        "seed_branch": branch,
+        "endpoint_found": False,
+        "classification": "no-converged-zero-source-endpoint",
+        "mu": np.nan,
+        "Phi_abs": np.nan,
+        "m_same_pc_abs": np.nan,
+        "m_opposite_pc_abs": np.nan,
+        "Omega_supercell": np.nan,
+        "F_supercell": np.nan,
+        "F_per_primitive_cell": np.nan,
+        "DeltaF_per_primitive_cell": np.nan,
+        "final_error": np.nan,
+    }
+
+
 def main():
     args = _parse_args()
-    if args.gw_tol <= 0.0 or args.ramp_tol <= 0.0:
-        raise ValueError("GW tolerances must be positive")
-    if args.gw_tol > args.ramp_tol:
-        raise ValueError("Require --gw-tol <= --ramp-tol")
     if args.order_threshold <= 0.0:
         raise ValueError("--order-threshold must be positive")
     if args.hf_max_iter < 1:
@@ -214,6 +247,11 @@ def main():
         raise ValueError("HF tolerances must be positive")
     if not (0.0 < args.hf_mixing <= 1.0):
         raise ValueError("--hf-mixing must lie in (0,1]")
+    if not args.hf_only:
+        if args.gw_tol <= 0.0 or args.ramp_tol <= 0.0:
+            raise ValueError("GW tolerances must be positive")
+        if args.gw_tol > args.ramp_tol:
+            raise ValueError("Require --gw-tol <= --ramp-tol")
 
     checkpoint = Path(args.checkpoint)
     meta = read_checkpoint_metadata(checkpoint)
@@ -245,38 +283,39 @@ def main():
 
     if args.outdir is None:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        outdir = Path("results") / "supercell18" / "branch_search" / stamp
+        mode = "hf" if args.hf_only else "gw"
+        outdir = Path("results") / "supercell18" / "branch_search" / f"{mode}_{stamp}"
     else:
         outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     ckpt_dir = outdir / "checkpoints"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    if not args.hf_only:
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     base_h0 = build_supercell_h0(grid.kmesh(), params, source_strength=0.0)
     Vq = build_supercell_interaction(grid.qmesh(), params)
 
     print("=" * 104)
-    print("18-site focused GW branch search")
+    print("18-site focused CO/LC branch search")
     print(
         f"V={params.V:g}, T={grid.T:g}, primitive filling={primitive_filling:g}, "
         f"grid={grid.nk1}x{grid.nk2}, nw={grid.nw}, nOmega={grid.nOmega}"
     )
     print("branches:", ", ".join(args.branches))
-    if args.hf_seed:
-        print(
-            "seed mode: SELF-CONSISTENT HF at the first source point of each branch; "
-            "checkpoint self-energies are ignored for branch initialization"
-        )
+    if args.hf_only:
+        print("approximation: STATIC SELF-CONSISTENT HARTREE-FOCK ONLY")
+        print("GW is disabled: P, W, Sigma_c and GW iterations are not evaluated.")
         print(
             f"reference checkpoint |Phi|={abs(charge_order_parameter(density_original)):.6e}; "
-            "it is used only for parameters and the initial chemical-potential guess"
+            "its self-energies are ignored in HF-only mode"
         )
     else:
+        print("approximation: FULL SPLIT-GW")
         print(
             f"input |Phi|={abs(charge_order_parameter(density_original)):.6e}; "
             "LC/normal seeds use primitive-translation projection, CO seed keeps the original state"
         )
-    print("Only zero-source endpoints are ranked thermodynamically by F=Omega+mu*N.")
+    print("Only zero-source endpoints are ranked by the free energy of the selected approximation.")
     print("=" * 104)
 
     endpoint_rows: list[dict] = []
@@ -284,33 +323,30 @@ def main():
 
     for branch in args.branches:
         schedule = _branch_schedule(branch, args)
-        # In checkpoint-seed mode, CO keeps the original state while normal/LC
-        # begin from its primitive-translation projection.  In HF-seed mode this
-        # value is replaced before the first full-GW solve.
-        previous = seed_original if branch == "co" else seed_deco
-        endpoint = None
-        endpoint_thermo = None
-
         print(f"\n### branch: {branch} ###")
         print("source ladder:", " -> ".join(f"{x:g}" for x in schedule))
 
-        for istep, h in enumerate(schedule, start=1):
-            is_zero = np.isclose(h, 0.0)
-            tol = float(args.gw_tol if is_zero else args.ramp_tol)
-            h0 = _branch_h0(branch, h, base_h0, params, grid)
+        if args.hf_only:
+            previous_hf = None
+            endpoint = None
+            endpoint_thermo = None
 
-            if istep == 1 and args.hf_seed:
+            for istep, h in enumerate(schedule, start=1):
+                is_zero = bool(np.isclose(h, 0.0))
+                h0 = _branch_h0(branch, h, base_h0, params, grid)
+                seed_label = "zero-HF" if previous_hf is None else "previous-HF"
                 print(
-                    f"[{branch} HF seed] solving static self-consistent HF at h={h:g} "
-                    f"(tol={args.hf_tol:.1e}, mixing={args.hf_mixing:g})"
+                    f"[{branch} {istep}/{len(schedule)}] h={h:g}, "
+                    f"tol={args.hf_tol:.1e}, seed={seed_label}"
                 )
-                t_hf = time.perf_counter()
-                hf = solve_supercell_hf_seed(
+                t0 = time.perf_counter()
+                hf = solve_supercell_hf(
                     h0,
                     Vq,
                     grid,
                     target_N,
                     mu0=float(meta["mu"]),
+                    initial=previous_hf,
                     max_iter=int(args.hf_max_iter),
                     tol=float(args.hf_tol),
                     mixing=float(args.hf_mixing),
@@ -319,29 +355,101 @@ def main():
                     momentum_backend="fft",
                     verbose=bool(args.hf_verbose),
                 )
-                hf_runtime = time.perf_counter() - t_hf
-                hf_phi = charge_order_parameter(hf.density)
-                hf_currents = current_diagnostics(hf.G, grid)
-                hf_same_pc = hf_currents["same_q0"] / np.sqrt(3.0)
-                hf_opp_pc = hf_currents["opposite_q0"] / np.sqrt(3.0)
+                runtime = time.perf_counter() - t0
+                phi = charge_order_parameter(hf.density)
+                currents = _hf_current_diagnostics(hf.rho, grid)
+                m_same_pc = currents["same_q0"] / np.sqrt(3.0)
+                m_opp_pc = currents["opposite_q0"] / np.sqrt(3.0)
+                state_label = _classify(phi, currents, args.order_threshold)
+
+                scan_rows.append(
+                    {
+                        "method": "HF",
+                        "seed_branch": branch,
+                        "step": istep,
+                        "source": float(h),
+                        "seed": seed_label,
+                        "converged": bool(hf.converged),
+                        "iterations": int(hf.iterations),
+                        "final_error": float(hf.final_error),
+                        "runtime_s": float(runtime),
+                        "mu": float(hf.mu),
+                        "Phi_abs": float(abs(phi)),
+                        "m_same_pc_abs": float(abs(m_same_pc)),
+                        "m_opposite_pc_abs": float(abs(m_opp_pc)),
+                        "classification": state_label,
+                    }
+                )
                 print(
                     f"    HF conv={hf.converged}, it={hf.iterations}, res={hf.final_error:.3e}, "
-                    f"mu={hf.mu:.9f}, |Phi|={abs(hf_phi):.6e}, "
-                    f"|m_same|/pc={abs(hf_same_pc):.6e}, "
-                    f"|m_opp|/pc={abs(hf_opp_pc):.6e}, time={hf_runtime:.1f}s"
+                    f"mu={hf.mu:.9f}, |Phi|={abs(phi):.6e}, "
+                    f"|m_same|/pc={abs(m_same_pc):.6e}, "
+                    f"|m_opp|/pc={abs(m_opp_pc):.6e}, state={state_label}, "
+                    f"time={runtime:.1f}s"
                 )
                 if not hf.converged:
-                    print(
-                        f"    STOP branch {branch}: self-consistent HF seed did not converge"
-                    )
+                    print(f"    STOP branch {branch}: HF source point did not converge")
                     break
-                previous = hf.seed
-                seed_label = "self-consistent-HF"
-            elif istep == 1:
-                seed_label = "original-checkpoint" if branch == "co" else "de-CO-checkpoint"
-            else:
-                seed_label = "previous-GW"
 
+                previous_hf = hf
+                if is_zero:
+                    endpoint = hf
+                    endpoint_thermo = evaluate_supercell_hf_free_energy(
+                        hf,
+                        h0,
+                        grid,
+                        primitive_cells_per_supercell=3,
+                    )
+
+            if endpoint is None or endpoint_thermo is None:
+                endpoint_rows.append(_failed_endpoint_row(branch, "HF"))
+                continue
+
+            phi = charge_order_parameter(endpoint.density)
+            currents = _hf_current_diagnostics(endpoint.rho, grid)
+            m_same_pc = currents["same_q0"] / np.sqrt(3.0)
+            m_opp_pc = currents["opposite_q0"] / np.sqrt(3.0)
+            label = _classify(phi, currents, args.order_threshold)
+            endpoint_rows.append(
+                {
+                    "method": "HF",
+                    "seed_branch": branch,
+                    "endpoint_found": True,
+                    "classification": label,
+                    "mu": float(endpoint.mu),
+                    "Phi_abs": float(abs(phi)),
+                    "m_same_pc_abs": float(abs(m_same_pc)),
+                    "m_opposite_pc_abs": float(abs(m_opp_pc)),
+                    "Omega_supercell": float(endpoint_thermo.grand_potential),
+                    "F_supercell": float(endpoint_thermo.helmholtz_free_energy),
+                    "F_per_primitive_cell": float(endpoint_thermo.free_energy_per_primitive_cell),
+                    "DeltaF_per_primitive_cell": np.nan,
+                    "final_error": float(endpoint.final_error),
+                }
+            )
+            print(
+                f"    ZERO-SOURCE HF: state={label}, "
+                f"F/pc={endpoint_thermo.free_energy_per_primitive_cell:+.12e}, "
+                f"Omega/sc={endpoint_thermo.grand_potential:+.12e}"
+            )
+            continue
+
+        # Full-GW mode: retain the original checkpoint-based branch strategy.
+        previous = seed_original if branch == "co" else seed_deco
+        endpoint = None
+        endpoint_thermo = None
+
+        for istep, h in enumerate(schedule, start=1):
+            is_zero = bool(np.isclose(h, 0.0))
+            tol = float(args.gw_tol if is_zero else args.ramp_tol)
+            h0 = _branch_h0(branch, h, base_h0, params, grid)
+            seed_label = (
+                "original-checkpoint"
+                if istep == 1 and branch == "co"
+                else "de-CO-checkpoint"
+                if istep == 1
+                else "previous-GW"
+            )
             opts = _options(args, previous.mu, target_N, tol)
             print(
                 f"[{branch} {istep}/{len(schedule)}] h={h:g}, tol={tol:.1e}, "
@@ -366,10 +474,11 @@ def main():
 
             scan_rows.append(
                 {
+                    "method": "GW",
                     "seed_branch": branch,
                     "step": istep,
                     "source": float(h),
-                    "gw_seed": seed_label,
+                    "seed": seed_label,
                     "converged": bool(gw.converged),
                     "iterations": int(gw.iterations),
                     "final_error": float(gw.final_error),
@@ -382,15 +491,14 @@ def main():
                 }
             )
             print(
-                f"    conv={gw.converged}, it={gw.iterations}, res={gw.final_error:.3e}, "
+                f"    GW conv={gw.converged}, it={gw.iterations}, res={gw.final_error:.3e}, "
                 f"mu={gw.mu:.9f}, |Phi|={abs(phi):.6e}, "
                 f"|m_same|/pc={abs(m_same_pc):.6e}, "
                 f"|m_opp|/pc={abs(m_opp_pc):.6e}, state={state_label}, "
                 f"time={runtime:.1f}s"
             )
-
             if not gw.converged:
-                print(f"    STOP branch {branch}: source point did not converge")
+                print(f"    STOP branch {branch}: GW source point did not converge")
                 break
 
             ckpt_path = ckpt_dir / _checkpoint_name(
@@ -419,22 +527,7 @@ def main():
                 )
 
         if endpoint is None or endpoint_thermo is None:
-            endpoint_rows.append(
-                {
-                    "seed_branch": branch,
-                    "endpoint_found": False,
-                    "classification": "no-converged-zero-source-endpoint",
-                    "mu": np.nan,
-                    "Phi_abs": np.nan,
-                    "m_same_pc_abs": np.nan,
-                    "m_opposite_pc_abs": np.nan,
-                    "Omega_supercell": np.nan,
-                    "F_supercell": np.nan,
-                    "F_per_primitive_cell": np.nan,
-                    "DeltaF_per_primitive_cell": np.nan,
-                    "final_error": np.nan,
-                }
-            )
+            endpoint_rows.append(_failed_endpoint_row(branch, "GW"))
             continue
 
         phi = charge_order_parameter(endpoint.density)
@@ -444,6 +537,7 @@ def main():
         label = _classify(phi, currents, args.order_threshold)
         endpoint_rows.append(
             {
+                "method": "GW",
                 "seed_branch": branch,
                 "endpoint_found": True,
                 "classification": label,
@@ -459,11 +553,11 @@ def main():
             }
         )
         print(
-            f"    ZERO-SOURCE: state={label}, F/pc={endpoint_thermo.free_energy_per_primitive_cell:+.12e}, "
+            f"    ZERO-SOURCE GW: state={label}, "
+            f"F/pc={endpoint_thermo.free_energy_per_primitive_cell:+.12e}, "
             f"Omega/sc={endpoint_thermo.grand_potential:+.12e}"
         )
 
-    # Write source scans irrespective of whether every branch reached h=0.
     if scan_rows:
         with (outdir / "branch_scan.csv").open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=list(scan_rows[0].keys()))
@@ -499,7 +593,8 @@ def main():
     else:
         for rank, row in enumerate(valid_sorted, start=1):
             print(
-                f"#{rank} seed={row['seed_branch']:<8s} -> {row['classification']:<18s} "
+                f"#{rank} {row['method']:<2s} seed={row['seed_branch']:<8s} "
+                f"-> {row['classification']:<18s} "
                 f"F/pc={row['F_per_primitive_cell']:+.12e}  "
                 f"DeltaF/pc={row['DeltaF_per_primitive_cell']:+.6e}  "
                 f"|Phi|={row['Phi_abs']:.3e}  "
@@ -508,7 +603,8 @@ def main():
             )
         winner = valid_sorted[0]
         print(
-            f"\nlowest found basin: seed={winner['seed_branch']} -> {winner['classification']}"
+            f"\nlowest found basin ({winner['method']}): "
+            f"seed={winner['seed_branch']} -> {winner['classification']}"
         )
         print(
             "Important: this is the lowest among the searched CO/LC-focused branches, "
@@ -518,7 +614,8 @@ def main():
     print("\noutput:", outdir)
     print("source scan:", outdir / "branch_scan.csv")
     print("zero-source atlas:", outdir / "branch_atlas.csv")
-    print("branch checkpoints:", ckpt_dir)
+    if not args.hf_only:
+        print("GW branch checkpoints:", ckpt_dir)
 
 
 if __name__ == "__main__":
