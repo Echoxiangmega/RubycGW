@@ -14,6 +14,7 @@ from rubycgw.supercell import (
     period3_real_pattern,
     primitive_cell_to_supercell,
     supercell_hoppings,
+    supercell_interaction_bonds,
     supercell_to_primitive_momenta,
 )
 from rubycgw.supercell_gw import solve_supercell_gw
@@ -71,8 +72,8 @@ def test_supercell_h0_exact_folding_with_distinct_hoppings():
 def test_supercell_hopping_graph_has_exact_coordination_and_bond_count():
     params = RubyParameters(ti=0.43, t1=0.27, t2=-0.16)
     directed = supercell_hoppings(params)
-    # Primitive Ruby cell has 12 undirected NN bonds = 24 directed bonds.
-    # The index-three supercell must therefore contain 36 undirected = 72 directed bonds.
+    # Primitive Ruby cell has 12 undirected hopping bonds = 24 directed bonds.
+    # The index-three supercell therefore contains 36 undirected = 72 directed hoppings.
     assert len(directed) == 72
 
     degree = np.zeros(NSUP, dtype=int)
@@ -85,15 +86,49 @@ def test_supercell_hopping_graph_has_exact_coordination_and_bond_count():
     assert np.array_equal(degree, np.full(NSUP, 4, dtype=int))
 
 
-def test_supercell_interaction_is_hermitian_and_has_coordination_four_at_q0():
+def test_supercell_interaction_graph_is_three_translated_triangle_motifs():
     V = 0.37
     params = RubyParameters(V=V)
-    q = np.array([[0.13, 0.29], [0.0, 0.0]])
+    directed = supercell_interaction_bonds(params)
+
+    # Six undirected V-bonds per primitive cell, translated into three sectors.
+    # Hence 18 undirected = 36 directed V-bonds in the 18-site supercell.
+    assert len(directed) == 36
+
+    degree = np.zeros(NSUP, dtype=int)
+    seen = set()
+    for I, J, S, coupling in directed:
+        degree[I] += 1
+        assert int(I) // 6 == int(J) // 6
+        assert np.array_equal(np.asarray(S), np.array([0, 0]))
+        assert abs(coupling - V) < 1e-13
+        key = (int(I), int(J), int(S[0]), int(S[1]))
+        assert key not in seen
+        seen.add(key)
+
+    # Interaction coordination is two, even though hopping coordination is four.
+    assert np.array_equal(degree, np.full(NSUP, 2, dtype=int))
+
+
+def test_supercell_interaction_is_triangle_only_q_independent_and_hermitian():
+    V = 0.37
+    params = RubyParameters(V=V)
+    q = np.array([[0.13, 0.29], [0.0, 0.0], [0.31, 0.17]])
     vq = build_supercell_interaction(q, params)
-    assert vq.shape == (2, NSUP, NSUP)
+    assert vq.shape == (3, NSUP, NSUP)
     assert np.max(np.abs(vq - np.swapaxes(vq.conj(), -1, -2))) < 1e-13
-    assert np.allclose(np.sum(vq[1], axis=1).real, 4.0 * V, atol=1e-13)
-    assert np.max(np.abs(np.sum(vq[1], axis=1).imag)) < 1e-13
+
+    primitive = build_interaction(np.array([[0.0, 0.0]]), params)[0]
+    expected = np.zeros((NSUP, NSUP), dtype=complex)
+    for s in range(3):
+        sl = slice(6 * s, 6 * (s + 1))
+        expected[sl, sl] = primitive
+
+    for iq in range(q.shape[0]):
+        assert np.allclose(vq[iq], expected, atol=1e-13)
+
+    assert np.allclose(np.sum(vq[0], axis=1).real, 2.0 * V, atol=1e-13)
+    assert np.max(np.abs(np.sum(vq[0], axis=1).imag)) < 1e-13
 
 
 def test_supercell_interaction_has_exact_primitive_folding():
