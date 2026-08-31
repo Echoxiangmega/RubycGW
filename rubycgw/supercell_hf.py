@@ -15,6 +15,11 @@ An optional previous ``SupercellHFResult`` may be supplied as ``initial``.  This
 is important for source continuation: a finite CO/current source can select a
 broken-symmetry HF branch, which can then be followed adiabatically as the
 source is reduced to zero.
+
+The 18-site problem can have several nearly degenerate self-consistent channels,
+so plain linear mixing may oscillate or stagnate.  The default is therefore a
+small-history Pulay/DIIS mixer, using the same balanced fixed-point residual
+machinery as the GW solver.  Linear mixing remains available for diagnostics.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ import numpy as np
 
 from .checkpoint import GWCheckpointSeed
 from .grids import MatsubaraGrid
+from .gw import GWOptions, _check_mixing_method, _mixed_self_energies
 from .supercell_gw import dyson_from_sigma_matrix, hartree_self_energy_matrix
 from .supercell_gw_split import compute_static_fock_matrix
 
@@ -213,6 +219,10 @@ def solve_supercell_hf(
     max_iter: int = 500,
     tol: float = 1.0e-9,
     mixing: float = 0.25,
+    mixing_method: str = "pulay",
+    pulay_history: int = 8,
+    pulay_start: int = 4,
+    pulay_regularization: float = 1.0e-10,
     mu_tol: float = 1.0e-12,
     mu_max_iter: int = 80,
     momentum_backend: str = "fft",
@@ -224,6 +234,10 @@ def solve_supercell_hf(
     source.  On the first source point, leave ``initial=None`` to start from
     zero HF self-energy.  On later source points, pass the previous HF result to
     follow that branch continuously toward zero source.
+
+    ``mixing_method='pulay'`` is the default because competing 18-site CO/LC
+    channels can make simple fixed-point iteration oscillatory.  Set
+    ``mixing_method='linear'`` to reproduce the old behavior.
     """
     h0 = np.asarray(h0, dtype=complex)
     Vq = np.asarray(Vq, dtype=complex)
@@ -235,6 +249,13 @@ def solve_supercell_hf(
         raise ValueError(f"Vq shape {Vq.shape} != {expected}")
     if not (0.0 < float(mixing) <= 1.0):
         raise ValueError("HF mixing must lie in (0,1]")
+    method = _check_mixing_method(mixing_method)
+    if int(pulay_history) < 2:
+        raise ValueError("HF pulay_history must be at least 2")
+    if int(pulay_start) < 1:
+        raise ValueError("HF pulay_start must be positive")
+    if float(pulay_regularization) < 0.0:
+        raise ValueError("HF pulay_regularization must be nonnegative")
     if int(max_iter) < 1:
         raise ValueError("HF max_iter must be positive")
     if float(tol) <= 0.0 or float(mu_tol) <= 0.0:
@@ -243,7 +264,16 @@ def solve_supercell_hf(
     sigma_h, sigma_f, mu = _initial_static_self_energies(
         initial, expected, norb, mu0
     )
+    mix_opts = GWOptions(
+        mixing=float(mixing),
+        mixing_method=method,
+        pulay_history=int(pulay_history),
+        pulay_start=int(pulay_start),
+        pulay_regularization=float(pulay_regularization),
+    )
+    history: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
     err = float("inf")
+    previous_err = float("inf")
     converged = False
     rho = np.zeros(expected, dtype=complex)
     density = np.zeros(norb, dtype=float)
@@ -276,7 +306,8 @@ def solve_supercell_hf(
         if verbose:
             print(
                 f"HF iter {it:4d}: residual={err:.3e}, mu={mu:.10f}, "
-                f"n={np.sum(density):.10f}, rH={err_h:.3e}, rF={err_f:.3e}"
+                f"n={np.sum(density):.10f}, rH={err_h:.3e}, rF={err_f:.3e}, "
+                f"mix={method}:{mixing:g}"
             )
 
         if err < float(tol):
@@ -285,11 +316,33 @@ def solve_supercell_hf(
             converged = True
             break
 
-        alpha = float(mixing)
-        sigma_h = (1.0 - alpha) * sigma_h + alpha * sigma_h_out
-        sigma_f = (1.0 - alpha) * sigma_f + alpha * sigma_f_out
-        sigma_h = 0.5 * (sigma_h + sigma_h.conj().T)
-        sigma_f = _hermitize_k_matrix(sigma_f)
+        # A badly conditioned DIIS history can occasionally extrapolate across
+        # competing HF basins.  If the raw fixed-point residual jumps by more
+        # than one order of magnitude, discard the history and take one damped
+        # linear step before rebuilding the Pulay subspace.
+        if (
+            method == "pulay"
+            and np.isfinite(previous_err)
+            and err > 10.0 * previous_err
+        ):
+            history.clear()
+            alpha = float(mixing)
+            sigma_h_next = sigma_h + alpha * (sigma_h_out - sigma_h)
+            sigma_f_next = sigma_f + alpha * (sigma_f_out - sigma_f)
+        else:
+            sigma_h_next, sigma_f_next = _mixed_self_energies(
+                sigma_h,
+                sigma_f,
+                sigma_h_out,
+                sigma_f_out,
+                mix_opts,
+                it,
+                history,
+            )
+
+        sigma_h = 0.5 * (sigma_h_next + sigma_h_next.conj().T)
+        sigma_f = _hermitize_k_matrix(sigma_f_next)
+        previous_err = float(err)
 
     # Re-evaluate the exact static state and its true HF fixed-point residual.
     evals, evecs = _static_eigensystem(h0, sigma_h, sigma_f)
