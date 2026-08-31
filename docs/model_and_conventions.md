@@ -4,7 +4,7 @@
 
 RubycGW 保留之前 Ruby selection-rule 代码的编号：每个 unit cell 有六个 site，编号 `0,1,2,3,4,5`。两个三角形分别由 `(0,1,2)` 和 `(3,4,5)` 构成。
 
-代码中 `_base_bonds()` 存放 12 条 undirected NN bond：
+代码中 `_base_bonds()` 存放 12 条 undirected hopping bond：
 
 ```text
 (0,1,0,0)  ti
@@ -41,10 +41,22 @@ c_{Ra}=\frac{1}{\sqrt N}\sum_k e^{2\pi i k\cdot R}c_{ka}.
 
 ## 3. Density interaction
 
-当前模型在同一组 12 条 NN bond 上放相同的 density-density interaction `V`：
+**V 只放在两个三角形内部的六条 bond 上，不放在 t1/t2 bond 上。**
+
+原胞中的 interacting bonds 是
+
+```text
+triangle A: (0,1), (0,2), (1,2)
+triangle B: (3,4), (3,5), (4,5)
+```
+
+因此实空间相互作用为
 
 \[
-H_V=V\sum_{\langle ia,jb\rangle} n_{ia}n_{jb}.
+H_V=V\sum_R\bigl[
+ n_{R0}n_{R1}+n_{R0}n_{R2}+n_{R1}n_{R2}
++n_{R3}n_{R4}+n_{R3}n_{R5}+n_{R4}n_{R5}
+\bigr].
 \]
 
 Fourier 形式写作
@@ -53,7 +65,26 @@ Fourier 形式写作
 H_V=\frac{1}{2N}\sum_q n_a(q)V_{ab}(q)n_b(-q).
 \]
 
-`build_interaction(qpts, params)` 返回 shape `(...,6,6)` 的 Hermitian matrix `V(q)`。
+由于所有 interacting bonds 都是 intracell，`V(q)` 与 q 无关，并且显式为
+
+\[
+V(q)=V\begin{pmatrix}
+0&1&1&0&0&0\\
+1&0&1&0&0&0\\
+1&1&0&0&0&0\\
+0&0&0&0&1&1\\
+0&0&0&1&0&1\\
+0&0&0&1&1&0
+\end{pmatrix}.
+\]
+
+所以 hopping coordination 是 4，但 interaction coordination 是
+
+\[
+z_V=2.
+\]
+
+这一区分必须始终保留。`build_interaction(qpts, params)` 和 18-site 的 `build_supercell_interaction(...)` 都遵循这一 convention。
 
 ## 4. eta bond operator
 
