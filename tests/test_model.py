@@ -13,11 +13,32 @@ def test_h0_hermitian():
     assert np.max(np.abs(h - np.swapaxes(h.conj(), -1, -2))) < 1e-13
 
 
-def test_interaction_hermitian():
-    params = RubyParameters(V=0.37)
-    q = np.array([[0.13, 0.29], [0.0, 0.0]])
+def test_interaction_is_triangle_only_q_independent_and_hermitian():
+    V = 0.37
+    params = RubyParameters(V=V)
+    q = np.array([[0.13, 0.29], [0.0, 0.0], [0.41, 0.07]])
     v = build_interaction(q, params)
     assert np.max(np.abs(v - np.swapaxes(v.conj(), -1, -2))) < 1e-13
+
+    expected = V * np.array(
+        [
+            [0, 1, 1, 0, 0, 0],
+            [1, 0, 1, 0, 0, 0],
+            [1, 1, 0, 0, 0, 0],
+            [0, 0, 0, 0, 1, 1],
+            [0, 0, 0, 1, 0, 1],
+            [0, 0, 0, 1, 1, 0],
+        ],
+        dtype=float,
+    )
+    for iq in range(q.shape[0]):
+        assert np.allclose(v[iq], expected, atol=1e-13)
+
+    # The hopping graph has coordination four, but the interaction graph has
+    # exactly the two neighbours inside the same triangle.
+    assert np.allclose(np.sum(v[0], axis=1).real, 2.0 * V, atol=1e-13)
+    assert np.max(np.abs(v[:, :3, 3:])) < 1e-13
+    assert np.max(np.abs(v[:, 3:, :3])) < 1e-13
 
 
 def test_eta_vertices_hermitian_and_labels():
