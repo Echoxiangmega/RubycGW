@@ -6,6 +6,8 @@ The conventions intentionally match the earlier
 * six sites per unit cell, indexed 0,...,5;
 * reduced reciprocal coordinates k=(k1,k2);
 * a cell offset R contributes exp(2*pi*i*k.R);
+* hopping uses the full 12-bond Ruby graph;
+* the density interaction V acts ONLY on the six intra-triangle bonds;
 * eta_plus = (eta_A + eta_B)/sqrt(2) is PHYSICAL OPPOSITE circulation;
 * eta_minus = (eta_A - eta_B)/sqrt(2) is PHYSICAL SAME circulation.
 """
@@ -27,20 +29,45 @@ class RubyParameters:
 
 
 def _base_bonds(params: RubyParameters):
-    """Undirected NN bonds in exactly the previous Ruby convention."""
+    """Undirected hopping bonds in exactly the previous Ruby convention."""
     return [
+        # Triangle A.
         (0, 1, (0, 0), params.ti),
         (0, 2, (0, 0), params.ti),
         (2, 1, (0, 0), params.ti),
+        # Triangle B.
         (3, 4, (0, 0), params.ti),
         (3, 5, (0, 0), params.ti),
         (4, 5, (0, 0), params.ti),
+        # Inter-triangle/inter-cell hoppings.  These carry NO density V.
         (1, 4, (0, 0), params.t1),
         (5, 0, (0, -1), params.t1),
         (2, 3, (-1, 0), params.t1),
         (3, 1, (0, -1), params.t2),
         (2, 5, (0, 0), params.t2),
         (0, 4, (-1, 0), params.t2),
+    ]
+
+
+def ruby_interaction_bonds(params: RubyParameters):
+    """Undirected density-density bonds carrying ``V``.
+
+    The interaction is deliberately restricted to the two elementary
+    triangles inside each primitive cell:
+
+        A: (0,1), (0,2), (1,2)
+        B: (3,4), (3,5), (4,5)
+
+    There is no V on the t1/t2 inter-triangle bonds and no inter-cell V.
+    Every interaction bond therefore has primitive-cell offset R=(0,0).
+    """
+    return [
+        (0, 1, (0, 0), params.V),
+        (0, 2, (0, 0), params.V),
+        (2, 1, (0, 0), params.V),
+        (3, 4, (0, 0), params.V),
+        (3, 5, (0, 0), params.V),
+        (4, 5, (0, 0), params.V),
     ]
 
 
@@ -66,23 +93,33 @@ def build_h0(kpts: np.ndarray, params: RubyParameters) -> np.ndarray:
 
 
 def build_interaction(qpts: np.ndarray, params: RubyParameters) -> np.ndarray:
-    """Build the 6x6 Fourier-space NN density interaction V_ab(q).
+    """Build the 6x6 Fourier-space intra-triangle density interaction.
 
-    The same 12 undirected nearest-neighbour bonds as the hopping model are
-    assigned the same density-density coupling ``params.V``. Both directed
-    orientations are included; the Hamiltonian convention is
+    Only the six bonds belonging to the two elementary triangles carry V.  In
+    real space,
+
+        H_V = V sum_R [
+            n_R0 n_R1 + n_R0 n_R2 + n_R1 n_R2
+          + n_R3 n_R4 + n_R3 n_R5 + n_R4 n_R5
+        ].
+
+    Equivalently,
 
         H_V = (1/2N) sum_q n_a(q) V_ab(q) n_b(-q).
+
+    Since every interacting bond is intracell, ``V_ab(q)`` is independent of q.
+    Each site has interaction coordination z_V=2 (not the hopping coordination
+    z_t=4).
     """
     qpts = np.asarray(qpts, dtype=float)
     flat = qpts.reshape(-1, 2)
     vq = np.zeros((flat.shape[0], NSUB, NSUB), dtype=complex)
     for iq, q in enumerate(flat):
-        for i, j, R, _ in _base_bonds(params):
+        for i, j, R, coupling in ruby_interaction_bonds(params):
             Rv = np.asarray(R, dtype=int)
             phase = np.exp(2j * np.pi * np.dot(q, Rv))
-            vq[iq, i, j] += params.V * phase
-            vq[iq, j, i] += params.V * np.conj(phase)
+            vq[iq, i, j] += coupling * phase
+            vq[iq, j, i] += coupling * np.conj(phase)
     vq = 0.5 * (vq + np.swapaxes(vq.conj(), -1, -2))
     return vq.reshape(qpts.shape[:-1] + (NSUB, NSUB))
 
