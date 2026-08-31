@@ -23,6 +23,8 @@ The first source point of each HF branch starts from zero HF self-energy; later
 source points use the previous HF solution, so a source-selected CO/LC branch
 can be followed adiabatically to h=0.  The input checkpoint then supplies only
 (V,T,filling, hopping/grid parameters) and an initial chemical-potential guess.
+Because its self-energies are not loaded in HF-only mode, even a legacy
+checkpoint can be used purely as a parameter container.
 
 Only zero-source endpoints are ranked thermodynamically.  GW mode uses the
 split-GW Luttinger-Ward free energy; HF-only mode uses the finite-temperature
@@ -276,10 +278,20 @@ def main():
     )
     target_N = 3.0 * primitive_filling
 
-    seed_original, _, density_original = load_supercell_checkpoint(
-        checkpoint, params, grid, primitive_filling
-    )
-    seed_deco = remove_charge_order_from_seed(seed_original, grid)
+    # HF-only mode deliberately does not load checkpoint self-energies.  This is
+    # important after changes of approximation/interaction convention: an old
+    # checkpoint may still be used to provide parameters and a mu guess without
+    # contaminating the HF state.  Full GW mode, in contrast, requires strict
+    # checkpoint compatibility and therefore rejects legacy interaction data.
+    if args.hf_only:
+        seed_original = None
+        seed_deco = None
+        density_original = None
+    else:
+        seed_original, _, density_original = load_supercell_checkpoint(
+            checkpoint, params, grid, primitive_filling
+        )
+        seed_deco = remove_charge_order_from_seed(seed_original, grid)
 
     if args.outdir is None:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -306,8 +318,8 @@ def main():
         print("approximation: STATIC SELF-CONSISTENT HARTREE-FOCK ONLY")
         print("GW is disabled: P, W, Sigma_c and GW iterations are not evaluated.")
         print(
-            f"reference checkpoint |Phi|={abs(charge_order_parameter(density_original)):.6e}; "
-            "its self-energies are ignored in HF-only mode"
+            "reference checkpoint is used only for V,T,filling,hopping/grid parameters "
+            "and the initial mu guess; its self-energies are not loaded"
         )
     else:
         print("approximation: FULL SPLIT-GW")
