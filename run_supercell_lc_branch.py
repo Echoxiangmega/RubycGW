@@ -9,7 +9,9 @@ Workflow
 3. add a finite uniform loop-current source H_source=-h K_channel,q0;
 4. solve GW while reducing h to zero;
 5. report both physical current channels and the charge-order amplitude at every
-   source step.
+   source step;
+6. after every converged source point, evaluate the split-GW Luttinger-Ward
+   grand potential and the fixed-filling Helmholtz free energy F=Omega+mu*N.
 
 The projection is only an initialization step.  During every subsequent GW
 solve charge order is fully allowed to regenerate, so a zero-source endpoint can
@@ -34,6 +36,7 @@ from rubycgw.checkpoint import (
     read_checkpoint_metadata,
     save_supercell_checkpoint,
 )
+from rubycgw.free_energy import evaluate_gw_free_energy
 from rubycgw.grids import MatsubaraGrid
 from rubycgw.gw import GWOptions
 from rubycgw.lc_branch import (
@@ -185,6 +188,9 @@ def main():
         "mu_tol": float(args.mu_tol),
         "mu_max_iter": int(args.mu_max_iter),
         "seed_projection": asdict(projection),
+        "thermodynamics": (
+            "split-GW Luttinger-Ward Omega; fixed-filling comparison uses F=Omega+mu*N"
+        ),
     }
     with (outdir / "settings.json").open("w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
@@ -215,6 +221,10 @@ def main():
         "Important: CO is removed only from the initial seed; it is NOT constrained "
         "away during GW self-consistency."
     )
+    print(
+        "Thermodynamics: each converged point gets Omega_LW and F=Omega+mu*N; "
+        "only h=0 is the physical basin free energy for phase comparison."
+    )
     print("=" * 92)
 
     base_h0 = build_supercell_h0(grid.kmesh(), params, source_strength=0.0)
@@ -222,6 +232,7 @@ def main():
     previous = seed
     rows: list[dict] = []
     final_gw = None
+    final_thermo = None
 
     for istep, h in enumerate(sources, start=1):
         is_final = np.isclose(h, 0.0)
@@ -263,6 +274,18 @@ def main():
         m_opp = currents["opposite_q0"]
         selected = currents[f"{args.current_channel}_q0"]
 
+        thermo = None
+        if gw.converged:
+            thermo = evaluate_gw_free_energy(
+                gw,
+                h0,
+                Vq,
+                grid,
+                target_particles=target_supercell,
+                primitive_cells_per_supercell=3,
+                momentum_backend="fft",
+            )
+
         row = {
             "step": int(istep),
             "V": V,
@@ -286,6 +309,15 @@ def main():
             "m_selected_q0_abs": float(abs(selected)),
             "m_selected_per_primitive_cell_abs": float(abs(selected) / np.sqrt(3.0)),
             "screening_smin": float(gw.min_screening_singular_value),
+            "Omega_supercell": np.nan if thermo is None else thermo.grand_potential,
+            "F_supercell": np.nan if thermo is None else thermo.helmholtz_free_energy,
+            "F_per_primitive_cell": np.nan if thermo is None else thermo.free_energy_per_primitive_cell,
+            "Omega0": np.nan if thermo is None else thermo.omega0,
+            "LW_fermionic": np.nan if thermo is None else thermo.fermionic_lw,
+            "Phi_H": np.nan if thermo is None else thermo.phi_hartree,
+            "Phi_F": np.nan if thermo is None else thermo.phi_fock,
+            "Phi_corr": np.nan if thermo is None else thermo.phi_correlation,
+            "free_energy_density_mismatch": np.nan if thermo is None else thermo.density_mismatch_max,
         }
         rows.append(row)
         with (outdir / "lc_branch.csv").open("w", newline="", encoding="utf-8") as f:
@@ -300,6 +332,21 @@ def main():
             f"m_opposite(q0)={m_opp.real:+.6e}{m_opp.imag:+.1e}i, "
             f"smin={gw.min_screening_singular_value:.3e}, time={runtime:.1f}s"
         )
+        if thermo is not None:
+            print(
+                f"  free energy: Omega/sc={thermo.grand_potential:+.12e}, "
+                f"F/sc={thermo.helmholtz_free_energy:+.12e}, "
+                f"F/primitive={thermo.free_energy_per_primitive_cell:+.12e}; "
+                f"Phi_H={thermo.phi_hartree:+.6e}, "
+                f"Phi_F={thermo.phi_fock:+.6e}, "
+                f"Phi_corr={thermo.phi_correlation:+.6e}"
+            )
+            if thermo.density_mismatch_max > 1e-7:
+                print(
+                    "  WARNING: stored density and tail-reconstructed density differ by "
+                    f"{thermo.density_mismatch_max:.3e}; free-energy comparison should use "
+                    "a more tightly converged state."
+                )
 
         if not gw.converged:
             print("STOP: this current-source point did not converge; keep the last converged seed.")
@@ -321,6 +368,7 @@ def main():
         previous = gw
         if is_final:
             final_gw = gw
+            final_thermo = thermo
 
     print("\n=== LC branch search finished ===")
     print("output:", outdir)
@@ -340,6 +388,12 @@ def main():
         f"|m_{args.current_channel},q0|={abs(selected):.6e}, "
         f"per-primitive-cell={per_cell:.6e}"
     )
+    if final_thermo is not None:
+        print(
+            f"zero-source thermodynamics: Omega/sc={final_thermo.grand_potential:+.12e}, "
+            f"F/sc={final_thermo.helmholtz_free_energy:+.12e}, "
+            f"F/primitive={final_thermo.free_energy_per_primitive_cell:+.12e}"
+        )
     if per_cell > float(args.lc_threshold):
         if abs(final_phi) > 1e-4:
             print("RESULT: finite zero-source current survives together with CO -> candidate CO+LC branch.")
