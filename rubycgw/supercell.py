@@ -18,13 +18,24 @@ The 18-site basis is ordered as
 All phase conventions remain the same as the primitive model: a supercell
 offset S=(S1,S2) contributes exp(2*pi*i*k.S), where k is reduced with respect
 to T1,T2.
+
+Important interaction convention: the supercell is a literal translation of
+the primitive model.  Hopping uses the full Ruby graph, but the density
+interaction V is repeated ONLY on the six intra-triangle bonds of each primitive
+cell.  No V is added on t1/t2 bonds or between primitive cells/sectors.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from .model import NSUB, RubyParameters, build_h0, ruby_hoppings
+from .model import (
+    NSUB,
+    RubyParameters,
+    build_h0,
+    ruby_hoppings,
+    ruby_interaction_bonds,
+)
 
 NSECTOR = 3
 NSUP = NSECTOR * NSUB
@@ -64,6 +75,29 @@ def supercell_hoppings(params: RubyParameters):
             I = supercell_site_index(s, a)
             J = supercell_site_index(sp, b)
             out.append((I, J, S, amp))
+    return out
+
+
+def supercell_interaction_bonds(params: RubyParameters):
+    """Directed 18-site density-interaction bonds ``(I,J,S,V)``.
+
+    Start from exactly the six interacting bonds of one primitive cell and
+    translate that motif into each of the three primitive cells contained in the
+    supercell.  Since all interacting primitive bonds are intracell, every such
+    bond remains inside one sector and has supercell offset S=(0,0).
+
+    There are therefore 18 undirected = 36 directed V-bonds in one 18-site
+    supercell, and every site has interaction coordination z_V=2.
+    """
+    out = []
+    for s, Rs in enumerate(SUPERCELL_REPRESENTATIVES):
+        for a, b, delta, coupling in ruby_interaction_bonds(params):
+            delta = np.asarray(delta, dtype=int)
+            sp, S = primitive_cell_to_supercell(Rs + delta)
+            I = supercell_site_index(s, a)
+            J = supercell_site_index(sp, b)
+            out.append((I, J, S, complex(coupling)))
+            out.append((J, I, -S, complex(coupling)))
     return out
 
 
@@ -138,19 +172,26 @@ def build_supercell_h0(
 
 
 def build_supercell_interaction(qpts: np.ndarray, params: RubyParameters) -> np.ndarray:
-    """Return the 18x18 NN density interaction in the supercell BZ.
+    """Return the 18x18 intra-triangle density interaction in the supercell BZ.
 
-    We loop over the same directed NN graph as the hopping problem, but replace
-    every hopping amplitude by the real density coupling ``params.V``.
+    The primitive interaction motif is copied into each of the three primitive
+    cells of the supercell:
+
+        sector s: (6s+0,6s+1), (6s+0,6s+2), (6s+1,6s+2),
+                  (6s+3,6s+4), (6s+3,6s+5), (6s+4,6s+5).
+
+    No other pair carries V.  In particular, all t1/t2 hopping bonds have zero
+    density coupling.  Because every V-bond is intracell, the resulting matrix
+    is independent of supercell momentum q.
     """
     qpts = np.asarray(qpts, dtype=float)
     flat = qpts.reshape(-1, 2)
     vq = np.zeros((flat.shape[0], NSUP, NSUP), dtype=complex)
 
-    # ``supercell_hoppings`` contains each directed NN bond exactly once.
+    interactions = supercell_interaction_bonds(params)
     for iq, q in enumerate(flat):
-        for I, J, S, _ in supercell_hoppings(params):
-            vq[iq, I, J] += params.V * np.exp(2j * np.pi * np.dot(q, S))
+        for I, J, S, coupling in interactions:
+            vq[iq, I, J] += coupling * np.exp(2j * np.pi * np.dot(q, S))
 
     vq = 0.5 * (vq + np.swapaxes(vq.conj(), -1, -2))
     return vq.reshape(qpts.shape[:-1] + (NSUP, NSUP))
