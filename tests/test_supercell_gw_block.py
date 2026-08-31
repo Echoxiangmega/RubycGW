@@ -15,13 +15,15 @@ from rubycgw.supercell_gw_periodic_pulay import (
 )
 
 
-def test_uniform_half_filled_hartree_seed_is_2v_identity():
+def test_uniform_half_filled_hartree_seed_is_v_identity():
     V = 0.7
     params = RubyParameters(V=V)
     grid = MatsubaraGrid(nk1=1, nk2=1, nw=2, nOmega=1, T=0.1)
     Vq = build_supercell_interaction(grid.qmesh(), params)
     seed = _uniform_hartree_seed(Vq[0, 0], NSUP, 9.0)
-    assert np.max(np.abs(seed - 2.0 * V * np.eye(NSUP))) < 1e-12
+    # At half filling n_i=1/2 and each site has exactly two interacting
+    # neighbours inside its triangle, so Sigma_H = 2 * V * (1/2) = V.
+    assert np.max(np.abs(seed - V * np.eye(NSUP))) < 1e-12
 
 
 def test_gw_only_pulay_solves_scalar_unstable_linear_fixed_point():
