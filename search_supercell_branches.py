@@ -8,12 +8,16 @@ The default branch set is deliberately small:
     same      physical-same uniform loop-current source, then h_eta -> 0
     opposite  physical-opposite uniform loop-current source, then h_eta -> 0
 
-All branches are solved at the same (V,T,N,k-grid,Matsubara-grid).  The LC
-branches start from the input checkpoint after projecting out primitive +/-Q
-self-energy components; the CO branch starts from the original checkpoint and
-uses a temporary period-3 charge pinning field.  Charge order is never
-constrained away during the LC solves, so an LC seed is allowed to end in a
-mixed CO+LC state.
+All branches are solved at the same (V,T,N,k-grid,Matsubara-grid).  By default,
+the LC branches start from the input checkpoint after projecting out primitive
++/-Q self-energy components, while the CO branch starts from the original
+checkpoint.  With ``--hf-seed`` this history dependence is removed at the first
+source point of every branch: the code first solves a fully self-consistent
+18-site static Hartree-Fock Green function for that branch Hamiltonian and uses
+that HF solution as the initial full-GW self-energy.
+
+Charge order is never constrained away during the full-GW LC solves, so an LC
+seed is allowed to end in a mixed CO+LC state.
 
 For every converged zero-source endpoint the script evaluates the split-GW
 Luttinger-Ward functional and ranks states by the fixed-filling Helmholtz free
@@ -52,6 +56,7 @@ from rubycgw.supercell import (
     charge_order_parameter,
 )
 from rubycgw.supercell_gw_bootstrap import AndersonOptions, solve_matrix_gw_anderson
+from rubycgw.supercell_hf import solve_supercell_hf_seed
 
 
 DEFAULT_BRANCHES = ("normal", "co", "same", "opposite")
@@ -68,8 +73,16 @@ def _schedule(values: list[float]) -> list[float]:
 
 def _parse_args():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--checkpoint", required=True, type=str,
-                   help="Any compatible converged 18-site checkpoint used as the common seed.")
+    p.add_argument(
+        "--checkpoint",
+        required=True,
+        type=str,
+        help=(
+            "Compatible converged zero-source 18-site checkpoint.  Normally it is "
+            "also the common GW seed; with --hf-seed its self-energies are ignored "
+            "and it supplies only model/numerical parameters and an initial mu guess."
+        ),
+    )
     p.add_argument(
         "--branches",
         nargs="+",
@@ -91,6 +104,21 @@ def _parse_args():
         default=[0.10, 0.05, 0.02, 0.01, 0.005, 0.001, 0.0],
         help="Temporary uniform current source ladder for same/opposite branches.",
     )
+    p.add_argument(
+        "--hf-seed",
+        action="store_true",
+        help=(
+            "At the first source point of each branch, ignore checkpoint self-energies, "
+            "solve self-consistent static Hartree-Fock for that branch Hamiltonian, "
+            "and use the converged HF Green function/self-energy as the full-GW seed."
+        ),
+    )
+    p.add_argument("--hf-max-iter", type=int, default=500)
+    p.add_argument("--hf-tol", type=float, default=1e-9)
+    p.add_argument("--hf-mixing", type=float, default=0.25)
+    p.add_argument("--hf-mu-tol", type=float, default=1e-12)
+    p.add_argument("--hf-mu-max-iter", type=int, default=80)
+    p.add_argument("--hf-verbose", action="store_true")
     p.add_argument("--gw-max-iter", type=int, default=500)
     p.add_argument("--gw-tol", type=float, default=1e-8)
     p.add_argument("--ramp-tol", type=float, default=1e-6)
@@ -180,13 +208,19 @@ def main():
         raise ValueError("Require --gw-tol <= --ramp-tol")
     if args.order_threshold <= 0.0:
         raise ValueError("--order-threshold must be positive")
+    if args.hf_max_iter < 1:
+        raise ValueError("--hf-max-iter must be positive")
+    if args.hf_tol <= 0.0 or args.hf_mu_tol <= 0.0:
+        raise ValueError("HF tolerances must be positive")
+    if not (0.0 < args.hf_mixing <= 1.0):
+        raise ValueError("--hf-mixing must lie in (0,1]")
 
     checkpoint = Path(args.checkpoint)
     meta = read_checkpoint_metadata(checkpoint)
     if not bool(meta.get("converged", False)):
         raise ValueError("Input checkpoint is not marked converged")
     if not np.isclose(float(meta.get("source", np.nan)), 0.0, atol=1e-14):
-        raise ValueError("Use a zero-source checkpoint as the common branch-search seed")
+        raise ValueError("Use a zero-source checkpoint as the branch-search reference")
 
     primitive_filling = float(meta["primitive_filling"])
     params = RubyParameters(
@@ -228,10 +262,20 @@ def main():
         f"grid={grid.nk1}x{grid.nk2}, nw={grid.nw}, nOmega={grid.nOmega}"
     )
     print("branches:", ", ".join(args.branches))
-    print(
-        f"input |Phi|={abs(charge_order_parameter(density_original)):.6e}; "
-        "LC/normal seeds use primitive-translation projection, CO seed keeps the original state"
-    )
+    if args.hf_seed:
+        print(
+            "seed mode: SELF-CONSISTENT HF at the first source point of each branch; "
+            "checkpoint self-energies are ignored for branch initialization"
+        )
+        print(
+            f"reference checkpoint |Phi|={abs(charge_order_parameter(density_original)):.6e}; "
+            "it is used only for parameters and the initial chemical-potential guess"
+        )
+    else:
+        print(
+            f"input |Phi|={abs(charge_order_parameter(density_original)):.6e}; "
+            "LC/normal seeds use primitive-translation projection, CO seed keeps the original state"
+        )
     print("Only zero-source endpoints are ranked thermodynamically by F=Omega+mu*N.")
     print("=" * 104)
 
@@ -240,8 +284,9 @@ def main():
 
     for branch in args.branches:
         schedule = _branch_schedule(branch, args)
-        # CO keeps whatever CO information the checkpoint already has.  The
-        # normal and LC searches deliberately start from a de-CO projection.
+        # In checkpoint-seed mode, CO keeps the original state while normal/LC
+        # begin from its primitive-translation projection.  In HF-seed mode this
+        # value is replaced before the first full-GW solve.
         previous = seed_original if branch == "co" else seed_deco
         endpoint = None
         endpoint_thermo = None
@@ -253,11 +298,54 @@ def main():
             is_zero = np.isclose(h, 0.0)
             tol = float(args.gw_tol if is_zero else args.ramp_tol)
             h0 = _branch_h0(branch, h, base_h0, params, grid)
-            opts = _options(args, previous.mu, target_N, tol)
 
+            if istep == 1 and args.hf_seed:
+                print(
+                    f"[{branch} HF seed] solving static self-consistent HF at h={h:g} "
+                    f"(tol={args.hf_tol:.1e}, mixing={args.hf_mixing:g})"
+                )
+                t_hf = time.perf_counter()
+                hf = solve_supercell_hf_seed(
+                    h0,
+                    Vq,
+                    grid,
+                    target_N,
+                    mu0=float(meta["mu"]),
+                    max_iter=int(args.hf_max_iter),
+                    tol=float(args.hf_tol),
+                    mixing=float(args.hf_mixing),
+                    mu_tol=float(args.hf_mu_tol),
+                    mu_max_iter=int(args.hf_mu_max_iter),
+                    momentum_backend="fft",
+                    verbose=bool(args.hf_verbose),
+                )
+                hf_runtime = time.perf_counter() - t_hf
+                hf_phi = charge_order_parameter(hf.density)
+                hf_currents = current_diagnostics(hf.G, grid)
+                hf_same_pc = hf_currents["same_q0"] / np.sqrt(3.0)
+                hf_opp_pc = hf_currents["opposite_q0"] / np.sqrt(3.0)
+                print(
+                    f"    HF conv={hf.converged}, it={hf.iterations}, res={hf.final_error:.3e}, "
+                    f"mu={hf.mu:.9f}, |Phi|={abs(hf_phi):.6e}, "
+                    f"|m_same|/pc={abs(hf_same_pc):.6e}, "
+                    f"|m_opp|/pc={abs(hf_opp_pc):.6e}, time={hf_runtime:.1f}s"
+                )
+                if not hf.converged:
+                    print(
+                        f"    STOP branch {branch}: self-consistent HF seed did not converge"
+                    )
+                    break
+                previous = hf.seed
+                seed_label = "self-consistent-HF"
+            elif istep == 1:
+                seed_label = "original-checkpoint" if branch == "co" else "de-CO-checkpoint"
+            else:
+                seed_label = "previous-GW"
+
+            opts = _options(args, previous.mu, target_N, tol)
             print(
                 f"[{branch} {istep}/{len(schedule)}] h={h:g}, tol={tol:.1e}, "
-                f"seed={'original' if (istep == 1 and branch == 'co') else 'de-CO' if istep == 1 else 'previous'}"
+                f"seed={seed_label}"
             )
             t0 = time.perf_counter()
             gw = solve_matrix_gw_anderson(
@@ -281,6 +369,7 @@ def main():
                     "seed_branch": branch,
                     "step": istep,
                     "source": float(h),
+                    "gw_seed": seed_label,
                     "converged": bool(gw.converged),
                     "iterations": int(gw.iterations),
                     "final_error": float(gw.final_error),
@@ -381,12 +470,18 @@ def main():
             writer.writeheader()
             writer.writerows(scan_rows)
 
-    valid = [r for r in endpoint_rows if bool(r["endpoint_found"]) and np.isfinite(r["F_per_primitive_cell"])]
+    valid = [
+        r
+        for r in endpoint_rows
+        if bool(r["endpoint_found"]) and np.isfinite(r["F_per_primitive_cell"])
+    ]
     if valid:
         fmin = min(float(r["F_per_primitive_cell"]) for r in valid)
         for row in endpoint_rows:
             if bool(row["endpoint_found"]) and np.isfinite(row["F_per_primitive_cell"]):
-                row["DeltaF_per_primitive_cell"] = float(row["F_per_primitive_cell"] - fmin)
+                row["DeltaF_per_primitive_cell"] = float(
+                    row["F_per_primitive_cell"] - fmin
+                )
         valid_sorted = sorted(valid, key=lambda r: float(r["F_per_primitive_cell"]))
     else:
         valid_sorted = []
