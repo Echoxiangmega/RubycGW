@@ -3,7 +3,11 @@ import numpy as np
 from rubycgw.grids import MatsubaraGrid
 from rubycgw.model import RubyParameters
 from rubycgw.supercell import build_supercell_h0, build_supercell_interaction
-from rubycgw.supercell_hf import solve_supercell_hf_seed
+from rubycgw.supercell_hf import (
+    evaluate_supercell_hf_free_energy,
+    solve_supercell_hf,
+    solve_supercell_hf_seed,
+)
 
 
 def test_supercell_hf_seed_v0_is_noninteracting():
@@ -35,6 +39,16 @@ def test_supercell_hf_seed_v0_is_noninteracting():
         18,
     )
 
+    thermo = evaluate_supercell_hf_free_energy(result, h0, grid)
+    evals = np.linalg.eigvalsh(h0)
+    omega0 = -grid.T * np.sum(
+        np.logaddexp(0.0, -(evals - result.mu) / grid.T)
+    ) / grid.nk
+    expected_F = float(omega0 + result.mu * 6.0)
+    assert abs(thermo.helmholtz_free_energy - expected_F) < 1e-11
+    assert abs(thermo.hartree_energy) < 1e-13
+    assert abs(thermo.fock_energy) < 1e-13
+
 
 def test_supercell_hf_seed_static_fock_is_hermitian_and_broadcast():
     grid = MatsubaraGrid(nk1=1, nk2=1, nw=3, nOmega=1, T=0.2)
@@ -60,3 +74,39 @@ def test_supercell_hf_seed_static_fock_is_hermitian_and_broadcast():
     ) < 1e-11
     for n in range(1, grid.nf):
         assert np.max(np.abs(result.seed.Sigma_GW[n] - result.seed.Sigma_GW[0])) < 1e-13
+
+
+def test_supercell_hf_accepts_previous_hf_solution_for_continuation():
+    grid = MatsubaraGrid(nk1=1, nk2=1, nw=3, nOmega=1, T=0.2)
+    params = RubyParameters(ti=0.4, t1=0.2, t2=0.2, V=0.03)
+    h0 = build_supercell_h0(grid.kmesh(), params)
+    Vq = build_supercell_interaction(grid.qmesh(), params)
+
+    first = solve_supercell_hf(
+        h0,
+        Vq,
+        grid,
+        target_filling=6.0,
+        max_iter=250,
+        tol=1e-9,
+        mixing=0.3,
+        mu_tol=1e-12,
+    )
+    second = solve_supercell_hf(
+        h0,
+        Vq,
+        grid,
+        target_filling=6.0,
+        initial=first,
+        max_iter=50,
+        tol=1e-9,
+        mixing=0.3,
+        mu_tol=1e-12,
+    )
+
+    assert first.converged
+    assert second.converged
+    assert second.iterations <= 3
+    assert abs(np.sum(second.density) - 6.0) < 1e-9
+    assert np.max(np.abs(second.Sigma_H - first.Sigma_H)) < 1e-8
+    assert np.max(np.abs(second.Sigma_F - first.Sigma_F)) < 1e-8
