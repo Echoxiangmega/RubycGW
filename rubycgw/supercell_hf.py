@@ -1,19 +1,20 @@
-"""Self-consistent static Hartree-Fock seeds for the 18-site Ruby supercell.
+"""Self-consistent static Hartree-Fock for the 18-site Ruby supercell.
 
-This module is intentionally a *seed generator* for the full split-GW solver.
-It solves the finite-temperature static Hartree-Fock equations
+The solver uses the same Hartree and bare-interaction Fock conventions as the
+static part of the active split-GW implementation, but it stops at Hartree-Fock:
 
-    G_HF^{-1}(k,iw) = iw + mu - h0(k) - Sigma_H - Sigma_F(k)
+    G_HF^{-1}(k,iw) = iw + mu - h0(k) - Sigma_H - Sigma_F(k).
 
-at fixed filling, using the same Hartree and bare-V Fock conventions as the
-active split-GW implementation.  Because the HF self-energy is static, the
-self-consistency loop is evaluated directly from the eigenstates of the
-Hermitian HF Hamiltonian; no Matsubara cutoff enters the HF density matrix.
+Because the HF self-energy is static, the self-consistency loop is evaluated
+from the eigenstates of the Hermitian HF Hamiltonian.  Thus the density matrix,
+particle number, and HF free energy do not carry a fermionic Matsubara-cutoff
+error.  A Matsubara Green function is still returned for diagnostics and for
+backward compatibility with code that used HF solutions as GW seeds.
 
-The converged static Fock matrix is then broadcast over fermionic Matsubara
-frequencies and returned as ``GWCheckpointSeed.Sigma_GW``.  Thus a subsequent
-full GW calculation starts from a genuine self-consistent HF Green function,
-not from a previous GW checkpoint or from a merely hand-edited self-energy.
+An optional previous ``SupercellHFResult`` may be supplied as ``initial``.  This
+is important for source continuation: a finite CO/current source can select a
+broken-symmetry HF branch, which can then be followed adiabatically as the
+source is reduced to zero.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from .supercell_gw_split import compute_static_fock_matrix
 
 @dataclass(frozen=True)
 class SupercellHFResult:
-    """Converged (or best reached) static HF solution used to seed GW."""
+    """Converged (or best reached) static 18-site Hartree-Fock solution."""
 
     seed: GWCheckpointSeed
     G: np.ndarray
@@ -41,6 +42,21 @@ class SupercellHFResult:
     converged: bool
     iterations: int
     final_error: float
+
+
+@dataclass(frozen=True)
+class SupercellHFFreeEnergy:
+    """Finite-temperature HF thermodynamics for one self-consistent solution."""
+
+    one_body_energy: float
+    hartree_energy: float
+    fock_energy: float
+    entropy: float
+    helmholtz_free_energy: float
+    grand_potential: float
+    particle_number: float
+    free_energy_per_primitive_cell: float
+    grand_potential_per_primitive_cell: float
 
 
 def _fermi(e_minus_mu: np.ndarray, T: float) -> np.ndarray:
@@ -95,9 +111,6 @@ def _solve_mu_static(
         n, slope = _filling_from_evals(evals, mu, T)
         return float(n - target), float(slope)
 
-    # A temperature-aware bracket around the instantaneous HF spectrum.  It is
-    # expanded if necessary, so this also remains robust for unusually large
-    # Hartree shifts at strong coupling.
     pad = max(2.0, 20.0 * float(T))
     lo = float(np.min(evals) - pad)
     hi = float(np.max(evals) + pad)
@@ -170,13 +183,33 @@ def _hermitize_k_matrix(matrix: np.ndarray) -> np.ndarray:
     return 0.5 * (arr + np.swapaxes(arr.conj(), -1, -2))
 
 
-def solve_supercell_hf_seed(
+def _initial_static_self_energies(
+    initial: SupercellHFResult | None,
+    expected: tuple[int, ...],
+    norb: int,
+    mu0: float,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    if initial is None:
+        return (
+            np.zeros((norb, norb), dtype=complex),
+            np.zeros(expected, dtype=complex),
+            float(mu0),
+        )
+    sigma_h = np.asarray(initial.Sigma_H, dtype=complex)
+    sigma_f = np.asarray(initial.Sigma_F, dtype=complex)
+    if sigma_h.shape != (norb, norb) or sigma_f.shape != expected:
+        raise ValueError("incompatible initial HF solution")
+    return np.array(sigma_h, copy=True), np.array(sigma_f, copy=True), float(initial.mu)
+
+
+def solve_supercell_hf(
     h0: np.ndarray,
     Vq: np.ndarray,
     grid: MatsubaraGrid,
     target_filling: float,
     *,
     mu0: float = 0.0,
+    initial: SupercellHFResult | None = None,
     max_iter: int = 500,
     tol: float = 1.0e-9,
     mixing: float = 0.25,
@@ -185,26 +218,12 @@ def solve_supercell_hf_seed(
     momentum_backend: str = "fft",
     verbose: bool = False,
 ) -> SupercellHFResult:
-    """Solve self-consistent static HF and return a GW-compatible seed.
+    """Solve the finite-temperature static HF equations at fixed filling.
 
-    Parameters
-    ----------
-    h0
-        The *actual branch Hamiltonian*, including any temporary CO/current
-        source.  Solving HF with the source already present is important: the
-        HF seed then belongs to the same source-deformed Hamiltonian as the
-        first full-GW point.
-    Vq
-        Bare density interaction in the supercell Brillouin zone.
-    target_filling
-        Total particles per 18-site supercell (for example ``3*n_primitive``).
-
-    Notes
-    -----
-    The initial HF self-energies are exactly zero.  Consequently a zero-source
-    ``normal`` solve stays in the primitive-translation/TR-symmetric subspace,
-    while a finite CO or current source selects the requested broken-symmetry
-    direction before the full GW continuation begins.
+    ``h0`` is the actual branch Hamiltonian, including any temporary CO/current
+    source.  On the first source point, leave ``initial=None`` to start from
+    zero HF self-energy.  On later source points, pass the previous HF result to
+    follow that branch continuously toward zero source.
     """
     h0 = np.asarray(h0, dtype=complex)
     Vq = np.asarray(Vq, dtype=complex)
@@ -221,13 +240,14 @@ def solve_supercell_hf_seed(
     if float(tol) <= 0.0 or float(mu_tol) <= 0.0:
         raise ValueError("HF tolerances must be positive")
 
-    sigma_h = np.zeros((norb, norb), dtype=complex)
-    sigma_f = np.zeros(expected, dtype=complex)
-    mu = float(mu0)
+    sigma_h, sigma_f, mu = _initial_static_self_energies(
+        initial, expected, norb, mu0
+    )
     err = float("inf")
     converged = False
     rho = np.zeros(expected, dtype=complex)
     density = np.zeros(norb, dtype=float)
+    it = 0
 
     for it in range(1, int(max_iter) + 1):
         evals, evecs = _static_eigensystem(h0, sigma_h, sigma_f)
@@ -270,11 +290,8 @@ def solve_supercell_hf_seed(
         sigma_f = (1.0 - alpha) * sigma_f + alpha * sigma_f_out
         sigma_h = 0.5 * (sigma_h + sigma_h.conj().T)
         sigma_f = _hermitize_k_matrix(sigma_f)
-    else:
-        it = int(max_iter)
 
-    # Re-evaluate the exact static density for the final self-energies.  This is
-    # also the state whose Green function is handed to the GW seed.
+    # Re-evaluate the exact static state and its true HF fixed-point residual.
     evals, evecs = _static_eigensystem(h0, sigma_h, sigma_f)
     mu = _solve_mu_static(
         evals,
@@ -286,6 +303,16 @@ def solve_supercell_hf_seed(
     )
     rho = _rho_from_eigensystem(evals, evecs, mu, grid.T)
     density = _density_from_rho(rho)
+    sigma_h_out = hartree_self_energy_matrix(density, Vq[0, 0])
+    sigma_h_out = 0.5 * (sigma_h_out + sigma_h_out.conj().T)
+    sigma_f_out = _hermitize_k_matrix(
+        compute_static_fock_matrix(rho, Vq, grid, backend=momentum_backend)
+    )
+    err = max(
+        float(np.max(np.abs(sigma_h_out - sigma_h))),
+        float(np.max(np.abs(sigma_f_out - sigma_f))),
+    )
+    converged = bool(err < float(tol))
 
     sigma_gw = np.broadcast_to(
         sigma_f[None, :, :, :, :],
@@ -305,10 +332,102 @@ def solve_supercell_hf_seed(
         Sigma_H=np.array(sigma_h, copy=True),
         Sigma_F=np.array(sigma_f, copy=True),
         mu=float(mu),
-        converged=bool(converged),
+        converged=converged,
         iterations=int(it),
         final_error=float(err),
     )
 
 
-__all__ = ["SupercellHFResult", "solve_supercell_hf_seed"]
+def solve_supercell_hf_seed(*args, **kwargs) -> SupercellHFResult:
+    """Backward-compatible alias for :func:`solve_supercell_hf`."""
+    return solve_supercell_hf(*args, **kwargs)
+
+
+def evaluate_supercell_hf_free_energy(
+    result: SupercellHFResult,
+    h0: np.ndarray,
+    grid: MatsubaraGrid,
+    *,
+    primitive_cells_per_supercell: int = 3,
+) -> SupercellHFFreeEnergy:
+    """Evaluate the finite-T HF Helmholtz free energy of ``result``.
+
+    The source, if any, is already part of ``h0``.  Therefore finite-source
+    values belong to the source-deformed Hamiltonian; only the zero-source value
+    is used to rank physical branches.
+
+    The expression is evaluated directly as
+
+        F_HF = Tr[h0 rho] + E_H + E_F - T S,
+        E_H  = 1/2 sum_a n_a Sigma_H,aa,
+        E_F  = 1/(2 Nk) sum_k Tr[Sigma_F(k) rho(k)].
+
+    This avoids any Matsubara cutoff in the HF thermodynamics.
+    """
+    if int(primitive_cells_per_supercell) < 1:
+        raise ValueError("primitive_cells_per_supercell must be positive")
+    h0 = np.asarray(h0, dtype=complex)
+    rho = np.asarray(result.rho, dtype=complex)
+    if h0.shape != rho.shape:
+        raise ValueError("h0 and HF rho shapes do not match")
+
+    nk = float(grid.nk)
+    one_body = float(
+        np.real(np.einsum("xyab,xyba->", h0, rho, optimize=True)) / nk
+    )
+    hartree = float(
+        0.5
+        * np.real(
+            np.dot(
+                np.diag(np.asarray(result.Sigma_H, dtype=complex)),
+                np.asarray(result.density, dtype=float),
+            )
+        )
+    )
+    fock = float(
+        0.5
+        * np.real(
+            np.einsum(
+                "xyab,xyba->",
+                np.asarray(result.Sigma_F, dtype=complex),
+                rho,
+                optimize=True,
+            )
+        )
+        / nk
+    )
+
+    evals, _ = _static_eigensystem(h0, result.Sigma_H, result.Sigma_F)
+    occ = _fermi(evals - float(result.mu), grid.T)
+    mask1 = occ > 0.0
+    mask0 = occ < 1.0
+    entropy_terms = np.zeros_like(occ, dtype=float)
+    entropy_terms[mask1] += occ[mask1] * np.log(occ[mask1])
+    one_minus = 1.0 - occ
+    entropy_terms[mask0] += one_minus[mask0] * np.log(one_minus[mask0])
+    entropy = float(-np.sum(entropy_terms) / nk)
+
+    particle_number = float(np.sum(result.density))
+    free_energy = float(one_body + hartree + fock - grid.T * entropy)
+    grand_potential = float(free_energy - result.mu * particle_number)
+    npc = float(primitive_cells_per_supercell)
+    return SupercellHFFreeEnergy(
+        one_body_energy=one_body,
+        hartree_energy=hartree,
+        fock_energy=fock,
+        entropy=entropy,
+        helmholtz_free_energy=free_energy,
+        grand_potential=grand_potential,
+        particle_number=particle_number,
+        free_energy_per_primitive_cell=free_energy / npc,
+        grand_potential_per_primitive_cell=grand_potential / npc,
+    )
+
+
+__all__ = [
+    "SupercellHFFreeEnergy",
+    "SupercellHFResult",
+    "evaluate_supercell_hf_free_energy",
+    "solve_supercell_hf",
+    "solve_supercell_hf_seed",
+]
