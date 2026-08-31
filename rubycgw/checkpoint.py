@@ -5,6 +5,11 @@ loaded back into memory: ``Sigma_H``, ``Sigma_GW`` and ``mu``.  The checkpoint
 also stores densities and enough metadata to reject incompatible numerical
 settings.  The interaction ``V`` is intentionally *not* required to match, since
 continuation in V is the main use case.
+
+Checkpoint version 2 starts with the corrected interaction convention in which
+V acts only on the six intra-triangle bonds of each primitive cell.  Version-1
+checkpoints were generated with V incorrectly placed on the full hopping graph
+and are therefore rejected as GW restart seeds.
 """
 
 from __future__ import annotations
@@ -20,7 +25,8 @@ from .model import RubyParameters
 from .supercell import NSUP, charge_order_parameter
 
 
-CHECKPOINT_VERSION = 1
+CHECKPOINT_VERSION = 2
+INTERACTION_CONVENTION = "intra_triangle_only"
 
 
 @dataclass
@@ -42,6 +48,7 @@ def _metadata(
     phi = charge_order_parameter(np.asarray(gw.density, dtype=float))
     return {
         "version": CHECKPOINT_VERSION,
+        "interaction_convention": INTERACTION_CONVENTION,
         "matrix_dimension": NSUP,
         "V": float(params.V),
         "source": float(source),
@@ -128,6 +135,13 @@ def checkpoint_compatibility_error(
     for key, expected in exact.items():
         if int(meta.get(key, -999999)) != int(expected):
             return f"{key}: checkpoint={meta.get(key)!r}, requested={expected!r}"
+
+    if meta.get("interaction_convention") != INTERACTION_CONVENTION:
+        return (
+            "interaction_convention: "
+            f"checkpoint={meta.get('interaction_convention')!r}, "
+            f"requested={INTERACTION_CONVENTION!r}"
+        )
 
     floats = {
         "T": grid.T,
