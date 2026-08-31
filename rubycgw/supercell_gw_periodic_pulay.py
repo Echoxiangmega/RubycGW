@@ -45,6 +45,7 @@ from .supercell_gw_fast import (
     _effective_mu_tol,
     _solve_mu_matrix_fast,
     _strict_refine_fixed_filling,
+    _total_filling_slope,
     density_from_G_cached,
 )
 
@@ -386,11 +387,17 @@ def solve_matrix_gw_anderson(
 
         if opts.verbose:
             smin_text = f"{last_smin:.3e}" if np.isfinite(last_smin) else "--"
+            if opts.target_filling is None:
+                mu_slope_text = "--"
+            else:
+                mu_slope = _total_filling_slope(G, grid, mu, cache)
+                mu_slope_text = f"{mu_slope:.3e}"
             print(
                 f"SC-GW iter {it:4d}: residual={err:.3e}, "
                 f"rH={err_h:.3e}, rGW={err_gw:.3e}, smin={smin_text}, "
                 f"mu={mu:.10f}, n={np.sum(density):.10f}, "
-                f"mu_eval={mu_neval}, mu_tol={mu_tol_used:.1e}, "
+                f"dN/dmu={mu_slope_text}, mu_eval={mu_neval}, "
+                f"mu_tol={mu_tol_used:.1e}, "
                 f"mixer={last_step_kind}, alphaH={anderson.hartree_beta:.3f}, "
                 f"alphaGW={(anderson.recovery_gw_beta if recovery_remaining > 0 else anderson.gw_beta):.3f}, "
                 f"backend={backend}"
@@ -550,10 +557,12 @@ def solve_matrix_gw_anderson(
     converged = bool(err < opts.tol)
 
     if opts.verbose and opts.target_filling is not None:
+        mu_slope_final = _total_filling_slope(G, grid, mu, cache)
         print(
             f"SC-GW strict mu refine: mu={mu:.10f}, n={np.sum(density):.10f}, "
-            f"mu_eval={mu_neval_final}, mu_tol={opts.mu_tol:.1e}, "
-            f"residual={err:.3e}, rH={err_h:.3e}, rGW={err_gw:.3e}"
+            f"dN/dmu={mu_slope_final:.3e}, mu_eval={mu_neval_final}, "
+            f"mu_tol={opts.mu_tol:.1e}, residual={err:.3e}, "
+            f"rH={err_h:.3e}, rGW={err_gw:.3e}"
         )
 
     if anderson.residual_diagnostics:
