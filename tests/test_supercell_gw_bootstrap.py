@@ -8,6 +8,10 @@ from rubycgw.supercell_gw_bootstrap import (
     _needs_finish_polish,
     _safe_periodic_options,
 )
+from rubycgw.supercell_gw_fast import _effective_mu_tol
+from rubycgw.supercell_gw_periodic_pulay import (
+    _effective_mu_tol as _periodic_effective_mu_tol,
+)
 
 
 def _fake_result(error: float, converged: bool, iterations: int = 10) -> GWResult:
@@ -50,6 +54,25 @@ def test_safe_periodic_options_are_local_and_conservative():
     assert safe.recovery_gw_beta <= 0.04
     assert safe.pulay_enter_gw <= 0.25
     assert safe.recovery_steps >= 5
+
+
+def test_inner_mu_tolerance_stays_loose_far_from_fixed_point():
+    strict = 5e-12
+    assert _effective_mu_tol(strict, None) == 1e-4
+    assert np.isclose(_effective_mu_tol(strict, 1e-3), 1e-5)
+
+
+def test_inner_mu_tolerance_tightens_below_1e_minus_4_residual():
+    strict = 5e-12
+    expected = 7e-10
+    assert np.isclose(_effective_mu_tol(strict, 7e-6), expected)
+    # The production periodic-Pulay solver imports the same shared policy.
+    assert np.isclose(_periodic_effective_mu_tol(strict, 7e-6), expected)
+
+
+def test_inner_mu_tolerance_never_goes_below_requested_strict_floor():
+    strict = 5e-12
+    assert _effective_mu_tol(strict, 1e-10) == strict
 
 
 def test_near_tolerance_failure_requests_polish():
