@@ -10,6 +10,16 @@ For a genuine cold start at zero source, we therefore establish the normal
 branch first at a few weak/intermediate couplings and use each converged state
 as the seed for the next one.  Once the driver already supplies a previous-V
 state or a source-removal state, no internal bootstrap is performed.
+
+A second, narrow numerical safeguard handles states that are already within a
+few requested tolerances of convergence.  The periodic solver always performs a
+strict fixed-filling chemical-potential refinement before returning.  That
+refinement can move a residual that was just below ``tol`` to just above it,
+for example 9.8e-9 -> 1.01e-8.  Such a state is not accepted as converged, but
+it is also too close to the fixed point to justify abandoning a long run.  The
+wrapper therefore continues from that strict-mu state for a short polishing
+solve with a stricter internal target.  The final state is accepted only if its
+actual residual is below the user's original tolerance.
 """
 
 from __future__ import annotations
@@ -31,6 +41,12 @@ from .supercell_gw_periodic_pulay import (
 # not extra physics approximations: they are only a numerical continuation path
 # to the same final GW fixed point.
 _BOOTSTRAP_V = (0.10, 0.25, 0.50, 0.60, 0.65)
+
+# A returned state in this narrow window is close enough that a short continuation
+# is much cheaper and safer than handing it to the driver's generic fallback path.
+_FINISH_WINDOW_FACTOR = 10.0
+_FINISH_INTERNAL_TOL_FACTOR = 0.50
+_FINISH_MAX_ITER = 60
 
 
 def _safe_periodic_options(a: AndersonOptions) -> AndersonOptions:
@@ -77,6 +93,127 @@ def _finite_result(gw: GWResult | None) -> bool:
     )
 
 
+def _needs_finish_polish(gw: GWResult | None, requested_tol: float) -> bool:
+    """Return True only for a finite non-converged state very near tolerance."""
+
+    tol = float(requested_tol)
+    if tol <= 0.0 or not _finite_result(gw) or bool(gw.converged):
+        return False
+    err = float(gw.final_error)
+    return bool(err <= _FINISH_WINDOW_FACTOR * tol)
+
+
+def _finish_options(opts: GWOptions) -> GWOptions:
+    """Short stricter target used only to get safely below the user's tolerance."""
+
+    internal_tol = max(
+        np.finfo(float).tiny,
+        _FINISH_INTERNAL_TOL_FACTOR * float(opts.tol),
+    )
+    return replace(
+        opts,
+        tol=internal_tol,
+        max_iter=min(_FINISH_MAX_ITER, max(1, int(opts.max_iter))),
+    )
+
+
+def _choose_polished_result(
+    base: GWResult,
+    trial: GWResult | None,
+    requested_tol: float,
+) -> GWResult:
+    """Keep the better finite state and judge convergence by the original tol."""
+
+    total_iterations = int(base.iterations)
+    if _finite_result(trial):
+        total_iterations += int(trial.iterations)
+        best = trial if float(trial.final_error) < float(base.final_error) else base
+    else:
+        best = base
+
+    return replace(
+        best,
+        converged=bool(float(best.final_error) < float(requested_tol)),
+        iterations=total_iterations,
+    )
+
+
+def _polish_matrix_if_needed(
+    result: GWResult,
+    h0: np.ndarray,
+    Vq: np.ndarray,
+    grid: MatsubaraGrid,
+    opts: GWOptions,
+    safe: AndersonOptions,
+) -> GWResult:
+    if not _needs_finish_polish(result, opts.tol):
+        return result
+
+    finish_opts = _finish_options(opts)
+    if opts.verbose:
+        print(
+            f"--- strict-tolerance polish: residual={result.final_error:.3e} is "
+            f"within {_FINISH_WINDOW_FACTOR:g}x requested tol={opts.tol:.3e}; "
+            f"continue from the strict-mu state with internal tol="
+            f"{finish_opts.tol:.3e} for <= {finish_opts.max_iter} iterations ---"
+        )
+
+    trial = _solve_matrix_periodic(
+        h0,
+        Vq,
+        grid,
+        opts=finish_opts,
+        initial=result,
+        anderson=safe,
+    )
+    best = _choose_polished_result(result, trial, opts.tol)
+    if opts.verbose:
+        status = "accepted" if best.converged else "stopped"
+        print(
+            f"--- strict-tolerance polish {status}: residual={best.final_error:.3e}, "
+            f"requested tol={opts.tol:.3e} ---"
+        )
+    return best
+
+
+def _polish_supercell_if_needed(
+    result: GWResult,
+    params: RubyParameters,
+    grid: MatsubaraGrid,
+    opts: GWOptions,
+    source_strength: float,
+    safe: AndersonOptions,
+) -> GWResult:
+    if not _needs_finish_polish(result, opts.tol):
+        return result
+
+    finish_opts = _finish_options(opts)
+    if opts.verbose:
+        print(
+            f"--- strict-tolerance polish: residual={result.final_error:.3e} is "
+            f"within {_FINISH_WINDOW_FACTOR:g}x requested tol={opts.tol:.3e}; "
+            f"continue from the strict-mu state with internal tol="
+            f"{finish_opts.tol:.3e} for <= {finish_opts.max_iter} iterations ---"
+        )
+
+    trial = _solve_supercell_periodic(
+        params,
+        grid,
+        opts=finish_opts,
+        source_strength=source_strength,
+        initial=result,
+        anderson=safe,
+    )
+    best = _choose_polished_result(result, trial, opts.tol)
+    if opts.verbose:
+        status = "accepted" if best.converged else "stopped"
+        print(
+            f"--- strict-tolerance polish {status}: residual={best.final_error:.3e}, "
+            f"requested tol={opts.tol:.3e} ---"
+        )
+    return best
+
+
 def solve_matrix_gw_anderson(
     h0: np.ndarray,
     Vq: np.ndarray,
@@ -85,16 +222,18 @@ def solve_matrix_gw_anderson(
     initial: GWResult | None = None,
     anderson: AndersonOptions = AndersonOptions(),
 ) -> GWResult:
-    """Matrix-level entry point with the conservative periodic-Pulay settings."""
+    """Matrix-level entry point with conservative settings and final polishing."""
 
-    return _solve_matrix_periodic(
+    safe = _safe_periodic_options(anderson)
+    result = _solve_matrix_periodic(
         h0,
         Vq,
         grid,
         opts=opts,
         initial=initial,
-        anderson=_safe_periodic_options(anderson),
+        anderson=safe,
     )
+    return _polish_matrix_if_needed(result, h0, Vq, grid, opts, safe)
 
 
 def solve_supercell_gw_anderson(
@@ -124,13 +263,21 @@ def solve_supercell_gw_anderson(
         and target_V > _BOOTSTRAP_V[0] + 1e-12
     )
     if not needs_bootstrap:
-        return _solve_supercell_periodic(
+        result = _solve_supercell_periodic(
             params,
             grid,
             opts=opts,
             source_strength=source_strength,
             initial=initial,
             anderson=safe,
+        )
+        return _polish_supercell_if_needed(
+            result,
+            params,
+            grid,
+            opts,
+            source_strength,
+            safe,
         )
 
     seed: GWResult | None = None
@@ -169,7 +316,7 @@ def solve_supercell_gw_anderson(
         label = "cold seed" if seed is None else f"bootstrap seed mu={seed.mu:.8f}"
         print(f"--- solve requested V={target_V:g} from {label} ---")
 
-    return _solve_supercell_periodic(
+    result = _solve_supercell_periodic(
         params,
         grid,
         opts=opts,
@@ -177,12 +324,22 @@ def solve_supercell_gw_anderson(
         initial=seed,
         anderson=safe,
     )
+    return _polish_supercell_if_needed(
+        result,
+        params,
+        grid,
+        opts,
+        source_strength,
+        safe,
+    )
 
 
 __all__ = [
     "AndersonOptions",
     "_bootstrap_values",
     "_safe_periodic_options",
+    "_needs_finish_polish",
+    "_choose_polished_result",
     "solve_matrix_gw_anderson",
     "solve_supercell_gw_anderson",
 ]
