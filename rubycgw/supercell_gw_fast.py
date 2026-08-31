@@ -46,6 +46,14 @@ from .supercell_gw_split import compute_sigma_gw_split_matrix
 
 _MU_LOOSE_TOL = 1.0e-4
 _MU_RESIDUAL_FACTOR = 1.0e-2
+# Once the outer GW map is already close to its fixed point, the old inexact
+# filling tolerance can itself become the dominant source of residual noise in
+# a low-compressibility state.  Below this residual we therefore tighten the
+# inner filling solve by two extra decades.  For example, r_GW=7e-6 gives a
+# filling tolerance 7e-10 instead of 7e-8.  The user's strict mu tolerance is
+# still the absolute lower bound.
+_MU_TIGHTEN_ONSET = 1.0e-4
+_MU_TIGHT_RESIDUAL_FACTOR = 1.0e-4
 
 
 @dataclass(frozen=True)
@@ -135,12 +143,23 @@ def _effective_mu_tol(
     loose_tol: float = _MU_LOOSE_TOL,
     residual_factor: float = _MU_RESIDUAL_FACTOR,
 ) -> float:
-    """Tolerance for an inexact fixed-filling inner solve."""
+    """Tolerance for the inexact fixed-filling inner solve.
+
+    Far from the GW fixed point we retain the inexpensive historical rule
+    ``tol_N ~ 1e-2 * residual``.  Once the outer residual is below 1e-4, the
+    filling solve is tightened to ``tol_N ~ 1e-4 * residual`` so small accepted
+    filling errors cannot seed a limit cycle in ``mu``/``Sigma_GW``.  The
+    requested strict tolerance remains the lower bound at all stages.
+    """
     strict = float(strict_tol)
     loose = max(strict, float(loose_tol))
     if outer_residual is None or not np.isfinite(float(outer_residual)):
         return loose
-    dynamic = float(residual_factor) * max(float(outer_residual), 0.0)
+
+    residual = max(float(outer_residual), 0.0)
+    dynamic = float(residual_factor) * residual
+    if residual <= _MU_TIGHTEN_ONSET:
+        dynamic = min(dynamic, _MU_TIGHT_RESIDUAL_FACTOR * residual)
     return max(strict, min(loose, dynamic))
 
 
