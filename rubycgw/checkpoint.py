@@ -10,6 +10,10 @@ Checkpoint version 2 starts with the corrected interaction convention in which
 V acts only on the six intra-triangle bonds of each primitive cell.  Version-1
 checkpoints were generated with V incorrectly placed on the full hopping graph
 and are therefore rejected as GW restart seeds.
+
+A finite but nonconverged zero-source state may also be checkpointed explicitly.
+Such a checkpoint is intended only for resuming the *same* V.  Ordinary forward-V
+auto continuation continues to use converged checkpoints only.
 """
 
 from __future__ import annotations
@@ -96,10 +100,20 @@ def save_supercell_checkpoint(
     grid: MatsubaraGrid,
     primitive_filling: float,
     source: float = 0.0,
+    allow_nonconverged: bool = False,
 ) -> Path:
-    """Save a converged supercell GW state for later continuation."""
-    if not bool(gw.converged):
-        raise ValueError("Refusing to checkpoint a non-converged GW state.")
+    """Save a supercell GW state for later continuation.
+
+    By default only converged states are accepted.  Set
+    ``allow_nonconverged=True`` to persist a finite failed state so the same-V
+    calculation can be resumed later.  The metadata always records the actual
+    ``converged`` flag and ``final_error``.
+    """
+    if not bool(gw.converged) and not bool(allow_nonconverged):
+        raise ValueError(
+            "Refusing to checkpoint a non-converged GW state unless "
+            "allow_nonconverged=True."
+        )
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -130,7 +144,7 @@ def checkpoint_compatibility_error(
     grid: MatsubaraGrid,
     primitive_filling: float,
 ) -> str | None:
-    """Return None when a checkpoint can seed the requested calculation."""
+    """Return None when a checkpoint can seed the requested numerical setup."""
     exact = {
         "version": CHECKPOINT_VERSION,
         "matrix_dimension": NSUP,
@@ -161,7 +175,8 @@ def checkpoint_compatibility_error(
         if key not in meta or not _float_match(meta[key], expected):
             return f"{key}: checkpoint={meta.get(key)!r}, requested={expected!r}"
 
-    # V is deliberately omitted: a checkpoint is meant to seed a different V.
+    # V is deliberately omitted here.  Whether a nonconverged state is allowed
+    # to seed a different V is a higher-level restart-policy decision.
     return None
 
 
@@ -232,6 +247,51 @@ def _compatible_zero_source_candidates(
     return candidates
 
 
+def find_exact_compatible_checkpoint(
+    directory: str | Path,
+    target_V: float,
+    params: RubyParameters,
+    grid: MatsubaraGrid,
+    primitive_filling: float,
+    allow_nonconverged: bool = True,
+) -> Path | None:
+    """Find a compatible zero-source checkpoint at exactly ``target_V``.
+
+    This helper is the only automatic lookup that may return a nonconverged
+    checkpoint.  It exists specifically for same-V resume.  A failed checkpoint
+    at a smaller V must never be used automatically to seed a larger V.
+    """
+    directory = Path(directory)
+    if not directory.exists():
+        return None
+
+    matches: list[tuple[bool, float, Path]] = []
+    for path in directory.glob("*.npz"):
+        try:
+            meta = read_checkpoint_metadata(path)
+        except Exception:
+            continue
+        if checkpoint_compatibility_error(meta, params, grid, primitive_filling) is not None:
+            continue
+        if not _float_match(meta.get("source", np.nan), 0.0, atol=1e-14):
+            continue
+        V = float(meta.get("V", np.nan))
+        if not np.isfinite(V) or not _float_match(V, target_V, atol=1e-10):
+            continue
+        converged = bool(meta.get("converged", False))
+        if not converged and not bool(allow_nonconverged):
+            continue
+        error = float(meta.get("final_error", np.inf))
+        matches.append((converged, -error, path))
+
+    if not matches:
+        return None
+    # Prefer a converged exact-V state if one exists; otherwise prefer the
+    # nonconverged exact-V state with the smallest recorded residual.
+    matches.sort(key=lambda item: (item[0], item[1]))
+    return matches[-1][2]
+
+
 def find_recent_compatible_checkpoints(
     directory: str | Path,
     target_V: float,
@@ -240,12 +300,11 @@ def find_recent_compatible_checkpoints(
     primitive_filling: float,
     limit: int = 2,
 ) -> list[Path]:
-    """Return the most recent compatible V checkpoints, ordered low to high.
+    """Return the most recent compatible converged V checkpoints, low to high.
 
     The default returns the two largest converged zero-source checkpoints with
-    ``V <= target_V``.  Loading two points lets the driver reconstruct a local
-    V-secant direction immediately after restart instead of waiting for another
-    freshly converged V point.
+    ``V <= target_V``.  Nonconverged checkpoints are deliberately excluded, so
+    they cannot seed a larger-V continuation by accident.
     """
     limit = int(limit)
     if limit < 1:
@@ -263,7 +322,7 @@ def find_nearest_compatible_checkpoint(
     grid: MatsubaraGrid,
     primitive_filling: float,
 ) -> Path | None:
-    """Find the largest compatible zero-source V not exceeding target_V."""
+    """Find the largest converged zero-source V not exceeding target_V."""
     paths = find_recent_compatible_checkpoints(
         directory,
         target_V,
