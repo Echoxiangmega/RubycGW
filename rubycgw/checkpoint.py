@@ -22,7 +22,7 @@ import numpy as np
 
 from .grids import MatsubaraGrid
 from .model import RubyParameters
-from .supercell import NSUP, charge_order_parameter
+from .supercell import NSUP, charge_order_diagnostics
 
 
 CHECKPOINT_VERSION = 2
@@ -45,7 +45,8 @@ def _metadata(
     primitive_filling: float,
     source: float,
 ) -> dict:
-    phi = charge_order_parameter(np.asarray(gw.density, dtype=float))
+    charge = charge_order_diagnostics(np.asarray(gw.density, dtype=float))
+    phi = complex(charge["Phi"])
     return {
         "version": CHECKPOINT_VERSION,
         "interaction_convention": INTERACTION_CONVENTION,
@@ -65,6 +66,11 @@ def _metadata(
         "charge_order_re": float(phi.real),
         "charge_order_im": float(phi.imag),
         "charge_order_abs": float(abs(phi)),
+        "charge_delta_Q": float(charge["Delta_Q"]),
+        "charge_translation_rms": float(charge["Delta_translation_rms"]),
+        "charge_delta_A": float(charge["Delta_A"]),
+        "charge_delta_B": float(charge["Delta_B"]),
+        "charge_delta_AB": float(charge["Delta_AB"]),
         "final_error": float(gw.final_error),
         "converged": bool(gw.converged),
     }
