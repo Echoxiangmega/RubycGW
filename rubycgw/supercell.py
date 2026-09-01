@@ -122,7 +122,7 @@ def period3_real_pattern() -> np.ndarray:
 
 
 def charge_order_parameter(density: np.ndarray) -> complex:
-    """Return the complex period-three charge amplitude of an 18-site density.
+    """Return the selected complex period-three charge amplitude ``Phi``.
 
     With ``z=period3_complex_mode()`` we define
 
@@ -134,11 +134,95 @@ def charge_order_parameter(density: np.ndarray) -> complex:
 
     the returned value is ``Phi=A exp(i theta)`` up to roundoff.  ``abs(Phi)``
     is translation/gauge independent within the threefold family.
+
+    Important: this is a projection onto one particular Q form factor.  A zero
+    value does NOT imply that all charge order is absent.  Use
+    :func:`charge_order_diagnostics` for generic period-three and q=0
+    intra-unit-cell charge diagnostics.
     """
     density = np.asarray(density, dtype=float).reshape(NSUP)
     delta = density - float(np.mean(density))
     z = period3_complex_mode()
     return complex(2.0 * np.vdot(z, delta) / np.vdot(z, z))
+
+
+def charge_order_diagnostics(density: np.ndarray) -> dict[str, object]:
+    """Decompose an 18-site density into generic q=0 and +/-Q charge sectors.
+
+    Write the density as ``n[s,a]`` with sector ``s=0,1,2`` and primitive
+    sublattice ``a=0,...,5``.  The sector Fourier components are
+
+        n_q0[a] = (1/3) sum_s n[s,a],
+        n_Q[a]  = (1/3) sum_s exp(-2*pi*i*s/3) n[s,a].
+
+    For a real density the -Q component is ``n_Q.conj()``.  The returned
+    diagnostics are:
+
+    ``Phi``
+        Projection onto the previously selected period-three form factor.
+    ``Delta_Q``
+        ``sqrt(sum_a |n_Q[a]|^2)``.  This detects any period-three translation
+        breaking in the 18-site cell, including Q form factors orthogonal to
+        the selected ``Phi`` mode.
+    ``Delta_translation_rms``
+        RMS density difference between the three primitive-cell sectors after
+        removing ``n_q0``.  For this three-sector real-density decomposition it
+        equals ``Delta_Q/sqrt(3)`` up to roundoff.
+    ``Delta_A`` / ``Delta_B``
+        q=0 intra-triangle disproportionation.  For A, for example,
+
+            sqrt(((n0-n1)^2 + (n1-n2)^2 + (n2-n0)^2)/2).
+
+        Thus a pattern ``(a,b,b)`` gives exactly ``|a-b|``.
+    ``Delta_AB``
+        Signed q=0 difference between the mean density of triangles A and B.
+
+    Arrays ``n_q0`` and ``n_Q`` are also returned for detailed inspection.
+    """
+    n = np.asarray(density, dtype=float).reshape(NSECTOR, NSUB)
+    n_q0 = np.mean(n, axis=0)
+
+    w = np.exp(2j * np.pi / 3.0)
+    phase = np.array([1.0, np.conj(w), np.conj(w**2)], dtype=complex)
+    n_Q = np.einsum("s,sa->a", phase, n, optimize=True) / float(NSECTOR)
+
+    delta_Q = float(np.linalg.norm(n_Q))
+    translation_rms = float(np.sqrt(np.mean((n - n_q0[None, :]) ** 2)))
+
+    A = n_q0[0:3]
+    B = n_q0[3:6]
+    delta_A = float(
+        np.sqrt(
+            0.5
+            * (
+                (A[0] - A[1]) ** 2
+                + (A[1] - A[2]) ** 2
+                + (A[2] - A[0]) ** 2
+            )
+        )
+    )
+    delta_B = float(
+        np.sqrt(
+            0.5
+            * (
+                (B[0] - B[1]) ** 2
+                + (B[1] - B[2]) ** 2
+                + (B[2] - B[0]) ** 2
+            )
+        )
+    )
+    delta_AB = float(np.mean(A) - np.mean(B))
+
+    return {
+        "Phi": charge_order_parameter(n.reshape(NSUP)),
+        "Delta_Q": delta_Q,
+        "Delta_translation_rms": translation_rms,
+        "Delta_A": delta_A,
+        "Delta_B": delta_B,
+        "Delta_AB": delta_AB,
+        "n_q0": np.asarray(n_q0, dtype=float),
+        "n_Q": np.asarray(n_Q, dtype=complex),
+    }
 
 
 def build_supercell_h0(
