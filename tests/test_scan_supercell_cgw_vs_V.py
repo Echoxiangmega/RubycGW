@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from scan_supercell_cgw_vs_V import (
     _curvature_fields,
@@ -8,8 +9,20 @@ from scan_supercell_cgw_vs_V import (
 )
 
 
-def test_prepare_v_values_sorts_and_deduplicates():
-    assert _prepare_v_values([2.0, 0.5, 1.0, 0.5]) == [0.5, 1.0, 2.0]
+def test_prepare_v_values_builds_inclusive_linspace():
+    values = _prepare_v_values(0.5, 2.0, 4)
+    assert np.allclose(values, [0.5, 1.0, 1.5, 2.0])
+
+
+def test_prepare_v_values_single_point_requires_equal_endpoints():
+    assert _prepare_v_values(1.2, 1.2, 1) == [1.2]
+    with pytest.raises(ValueError):
+        _prepare_v_values(1.0, 2.0, 1)
+
+
+def test_prepare_v_values_rejects_descending_range():
+    with pytest.raises(ValueError):
+        _prepare_v_values(2.0, 1.0, 5)
 
 
 def test_zero_crossings_returns_linear_interpolation():
