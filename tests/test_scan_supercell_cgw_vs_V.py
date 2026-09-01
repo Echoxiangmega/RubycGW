@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from scan_supercell_cgw_vs_V import (
+    _bridge_midpoint,
     _curvature_fields,
     _normal_breaking_scale,
     _prepare_v_values,
@@ -23,6 +24,13 @@ def test_prepare_v_values_single_point_requires_equal_endpoints():
 def test_prepare_v_values_rejects_descending_range():
     with pytest.raises(ValueError):
         _prepare_v_values(2.0, 1.0, 5)
+
+
+def test_bridge_midpoint_respects_min_step_and_depth():
+    assert abs(_bridge_midpoint(1.0, 1.2, 0.01, 0, 6) - 1.1) < 1e-14
+    assert _bridge_midpoint(1.0, 1.008, 0.005, 0, 6) is None
+    assert _bridge_midpoint(1.0, 1.2, 0.01, 6, 6) is None
+    assert _bridge_midpoint(None, 1.2, 0.01, 0, 6) is None
 
 
 def test_zero_crossings_returns_linear_interpolation():
