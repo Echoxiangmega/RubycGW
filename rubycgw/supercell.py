@@ -121,6 +121,69 @@ def period3_real_pattern() -> np.ndarray:
     return period3_complex_mode().real.copy()
 
 
+def charge_source_pattern(channel: str) -> np.ndarray:
+    """Return a normalized 18-site diagonal charge-source pattern.
+
+    Supported channels are
+
+    ``co``
+        The selected Q=(1/3,1/3) period-three pattern already used by the
+        supercell calculation.
+    ``intra-a``
+        A q=0 C3-breaking field on triangle A.  In each primitive cell the
+        six-site pattern is ``(1,-1/2,-1/2,0,0,0)``.  The two other C3-related
+        orientations are symmetry-equivalent seeds.
+    ``intra-b``
+        The analogous q=0 C3-breaking field on triangle B,
+        ``(0,0,0,1,-1/2,-1/2)``.
+    ``ab``
+        A q=0 A-versus-B charge-transfer field,
+        ``(1,1,1,-1,-1,-1)``.
+
+    Every pattern has zero spatial mean and maximum absolute component one, so
+    the source strength ``h`` has the same onsite-energy scale in all charge
+    branches.  The q=0 patterns are copied identically into all three primitive
+    sectors of the supercell.
+    """
+    channel = str(channel).lower()
+    if channel == "co":
+        pattern = period3_real_pattern()
+    elif channel == "intra-a":
+        p6 = np.array([1.0, -0.5, -0.5, 0.0, 0.0, 0.0], dtype=float)
+        pattern = np.tile(p6, NSECTOR)
+    elif channel == "intra-b":
+        p6 = np.array([0.0, 0.0, 0.0, 1.0, -0.5, -0.5], dtype=float)
+        pattern = np.tile(p6, NSECTOR)
+    elif channel == "ab":
+        p6 = np.array([1.0, 1.0, 1.0, -1.0, -1.0, -1.0], dtype=float)
+        pattern = np.tile(p6, NSECTOR)
+    else:
+        raise ValueError(
+            f"unknown charge source channel {channel!r}; expected co, intra-a, intra-b, or ab"
+        )
+
+    pattern = np.asarray(pattern, dtype=float).reshape(NSUP)
+    if abs(float(np.mean(pattern))) > 1e-14:
+        raise RuntimeError("charge source pattern must have zero spatial mean")
+    maxabs = float(np.max(np.abs(pattern)))
+    if maxabs == 0.0:
+        raise RuntimeError("charge source pattern must be nonzero")
+    return pattern / maxabs
+
+
+def add_charge_source(h0: np.ndarray, strength: float, channel: str) -> np.ndarray:
+    """Add ``H_source=-h sum_I p_I n_I`` to an 18-site Bloch Hamiltonian."""
+    out = np.array(h0, dtype=complex, copy=True)
+    if out.shape[-2:] != (NSUP, NSUP):
+        raise ValueError(f"expected final h0 dimensions {(NSUP, NSUP)}, got {out.shape[-2:]}")
+    if float(strength) == 0.0:
+        return out
+    pattern = charge_source_pattern(channel)
+    diag = np.diag_indices(NSUP)
+    out[..., diag[0], diag[1]] -= float(strength) * pattern
+    return 0.5 * (out + np.swapaxes(out.conj(), -1, -2))
+
+
 def charge_order_parameter(density: np.ndarray) -> complex:
     """Return the selected complex period-three charge amplitude ``Phi``.
 
@@ -232,12 +295,12 @@ def build_supercell_h0(
 ) -> np.ndarray:
     """Return the 18x18 supercell Bloch Hamiltonian.
 
-    ``source_strength`` adds the temporary pinning field
+    ``source_strength`` is retained for backward compatibility and adds the
+    selected period-three ``co`` source
 
-        H_source = -h sum_I pattern_I n_I,
+        H_source = -h sum_I pattern_I n_I.
 
-    with ``pattern=period3_real_pattern()``.  Positive h therefore lowers the
-    onsite energy on the positive lobes of the chosen charge pattern.
+    For other charge-source channels use :func:`add_charge_source`.
     """
     kpts = np.asarray(kpts, dtype=float)
     flat = kpts.reshape(-1, 2)
@@ -247,12 +310,11 @@ def build_supercell_h0(
         for I, J, S, amp in hops:
             h0[ik, I, J] += amp * np.exp(2j * np.pi * np.dot(k, S))
 
-    if source_strength != 0.0:
-        diag = np.diag_indices(NSUP)
-        h0[:, diag[0], diag[1]] -= float(source_strength) * period3_real_pattern()[None, :]
-
     h0 = 0.5 * (h0 + np.swapaxes(h0.conj(), -1, -2))
-    return h0.reshape(kpts.shape[:-1] + (NSUP, NSUP))
+    h0 = h0.reshape(kpts.shape[:-1] + (NSUP, NSUP))
+    if source_strength != 0.0:
+        h0 = add_charge_source(h0, float(source_strength), "co")
+    return h0
 
 
 def build_supercell_interaction(qpts: np.ndarray, params: RubyParameters) -> np.ndarray:
