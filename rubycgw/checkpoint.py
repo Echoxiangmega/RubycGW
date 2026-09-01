@@ -68,6 +68,7 @@ def _metadata(
         "charge_order_abs": float(abs(phi)),
         "charge_delta_Q": float(charge["Delta_Q"]),
         "charge_translation_rms": float(charge["Delta_translation_rms"]),
+        "charge_delta_intra": float(charge["Delta_intra"]),
         "charge_delta_A": float(charge["Delta_A"]),
         "charge_delta_B": float(charge["Delta_B"]),
         "charge_delta_AB": float(charge["Delta_AB"]),
