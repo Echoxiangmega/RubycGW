@@ -12,6 +12,14 @@ current vertices:
 The resulting 6x6 susceptibility is transformed to the real harmonic basis
 (q0,Qc,Qs) in each physical current channel and inverted to obtain the Landau
 curvature matrix R.
+
+The vertex equation is linear.  By default it is solved as
+
+    (I-L) Gamma = K
+
+with restarted matrix-free GMRES rather than the old damped fixed-point
+iteration.  This lets the response solver cross regions where the fixed-point
+iteration is unstable while the linear system remains nonsingular.
 """
 
 from __future__ import annotations
@@ -70,7 +78,27 @@ def _parse_args():
     )
     p.add_argument("--vertex-max-iter", type=int, default=150)
     p.add_argument("--vertex-tol", type=float, default=1e-8)
-    p.add_argument("--vertex-mixing", type=float, default=0.25)
+    p.add_argument(
+        "--vertex-solver",
+        choices=["gmres", "linear"],
+        default="gmres",
+        help=(
+            "Vertex linear solver. gmres (default) solves (I-L)Gamma=K directly; "
+            "linear retains the legacy damped fixed-point iteration."
+        ),
+    )
+    p.add_argument(
+        "--vertex-gmres-restart",
+        type=int,
+        default=12,
+        help="Krylov subspace size before a GMRES restart (default: 12).",
+    )
+    p.add_argument(
+        "--vertex-mixing",
+        type=float,
+        default=0.25,
+        help="Damping used only by --vertex-solver linear.",
+    )
     p.add_argument("--vertex-verbose", action="store_true")
     p.add_argument("--momentum-backend", choices=["fft", "direct"], default="fft")
     p.add_argument(
@@ -138,6 +166,15 @@ def _format_matrix(mat, fmt="+.6e"):
 
 def main():
     args = _parse_args()
+    if args.vertex_max_iter < 1:
+        raise ValueError("--vertex-max-iter must be positive")
+    if args.vertex_tol <= 0.0:
+        raise ValueError("--vertex-tol must be positive")
+    if args.vertex_gmres_restart < 1:
+        raise ValueError("--vertex-gmres-restart must be positive")
+    if not (0.0 < args.vertex_mixing <= 1.0):
+        raise ValueError("--vertex-mixing must lie in (0,1]")
+
     params = RubyParameters(ti=args.ti, t1=args.t1, t2=args.t2, V=args.V)
     grid = MatsubaraGrid(
         nk1=args.nk1,
@@ -182,12 +219,22 @@ def main():
             max_iter=args.vertex_max_iter,
             tol=args.vertex_tol,
             mixing=args.vertex_mixing,
+            solver=args.vertex_solver,
+            gmres_restart=args.vertex_gmres_restart,
             include_hartree=True,
             include_fock=True,
             include_mt=True,
             include_al=include_al,
             verbose=args.vertex_verbose,
             momentum_backend=args.momentum_backend,
+        )
+        print(
+            f"vertex solver: {args.vertex_solver}"
+            + (
+                f" (restart={args.vertex_gmres_restart}, max Krylov it={args.vertex_max_iter})"
+                if args.vertex_solver == "gmres"
+                else f" (mixing={args.vertex_mixing:g}, max it={args.vertex_max_iter})"
+            )
         )
         gammas = []
         for ich, (label, K) in enumerate(zip(local_labels, Klocal), start=1):
@@ -203,8 +250,8 @@ def main():
                 "AL2": np.max(np.abs(result.Gamma_AL2)),
             }
             print(
-                f"{label}: converged={result.converged}, it={result.iterations}, "
-                f"err={result.final_error:.3e}, "
+                f"{label}: solver={result.solver}, converged={result.converged}, "
+                f"it={result.iterations}, residual_max={result.final_error:.3e}, "
                 + ", ".join(f"|{k}|max={v:.3e}" for k, v in norms.items())
             )
         bad = [
@@ -213,9 +260,18 @@ def main():
             if not result.converged
         ]
         if bad:
+            if args.vertex_solver == "gmres":
+                advice = (
+                    ". Increase --vertex-max-iter and/or --vertex-gmres-restart. "
+                    "If the residual remains large, I-L may be nearly singular at a response instability."
+                )
+            else:
+                advice = (
+                    ". The legacy linear iteration can fail when a kernel eigenvalue crosses 1; "
+                    "retry with --vertex-solver gmres."
+                )
             raise RuntimeError(
-                "Vertex solve did not converge for: " + ", ".join(bad)
-                + ". Increase --vertex-max-iter or adjust --vertex-mixing before trusting r."
+                "Vertex solve did not converge for: " + ", ".join(bad) + advice
             )
 
     chi = susceptibility_matrix_q0(G, Klocal, gammas, grid)
@@ -268,6 +324,8 @@ def main():
         V=float(args.V),
         primitive_filling=float(args.primitive_filling),
         stage=np.asarray(args.stage),
+        vertex_solver=np.asarray(args.vertex_solver),
+        vertex_gmres_restart=int(args.vertex_gmres_restart),
         local_labels=np.asarray(local_labels),
         harmonic_labels=np.asarray(harmonic_labels),
         density=np.asarray(density),
@@ -294,6 +352,8 @@ def main():
         "V": float(args.V),
         "primitive_filling": float(args.primitive_filling),
         "stage": args.stage,
+        "vertex_solver": args.vertex_solver,
+        "vertex_gmres_restart": int(args.vertex_gmres_restart),
         "scgw_residual": sc_res,
         "chi_imag_max": analysis["chi_imag_max"],
         "r_soft": float(rvals[0]),
