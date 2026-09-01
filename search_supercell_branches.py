@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
-"""Search a small, physically focused set of 18-site CO/LC branches.
+"""Search a physically focused set of 18-site charge/loop-current branches.
 
-The default branch set is deliberately small:
+The default branch set is
 
-    normal    primitive-translation-symmetric branch, no source
-    co        selected period-3 charge source, then h_CO -> 0
+    normal    no explicit source
+    co        selected period-3 Q=(1/3,1/3) charge source, then h -> 0
+    intra-a   q=0 C3-breaking charge source on triangle A, then h -> 0
+    intra-b   q=0 C3-breaking charge source on triangle B, then h -> 0
+    ab        q=0 A-versus-B triangle charge-transfer source, then h -> 0
     same      physical-same uniform loop-current source, then h_eta -> 0
     opposite  physical-opposite uniform loop-current source, then h_eta -> 0
 
-By default the script solves the full split-GW equations.  The CO branch starts
-from the input checkpoint, while normal/same/opposite start from its primitive-
-translation-symmetric projection.
+The q=0 charge seeds are repeated identically in all three primitive sectors of
+the 18-site supercell.  ``intra-a`` uses the primitive pattern
+``(1,-1/2,-1/2,0,0,0)``, ``intra-b`` uses
+``(0,0,0,1,-1/2,-1/2)``, and ``ab`` uses
+``(1,1,1,-1,-1,-1)``.  Other C3-related orientations are symmetry-equivalent
+seed choices; after the source is removed the self-consistent solution is not
+constrained to keep only the seeded component.
+
+By default the script solves the full split-GW equations.  The selected period-3
+``co`` branch starts from the input checkpoint, while normal/q=0-charge/LC
+branches start from its primitive-translation-symmetric projection.
 
 With ``--hf-only`` the approximation itself is changed: no polarization P, no
 screened interaction W, no dynamic Sigma_c, and no GW iteration is performed.
@@ -20,14 +31,14 @@ Hartree-Fock,
     G_HF^{-1} = iw + mu - h0 - Sigma_H^HF - Sigma_F^HF.
 
 The first source point of each HF branch starts from zero HF self-energy; later
-source points use the previous HF solution, so a source-selected CO/LC branch
-can be followed adiabatically to h=0.  The input checkpoint then supplies only
-(V,T,filling, hopping/grid parameters) and an initial chemical-potential guess.
-Because its self-energies are not loaded in HF-only mode, even a legacy
+source points use the previous HF solution, so a source-selected broken-symmetry
+branch can be followed adiabatically to h=0.  The input checkpoint then supplies
+only (V,T,filling, hopping/grid parameters) and an initial chemical-potential
+guess.  Because its self-energies are not loaded in HF-only mode, even a legacy
 checkpoint can be used purely as a parameter container.
 
-Charge classification is deliberately broader than the selected period-three
-order parameter Phi.  Every converged point reports:
+Charge classification is broader than the selected period-three order parameter
+Phi.  Every converged point reports:
 
     Phi                    selected Q form-factor projection
     Delta_Q                generic period-three translation breaking
@@ -69,6 +80,7 @@ from rubycgw.lc_branch import (
 )
 from rubycgw.model import RubyParameters
 from rubycgw.supercell import (
+    add_charge_source,
     build_supercell_h0,
     build_supercell_interaction,
     charge_order_diagnostics,
@@ -80,7 +92,9 @@ from rubycgw.supercell_hf import (
 )
 
 
-DEFAULT_BRANCHES = ("normal", "co", "same", "opposite")
+CHARGE_BRANCHES = ("co", "intra-a", "intra-b", "ab")
+CURRENT_BRANCHES = ("same", "opposite")
+DEFAULT_BRANCHES = ("normal",) + CHARGE_BRANCHES + CURRENT_BRANCHES
 
 
 def _schedule(values: list[float]) -> list[float]:
@@ -109,14 +123,21 @@ def _parse_args():
         nargs="+",
         choices=list(DEFAULT_BRANCHES),
         default=list(DEFAULT_BRANCHES),
-        help="Branches to search. Default: normal co same opposite.",
+        help=(
+            "Branches to search. Default: normal co intra-a intra-b ab same opposite."
+        ),
     )
     p.add_argument(
+        "--charge-source-sequence",
         "--co-source-sequence",
+        dest="charge_source_sequence",
         nargs="+",
         type=float,
         default=[0.10, 0.05, 0.02, 0.01, 0.005, 0.001, 0.0],
-        help="Temporary selected period-3 charge source ladder.",
+        help=(
+            "Temporary source ladder for co/intra-a/intra-b/ab charge branches. "
+            "--co-source-sequence is retained as a backward-compatible alias."
+        ),
     )
     p.add_argument(
         "--current-source-sequence",
@@ -184,23 +205,29 @@ def _branch_h0(
     params: RubyParameters,
     grid: MatsubaraGrid,
 ) -> np.ndarray:
-    if branch == "co":
-        return build_supercell_h0(grid.kmesh(), params, source_strength=float(h))
-    if branch in {"same", "opposite"}:
+    # params/grid stay in the signature for backward compatibility with tests and
+    # older helper code.  All source Hamiltonians are generated from base_h0 so
+    # every branch uses exactly the same one-body Ruby model.
+    del params, grid
+    if branch in CHARGE_BRANCHES:
+        return add_charge_source(base_h0, float(h), branch)
+    if branch in CURRENT_BRANCHES:
         return add_current_source(base_h0, float(h), branch)
     if branch == "normal":
         if not np.isclose(h, 0.0):
             raise ValueError("normal branch must have zero source")
-        return base_h0
+        return np.array(base_h0, copy=True)
     raise ValueError(f"unknown branch {branch!r}")
 
 
 def _branch_schedule(branch: str, args) -> list[float]:
     if branch == "normal":
         return [0.0]
-    if branch == "co":
-        return _schedule(args.co_source_sequence)
-    return _schedule(args.current_source_sequence)
+    if branch in CHARGE_BRANCHES:
+        return _schedule(args.charge_source_sequence)
+    if branch in CURRENT_BRANCHES:
+        return _schedule(args.current_source_sequence)
+    raise ValueError(f"unknown branch {branch!r}")
 
 
 def _classify(charge: dict[str, object], currents: dict[str, complex], threshold: float) -> str:
@@ -237,7 +264,7 @@ def _charge_fields(charge: dict[str, object]) -> dict[str, float]:
 def _hf_current_diagnostics(rho: np.ndarray, grid: MatsubaraGrid) -> dict[str, complex]:
     """Exact static-HF q=0 currents from rho, with no Matsubara truncation."""
     out: dict[str, complex] = {}
-    for channel in ("same", "opposite"):
+    for channel in CURRENT_BRANCHES:
         K = current_vertex_q0(channel)
         value = (1.0 / grid.nk) * np.einsum(
             "ab,xyba->", K, np.asarray(rho, dtype=complex), optimize=True
@@ -360,7 +387,7 @@ def main():
     Vq = build_supercell_interaction(grid.qmesh(), params)
 
     print("=" * 112)
-    print("18-site focused CO/LC branch search")
+    print("18-site charge/LC branch search")
     print(
         f"V={params.V:g}, T={grid.T:g}, primitive filling={primitive_filling:g}, "
         f"grid={grid.nk1}x{grid.nk2}, nw={grid.nw}, nOmega={grid.nOmega}"
@@ -382,7 +409,8 @@ def main():
             f"Delta_A={float(input_charge['Delta_A']):.3e}, "
             f"Delta_B={float(input_charge['Delta_B']):.3e}, "
             f"Delta_AB={float(input_charge['Delta_AB']):+.3e}; "
-            "LC/normal seeds use primitive-translation projection, CO seed keeps the original state"
+            "normal/q0-charge/LC seeds use primitive-translation projection, "
+            "selected Q-CO seed keeps the original state"
         )
     print("Only zero-source endpoints are ranked by the free energy of the selected approximation.")
     print("=" * 112)
@@ -501,7 +529,8 @@ def main():
             _print_point("      ", charge, m_same_pc, m_opp_pc, label)
             continue
 
-        # Full-GW mode: retain the original checkpoint-based branch strategy.
+        # Full-GW mode: keep the selected Q-CO checkpoint for the co branch.
+        # The other branches start from its primitive-translation projection.
         previous = seed_original if branch == "co" else seed_deco
         endpoint = None
         endpoint_thermo = None
@@ -513,7 +542,7 @@ def main():
             seed_label = (
                 "original-checkpoint"
                 if istep == 1 and branch == "co"
-                else "de-CO-checkpoint"
+                else "primitive-periodic-checkpoint"
                 if istep == 1
                 else "previous-GW"
             )
@@ -676,7 +705,7 @@ def main():
             f"seed={winner['seed_branch']} -> {winner['classification']}"
         )
         print(
-            "Important: this is the lowest among the searched CO/LC-focused branches, "
+            "Important: this is the lowest among the searched charge/LC-focused branches, "
             "not a proof that no other symmetry-breaking basin exists."
         )
 
