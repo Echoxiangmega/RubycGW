@@ -2,24 +2,38 @@
 """Scan normal-state cGW loop-current curvatures versus interaction V.
 
 The scan follows one zero-source, symmetry-preserving 18-site SC-GW branch at
-fixed primitive-cell filling and evaluates the cGW current response at every V.
+fixed primitive-cell filling and evaluates the cGW current response at every
+requested V.
 
 Project conventions:
 
     r_+ = physical-opposite uniform q=0 loop-current curvature
     r_- = physical-same     uniform q=0 loop-current curvature
 
-The finite-Q minimum curvature is also saved as ``r_Q_min``.  The V grid is
-constructed automatically as ``np.linspace(V_start, V_stop, V_num)``.
+The finite-Q minimum curvature is also saved as ``r_Q_min``.  The requested V
+grid is constructed automatically as ``np.linspace(V_start, V_stop, V_num)``.
 
-A true cold start is allowed.  The first V uses the existing weak-V SC-GW
-bootstrap when no ``--start-checkpoint`` is supplied; later V points use the
-previous converged normal GW state as a continuation seed.  Every converged
-normal state is checkpointed in a scan-specific directory, by default
+A true cold start is allowed.  The first requested V uses the existing weak-V
+SC-GW bootstrap when no ``--start-checkpoint`` is supplied; later requested V
+points use the previous converged normal GW state as a continuation seed.
+
+If a direct V-continuation step fails, the driver first retries the same V from
+the best finite state with a fresh Pulay history.  If that still fails and a
+previous converged V is available, it recursively inserts midpoint bridge
+couplings until the target converges or the configured bridge depth/minimum
+step is exhausted.  Bridge points are used only to continue the normal GW
+branch: cGW response is evaluated only on the user-requested linspace grid.
+
+Every converged requested normal state is checkpointed in a scan-specific
+directory, by default
 
     results/supercell18/r_vs_V/<stage_timestamp>/normal_checkpoints/
 
-which is deliberately separate from branch-search checkpoints.
+and automatically inserted bridge checkpoints go into
+
+    .../normal_checkpoints/bridges/
+
+Both are deliberately separate from branch-search checkpoints.
 """
 
 from __future__ import annotations
@@ -64,19 +78,19 @@ def _parse_args():
         "--V-start",
         type=float,
         required=True,
-        help="First interaction value in the scan.",
+        help="First interaction value in the requested scan.",
     )
     p.add_argument(
         "--V-stop",
         type=float,
         required=True,
-        help="Last interaction value in the scan (included).",
+        help="Last interaction value in the requested scan (included).",
     )
     p.add_argument(
         "--V-num",
         type=int,
         required=True,
-        help="Number of equally spaced V points, including both endpoints.",
+        help="Number of equally spaced requested V points, including both endpoints.",
     )
     p.add_argument("--T", type=float, default=0.08)
     p.add_argument("--ti", type=float, default=0.4)
@@ -92,15 +106,45 @@ def _parse_args():
         type=str,
         default=None,
         help=(
-            "Optional compatible zero-source GW warm start. If omitted, the first V "
-            "is obtained by the built-in weak-V cold-start bootstrap."
+            "Optional compatible converged zero-source normal-GW warm start. Its V "
+            "must not exceed the first requested V. If it equals the first requested "
+            "V, that GW state is reused directly and only cGW is recomputed."
         ),
     )
     p.add_argument("--gw-max-iter", type=int, default=500)
+    p.add_argument(
+        "--gw-retry-max-iter",
+        type=int,
+        default=250,
+        help=(
+            "Maximum iterations for the same-V fresh-history retry after a failed "
+            "normal-GW continuation attempt."
+        ),
+    )
     p.add_argument("--gw-tol", type=float, default=1e-8)
     p.add_argument("--mu-tol", type=float, default=5e-12)
     p.add_argument("--mu-max-iter", type=int, default=60)
     p.add_argument("--gw-verbose", action="store_true")
+    p.add_argument(
+        "--bridge-min-step",
+        type=float,
+        default=0.005,
+        help=(
+            "Smallest allowed distance from a converged left point to an inserted "
+            "midpoint bridge. Bridge points are not included in r(V) output."
+        ),
+    )
+    p.add_argument(
+        "--bridge-max-depth",
+        type=int,
+        default=6,
+        help="Maximum recursive midpoint subdivision depth for one requested V step.",
+    )
+    p.add_argument(
+        "--no-auto-bridge",
+        action="store_true",
+        help="Disable automatic midpoint bridge insertion after a failed same-V retry.",
+    )
 
     p.add_argument(
         "--stage",
@@ -126,8 +170,8 @@ def _parse_args():
         type=float,
         default=1e-6,
         help=(
-            "Abort if the continued background develops charge order or a uniform "
-            "loop current larger than this per primitive cell."
+            "Reject a continued background if charge order or a uniform loop current "
+            "exceeds this per primitive cell. Bridge points obey the same test."
         ),
     )
     p.add_argument(
@@ -167,11 +211,16 @@ def _prepare_v_values(V_start: float, V_stop: float, V_num: int) -> list[float]:
     return [float(x) for x in np.linspace(start, stop, num)]
 
 
-def _gw_options(args, mu0: float, target_N: float) -> GWOptions:
+def _gw_options(
+    args,
+    mu0: float,
+    target_N: float,
+    max_iter: int | None = None,
+) -> GWOptions:
     return GWOptions(
         mu=float(mu0),
         target_filling=float(target_N),
-        max_iter=int(args.gw_max_iter),
+        max_iter=int(args.gw_max_iter if max_iter is None else max_iter),
         tol=float(args.gw_tol),
         mixing=0.20,
         mixing_method="linear",
@@ -210,6 +259,280 @@ def _normal_breaking_scale(diag: dict[str, float]) -> float:
         abs(float(diag["Delta_AB"])),
         abs(float(diag["m_plus_pc_abs"])),
         abs(float(diag["m_minus_pc_abs"])),
+    )
+
+
+def _finite_gw_state(gw) -> bool:
+    if gw is None:
+        return False
+    try:
+        return bool(
+            np.isfinite(float(gw.final_error))
+            and np.isfinite(float(gw.mu))
+            and np.all(np.isfinite(gw.Sigma_H))
+            and np.all(np.isfinite(gw.Sigma_GW))
+        )
+    except Exception:
+        return False
+
+
+def _bridge_midpoint(
+    left_V: float | None,
+    right_V: float,
+    min_step: float,
+    depth: int,
+    max_depth: int,
+) -> float | None:
+    """Return a legal midpoint bridge, or None when subdivision must stop."""
+    if left_V is None or int(depth) >= int(max_depth):
+        return None
+    left = float(left_V)
+    right = float(right_V)
+    if right <= left:
+        return None
+    half_step = 0.5 * (right - left)
+    if half_step < float(min_step) - 1e-15:
+        return None
+    return left + half_step
+
+
+def _bridge_checkpoint_name(
+    V: float,
+    primitive_filling: float,
+    grid: MatsubaraGrid,
+) -> str:
+    base = checkpoint_filename(V, primitive_filling, grid)
+    stem = base[:-4] if base.endswith(".npz") else base
+    return f"{stem}_bridge.npz"
+
+
+def _write_rows(path: Path, rows: list[dict]) -> None:
+    if not rows:
+        return
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _run_normal_gw_attempt(
+    args,
+    V: float,
+    requested_V: float,
+    seed,
+    seed_V: float | None,
+    target_N: float,
+    grid: MatsubaraGrid,
+    role: str,
+    depth: int,
+    max_iter: int,
+) -> tuple[object, dict, dict[str, float] | None, float]:
+    params = RubyParameters(
+        ti=float(args.ti),
+        t1=float(args.t1),
+        t2=float(args.t2),
+        V=float(V),
+    )
+    mu0 = float(seed.mu) if seed is not None else 0.0
+    opts = _gw_options(args, mu0, target_N, max_iter=max_iter)
+
+    print(
+        f"    GW attempt role={role}, V={V:.10g}, "
+        f"seed_V={'cold' if seed_V is None else f'{seed_V:.10g}'}, "
+        f"depth={depth}, max_iter={max_iter}"
+    )
+    t0 = time.perf_counter()
+    gw = solve_supercell_gw_anderson(
+        params,
+        grid,
+        opts=opts,
+        source_strength=0.0,
+        initial=seed,
+        anderson=AndersonOptions(),
+    )
+    runtime = time.perf_counter() - t0
+
+    diag = _normal_diagnostics(gw, grid) if _finite_gw_state(gw) else None
+    breaking = _normal_breaking_scale(diag) if diag is not None else float("inf")
+    accepted_normal = bool(
+        gw is not None
+        and bool(gw.converged)
+        and diag is not None
+        and breaking <= float(args.normal_threshold)
+    )
+
+    print(
+        f"      converged={bool(gw.converged)}, it={int(gw.iterations)}, "
+        f"res={float(gw.final_error):.3e}, mu={float(gw.mu):.10f}, "
+        f"normal_scale={breaking:.3e}, accepted_normal={accepted_normal}, "
+        f"time={runtime:.1f}s"
+    )
+
+    row = {
+        "requested_V": float(requested_V),
+        "solve_V": float(V),
+        "role": str(role),
+        "depth": int(depth),
+        "seed_V": np.nan if seed_V is None else float(seed_V),
+        "max_iter_budget": int(max_iter),
+        "converged": bool(gw.converged),
+        "accepted_normal": accepted_normal,
+        "iterations": int(gw.iterations),
+        "residual": float(gw.final_error),
+        "mu": float(gw.mu),
+        "normal_breaking_scale": float(breaking),
+        "runtime_s": float(runtime),
+        "checkpoint": "",
+    }
+    return gw, row, diag, float(breaking)
+
+
+def _advance_normal_branch(
+    args,
+    left_V: float | None,
+    left_state,
+    target_V: float,
+    requested_V: float,
+    target_N: float,
+    grid: MatsubaraGrid,
+    primitive_filling: float,
+    bridge_dir: Path,
+    continuation_rows: list[dict],
+    continuation_log_path: Path,
+    depth: int = 0,
+):
+    """Advance a converged normal state to target_V with retry + midpoint bridges."""
+
+    is_requested = bool(np.isclose(float(target_V), float(requested_V), atol=1e-13))
+    direct_role = "requested-direct" if is_requested else "bridge-direct"
+    retry_role = "requested-retry" if is_requested else "bridge-retry"
+
+    gw, row, diag, breaking = _run_normal_gw_attempt(
+        args,
+        target_V,
+        requested_V,
+        left_state,
+        left_V,
+        target_N,
+        grid,
+        direct_role,
+        depth,
+        int(args.gw_max_iter),
+    )
+    continuation_rows.append(row)
+    _write_rows(continuation_log_path, continuation_rows)
+
+    if bool(row["accepted_normal"]):
+        if not is_requested:
+            params = RubyParameters(
+                ti=float(args.ti),
+                t1=float(args.t1),
+                t2=float(args.t2),
+                V=float(target_V),
+            )
+            ckpt = bridge_dir / _bridge_checkpoint_name(
+                target_V, primitive_filling, grid
+            )
+            save_supercell_checkpoint(
+                ckpt, gw, params, grid, primitive_filling, source=0.0
+            )
+            row["checkpoint"] = str(ckpt)
+            _write_rows(continuation_log_path, continuation_rows)
+            print("      bridge checkpoint:", ckpt)
+        return gw
+
+    best_failed = gw if _finite_gw_state(gw) else None
+    retry_seed = best_failed if best_failed is not None else left_state
+    retry_seed_V = float(target_V) if best_failed is not None else left_V
+
+    gw_retry, retry_row, retry_diag, retry_breaking = _run_normal_gw_attempt(
+        args,
+        target_V,
+        requested_V,
+        retry_seed,
+        retry_seed_V,
+        target_N,
+        grid,
+        retry_role,
+        depth,
+        int(args.gw_retry_max_iter),
+    )
+    continuation_rows.append(retry_row)
+    _write_rows(continuation_log_path, continuation_rows)
+
+    if bool(retry_row["accepted_normal"]):
+        if not is_requested:
+            params = RubyParameters(
+                ti=float(args.ti),
+                t1=float(args.t1),
+                t2=float(args.t2),
+                V=float(target_V),
+            )
+            ckpt = bridge_dir / _bridge_checkpoint_name(
+                target_V, primitive_filling, grid
+            )
+            save_supercell_checkpoint(
+                ckpt, gw_retry, params, grid, primitive_filling, source=0.0
+            )
+            retry_row["checkpoint"] = str(ckpt)
+            _write_rows(continuation_log_path, continuation_rows)
+            print("      bridge checkpoint:", ckpt)
+        return gw_retry
+
+    if _finite_gw_state(gw_retry) and (
+        best_failed is None
+        or float(gw_retry.final_error) < float(best_failed.final_error)
+    ):
+        best_failed = gw_retry
+
+    if bool(args.no_auto_bridge):
+        return None
+
+    midpoint = _bridge_midpoint(
+        left_V,
+        target_V,
+        float(args.bridge_min_step),
+        int(depth),
+        int(args.bridge_max_depth),
+    )
+    if midpoint is None or left_state is None:
+        return None
+
+    print(
+        f"    direct/retry failed at V={target_V:.10g}; insert bridge "
+        f"V={midpoint:.10g} between {float(left_V):.10g} and {target_V:.10g}"
+    )
+
+    bridge_state = _advance_normal_branch(
+        args,
+        left_V,
+        left_state,
+        midpoint,
+        requested_V,
+        target_N,
+        grid,
+        primitive_filling,
+        bridge_dir,
+        continuation_rows,
+        continuation_log_path,
+        depth=depth + 1,
+    )
+    if bridge_state is None:
+        return None
+
+    return _advance_normal_branch(
+        args,
+        midpoint,
+        bridge_state,
+        target_V,
+        requested_V,
+        target_N,
+        grid,
+        primitive_filling,
+        bridge_dir,
+        continuation_rows,
+        continuation_log_path,
+        depth=depth + 1,
     )
 
 
@@ -277,15 +600,6 @@ def _curvature_fields(analysis: dict) -> dict[str, float]:
         "soft_weight_Q": float(analysis["soft_weight_Q"]),
         "chi_imag_max": float(analysis["chi_imag_max"]),
     }
-
-
-def _write_rows(path: Path, rows: list[dict]) -> None:
-    if not rows:
-        return
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def _zero_crossings(V: np.ndarray, y: np.ndarray) -> list[tuple[float, float, float]]:
@@ -374,6 +688,10 @@ def main():
         raise ValueError("GW and vertex tolerances must be positive")
     if args.normal_threshold <= 0.0:
         raise ValueError("--normal-threshold must be positive")
+    if args.gw_max_iter < 1 or args.gw_retry_max_iter < 1:
+        raise ValueError("GW iteration limits must be positive")
+    if args.bridge_min_step <= 0.0 or args.bridge_max_depth < 0:
+        raise ValueError("bridge minimum step must be positive and max depth nonnegative")
     if args.vertex_max_iter < 1 or args.vertex_gmres_restart < 1:
         raise ValueError("vertex iteration limits must be positive")
 
@@ -398,6 +716,11 @@ def main():
     else:
         checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    bridge_dir = checkpoint_dir / "bridges"
+    bridge_dir.mkdir(parents=True, exist_ok=True)
+
+    continuation_log_path = outdir / "gw_continuation_log.csv"
+    continuation_rows: list[dict] = []
 
     print("=" * 110)
     print("Fixed-filling normal-state cGW curvature scan")
@@ -409,13 +732,20 @@ def main():
         f"V grid: linspace({args.V_start:g}, {args.V_stop:g}, {args.V_num}) "
         f"with dV={(V_values[1]-V_values[0]) if len(V_values)>1 else 0.0:g}"
     )
-    print("V schedule:", " -> ".join(f"{v:g}" for v in V_values))
+    print("requested V schedule:", " -> ".join(f"{v:g}" for v in V_values))
+    print(
+        f"adaptive GW continuation: retry_max_iter={args.gw_retry_max_iter}, "
+        f"bridge_min_step={args.bridge_min_step:g}, bridge_max_depth={args.bridge_max_depth}, "
+        f"auto_bridge={not args.no_auto_bridge}"
+    )
     print("output:", outdir)
-    print("normal GW checkpoints:", checkpoint_dir)
-    print("(This directory is separate from results/supercell18/branch_search/...)")
+    print("requested-point normal GW checkpoints:", checkpoint_dir)
+    print("bridge-only GW checkpoints:", bridge_dir)
+    print("(These directories are separate from results/supercell18/branch_search/...)")
     print("=" * 110)
 
     previous = None
+    previous_V: float | None = None
     if args.start_checkpoint is not None:
         start_path = Path(args.start_checkpoint)
         meta = read_checkpoint_metadata(start_path)
@@ -423,13 +753,19 @@ def main():
             raise ValueError("--start-checkpoint is not marked converged")
         if not np.isclose(float(meta.get("source", np.nan)), 0.0, atol=1e-14):
             raise ValueError("--start-checkpoint must be a zero-source GW state")
+        previous_V = float(meta["V"])
+        if previous_V > float(V_values[0]) + 1e-12:
+            raise ValueError(
+                f"--start-checkpoint has V={previous_V:g}, which exceeds first requested "
+                f"V={V_values[0]:g}. This driver follows V in ascending order."
+            )
         p0 = RubyParameters(
             ti=float(args.ti), t1=float(args.t1), t2=float(args.t2), V=V_values[0]
         )
         previous, _, _ = load_supercell_checkpoint(
             start_path, p0, grid, float(args.primitive_filling)
         )
-        print(f"warm start: {start_path} (checkpoint V={float(meta['V']):g})")
+        print(f"warm start: {start_path} (checkpoint V={previous_V:g})")
     else:
         print("warm start: none; first V will use the built-in weak-V bootstrap")
 
@@ -437,39 +773,72 @@ def main():
     csv_path = outdir / "r_vs_V.csv"
 
     for iv, V in enumerate(V_values, start=1):
-        params = RubyParameters(
-            ti=float(args.ti),
-            t1=float(args.t1),
-            t2=float(args.t2),
-            V=float(V),
-        )
-        mu0 = float(previous.mu) if previous is not None else 0.0
-        opts = _gw_options(args, mu0, target_N)
+        print(f"\n[{iv}/{len(V_values)}] requested V={V:g}: normal zero-source SC-GW")
+        attempt_start = len(continuation_rows)
 
-        print(f"\n[{iv}/{len(V_values)}] V={V:g}: normal zero-source SC-GW")
-        print("  seed:", "previous V" if previous is not None else "cold/bootstrap")
-        t0 = time.perf_counter()
-        gw = solve_supercell_gw_anderson(
-            params,
-            grid,
-            opts=opts,
-            source_strength=0.0,
-            initial=previous,
-            anderson=AndersonOptions(),
-        )
-        gw_runtime = time.perf_counter() - t0
-        print(
-            f"  GW converged={gw.converged}, it={gw.iterations}, "
-            f"res={gw.final_error:.3e}, mu={gw.mu:.10f}, time={gw_runtime:.1f}s"
-        )
-        if not gw.converged:
-            raise RuntimeError(
-                f"normal SC-GW failed at V={V:g}; residual={gw.final_error:.3e}. "
-                "Do not compute cGW curvature from a nonconverged background."
+        if previous is not None and previous_V is not None and np.isclose(
+            float(previous_V), float(V), atol=1e-12
+        ):
+            gw = previous
+            print("  seed checkpoint is already at this requested V; reuse converged GW state")
+            normal = _normal_diagnostics(gw, grid)
+            breaking = _normal_breaking_scale(normal)
+            if breaking > float(args.normal_threshold):
+                raise RuntimeError(
+                    f"start checkpoint at V={V:g} is not symmetry-preserving: "
+                    f"normal scale={breaking:.3e}"
+                )
+        else:
+            print(
+                "  seed:",
+                "cold/bootstrap" if previous is None else f"converged normal V={previous_V:g}",
             )
+            gw = _advance_normal_branch(
+                args,
+                previous_V,
+                previous,
+                float(V),
+                float(V),
+                target_N,
+                grid,
+                float(args.primitive_filling),
+                bridge_dir,
+                continuation_rows,
+                continuation_log_path,
+                depth=0,
+            )
+            if gw is None:
+                recent = continuation_rows[attempt_start:]
+                best_res = min(
+                    [float(r["residual"]) for r in recent if np.isfinite(r["residual"])],
+                    default=float("nan"),
+                )
+                raise RuntimeError(
+                    f"normal SC-GW continuation failed at requested V={V:g} even after "
+                    f"fresh-history retry and adaptive bridges; best residual={best_res:.3e}. "
+                    f"See {continuation_log_path}."
+                )
+            normal = _normal_diagnostics(gw, grid)
+            breaking = _normal_breaking_scale(normal)
 
-        normal = _normal_diagnostics(gw, grid)
-        breaking = _normal_breaking_scale(normal)
+        recent_attempts = continuation_rows[attempt_start:]
+        gw_runtime = float(sum(float(r["runtime_s"]) for r in recent_attempts))
+        gw_iterations_total = int(
+            sum(int(r["iterations"]) for r in recent_attempts if np.isfinite(r["iterations"]))
+        )
+        bridge_points_used = len(
+            {
+                float(r["solve_V"])
+                for r in recent_attempts
+                if str(r["role"]).startswith("bridge-") and bool(r["accepted_normal"])
+            }
+        )
+
+        print(
+            f"  accepted GW: res={gw.final_error:.3e}, mu={gw.mu:.10f}, "
+            f"continuation attempts={len(recent_attempts)}, bridge points used={bridge_points_used}, "
+            f"continuation time={gw_runtime:.1f}s"
+        )
         print(
             f"  normal diagnostics: Delta_Q={normal['Delta_Q']:.3e}, "
             f"Delta_intra={normal['Delta_intra']:.3e}, Delta_AB={normal['Delta_AB']:+.3e}, "
@@ -478,10 +847,15 @@ def main():
         if breaking > float(args.normal_threshold):
             raise RuntimeError(
                 f"continued background at V={V:g} is no longer symmetry-preserving: "
-                f"max order diagnostic={breaking:.3e} > threshold={args.normal_threshold:.3e}. "
-                "The requested r_+(V), r_-(V) curve is defined on the normal branch."
+                f"max order diagnostic={breaking:.3e} > threshold={args.normal_threshold:.3e}."
             )
 
+        params = RubyParameters(
+            ti=float(args.ti),
+            t1=float(args.t1),
+            t2=float(args.t2),
+            V=float(V),
+        )
         ckpt = checkpoint_dir / checkpoint_filename(
             float(V), float(args.primitive_filling), grid
         )
@@ -493,7 +867,7 @@ def main():
             float(args.primitive_filling),
             source=0.0,
         )
-        print("  checkpoint:", ckpt)
+        print("  requested-point checkpoint:", ckpt)
 
         Vq = build_supercell_interaction(grid.qmesh(), params)
         print(
@@ -523,7 +897,10 @@ def main():
             "mu": float(gw.mu),
             "actual_primitive_filling": float(np.sum(gw.density) / 3.0),
             "gw_converged": bool(gw.converged),
-            "gw_iterations": int(gw.iterations),
+            "gw_iterations_final_attempt": int(gw.iterations),
+            "gw_iterations_continuation_total": int(gw_iterations_total),
+            "gw_continuation_attempts": int(len(recent_attempts)),
+            "gw_bridge_points_used": int(bridge_points_used),
             "gw_residual": float(gw.final_error),
             "gw_runtime_s": float(gw_runtime),
             "vertex_solver": str(args.vertex_solver),
@@ -540,11 +917,13 @@ def main():
         _plot_rows(outdir, rows)
 
         previous = gw
+        previous_V = float(V)
 
     print("\n" + "=" * 110)
     print("SCAN COMPLETE")
     print("=" * 110)
     print("table:", csv_path)
+    print("GW continuation log:", continuation_log_path)
     print("r+/r- plot:", outdir / "r_plus_minus_vs_V.png")
     print("diagnostic r+/r-/rQ plot:", outdir / "r_plus_minus_Q_vs_V.png")
     crossings = outdir / "critical_V_estimates.csv"
@@ -552,7 +931,8 @@ def main():
         print("linear zero-crossing estimates:", crossings)
     else:
         print("linear zero-crossing estimates: none bracketed by the supplied V grid")
-    print("normal GW checkpoints:", checkpoint_dir)
+    print("requested-point normal GW checkpoints:", checkpoint_dir)
+    print("bridge-only normal GW checkpoints:", bridge_dir)
 
 
 if __name__ == "__main__":
