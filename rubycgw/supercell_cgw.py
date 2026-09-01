@@ -17,6 +17,16 @@ interaction W because delta(W-V)=delta W=W (delta P) W.
 All external response momenta in this module are q_sc=0.  Primitive-cell
 q=0,+Q,-Q current harmonics are nevertheless all available because
 Q=(1/3,1/3) folds to q_sc=0 in the index-three supercell.
+
+The vertex equation is linear in Gamma.  The default solver therefore treats
+
+    (I - L) Gamma = K
+
+as a matrix-free linear system and solves it with restarted GMRES.  This is
+important beyond a response instability: the old fixed-point iteration
+Gamma <- K + L Gamma fails whenever the corresponding iteration eigenvalue
+crosses the unit circle even though I-L can still be nonsingular.  A legacy
+linear-mixing solver is retained for diagnostics and regression tests.
 """
 
 from __future__ import annotations
@@ -32,11 +42,16 @@ from .supercell_gw import _reverse_fft_spectrum
 from .supercell_gw_split import compute_static_fock_matrix
 
 
+_VERTEX_SOLVERS = ("gmres", "linear")
+
+
 @dataclass(frozen=True)
 class SupercellVertexOptions:
     max_iter: int = 150
     tol: float = 1e-8
     mixing: float = 0.25
+    solver: str = "gmres"
+    gmres_restart: int = 12
     include_hartree: bool = True
     include_fock: bool = True
     include_mt: bool = True
@@ -56,6 +71,16 @@ class SupercellVertexResult:
     converged: bool
     iterations: int
     final_error: float
+    solver: str = "gmres"
+
+
+def _check_vertex_solver(name: str) -> str:
+    solver = str(name).strip().lower()
+    if solver not in _VERTEX_SOLVERS:
+        raise ValueError(
+            f"unknown vertex solver {name!r}; expected one of {_VERTEX_SOLVERS}"
+        )
+    return solver
 
 
 def _x_field(G: np.ndarray, Gamma: np.ndarray) -> np.ndarray:
@@ -240,6 +265,19 @@ def vertex_corrections_q0(
     return gh, gf, gmt, gal1, gal2
 
 
+def _vertex_kernel_sum(
+    G: np.ndarray,
+    W: np.ndarray,
+    Vq: np.ndarray,
+    Gamma: np.ndarray,
+    grid: MatsubaraGrid,
+    opts: SupercellVertexOptions,
+) -> tuple[np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    parts = vertex_corrections_q0(G, W, Vq, Gamma, grid, opts)
+    total = parts[0] + parts[1] + parts[2] + parts[3] + parts[4]
+    return total, parts
+
+
 def _initial_gamma_field(initial_gamma: np.ndarray | None, Kfield: np.ndarray) -> np.ndarray:
     if initial_gamma is None:
         return Kfield.copy()
@@ -251,6 +289,157 @@ def _initial_gamma_field(initial_gamma: np.ndarray | None, Kfield: np.ndarray) -
     return Kfield.copy()
 
 
+def _maxabs(arr: np.ndarray) -> float:
+    return float(np.max(np.abs(np.asarray(arr))))
+
+
+def _gmres_matrix_free(
+    apply_A,
+    b: np.ndarray,
+    x0: np.ndarray,
+    tol: float,
+    max_iter: int,
+    restart: int,
+    verbose: bool = False,
+) -> tuple[np.ndarray, bool, int, float]:
+    """Restarted complex GMRES for a matrix-free operator.
+
+    ``max_iter`` counts Krylov operator applications, not restart cycles.  The
+    convergence criterion is the *actual max-norm equation residual* evaluated
+    at every restart (and at an Arnoldi happy breakdown), so ``tol`` has the
+    same transparent meaning as the residual printed by the driver.
+
+    The Krylov basis is kept as arrays with the same shape as ``b``; no explicit
+    dense representation of the enormous vertex operator is ever constructed.
+    """
+    if int(max_iter) < 1:
+        raise ValueError("GMRES max_iter must be positive")
+    if int(restart) < 1:
+        raise ValueError("GMRES restart must be positive")
+    if float(tol) <= 0.0:
+        raise ValueError("GMRES tol must be positive")
+
+    b = np.asarray(b, dtype=complex)
+    x = np.asarray(x0, dtype=complex).copy()
+    restart = min(int(restart), int(max_iter))
+    total_it = 0
+
+    r = b - apply_A(x)
+    err = _maxabs(r)
+    if verbose:
+        print(f"supercell cGW GMRES initial: residual_max={err:.3e}")
+    if err < float(tol):
+        return x, True, total_it, err
+
+    # Arnoldi breakdown threshold relative to the norm of each new vector.
+    breakdown_eps = 100.0 * np.finfo(float).eps
+
+    while total_it < int(max_iter):
+        beta = float(np.linalg.norm(r.ravel()))
+        if beta == 0.0:
+            return x, True, total_it, 0.0
+
+        m = min(restart, int(max_iter) - total_it)
+        basis: list[np.ndarray] = [r / beta]
+        H = np.zeros((m + 1, m), dtype=complex)
+        y_last = None
+        used = 0
+        happy_breakdown = False
+
+        for j in range(m):
+            w = np.asarray(apply_A(basis[j]), dtype=complex).copy()
+            total_it += 1
+
+            # Twice-modified Gram-Schmidt is materially more robust for the
+            # strongly non-normal vertex kernels encountered near an instability.
+            for _ in range(2):
+                for i in range(j + 1):
+                    hij = np.vdot(basis[i].ravel(), w.ravel())
+                    H[i, j] += hij
+                    w -= hij * basis[i]
+
+            hnext = float(np.linalg.norm(w.ravel()))
+            H[j + 1, j] = hnext
+            used = j + 1
+
+            small_rhs = np.zeros(used + 1, dtype=complex)
+            small_rhs[0] = beta
+            Hused = H[: used + 1, :used]
+            y_last, *_ = np.linalg.lstsq(Hused, small_rhs, rcond=None)
+            est_l2 = float(np.linalg.norm(small_rhs - Hused @ y_last))
+            est_rms = est_l2 / np.sqrt(float(b.size))
+            if verbose:
+                print(
+                    f"supercell cGW GMRES iter {total_it:4d}: "
+                    f"estimated_residual_rms={est_rms:.3e}, "
+                    f"restart={restart}"
+                )
+
+            ref_scale = max(float(np.linalg.norm(apply_A(basis[j]).ravel())), 1.0)
+            if hnext <= breakdown_eps * ref_scale:
+                happy_breakdown = True
+                break
+            basis.append(w / hnext)
+
+        if used == 0 or y_last is None:
+            break
+
+        dx = np.zeros_like(x)
+        for i in range(used):
+            dx += y_last[i] * basis[i]
+        x += dx
+
+        r = b - apply_A(x)
+        err = _maxabs(r)
+        if verbose:
+            tag = "happy-breakdown" if happy_breakdown else "restart"
+            print(
+                f"supercell cGW GMRES {tag}: total_it={total_it}, "
+                f"residual_max={err:.3e}"
+            )
+        if err < float(tol):
+            return x, True, total_it, err
+
+        if happy_breakdown:
+            # Arnoldi found an invariant subspace but the exact max-norm residual
+            # is still above tolerance.  Restarting from that residual is safer
+            # than falsely declaring convergence.
+            if not np.all(np.isfinite(r)):
+                break
+
+    return x, False, total_it, float(err)
+
+
+def _solve_vertex_linear(
+    G: np.ndarray,
+    W: np.ndarray,
+    Vq: np.ndarray,
+    Kfield: np.ndarray,
+    Gamma0: np.ndarray,
+    grid: MatsubaraGrid,
+    opts: SupercellVertexOptions,
+) -> tuple[np.ndarray, bool, int, float]:
+    """Legacy damped fixed-point iteration, retained for diagnostics."""
+    Gamma = np.asarray(Gamma0, dtype=complex).copy()
+    converged = False
+    err = float("inf")
+    it = 0
+    for it in range(1, int(opts.max_iter) + 1):
+        kernel, _ = _vertex_kernel_sum(G, W, Vq, Gamma, grid, opts)
+        equation_residual = Kfield + kernel - Gamma
+        err = _maxabs(equation_residual)
+        if opts.verbose:
+            print(
+                f"supercell cGW linear vertex iter {it:4d}: "
+                f"residual_max={err:.3e}, backend={opts.momentum_backend}"
+            )
+        if err < float(opts.tol):
+            converged = True
+            break
+        Gamma += float(opts.mixing) * equation_residual
+    return Gamma, converged, it, float(err)
+
+
 def solve_vertex_q0(
     G: np.ndarray,
     W: np.ndarray,
@@ -260,7 +449,15 @@ def solve_vertex_q0(
     opts: SupercellVertexOptions = SupercellVertexOptions(),
     initial_gamma: np.ndarray | None = None,
 ) -> SupercellVertexResult:
-    """Solve one q_sc=0 current vertex on an arbitrary matrix dimension."""
+    """Solve one q_sc=0 current vertex on an arbitrary matrix dimension.
+
+    The default ``solver='gmres'`` solves the linear equation
+
+        [I - L] Gamma = K
+
+    directly with restarted matrix-free GMRES.  ``solver='linear'`` reproduces
+    the old damped fixed-point strategy and is mainly useful as a diagnostic.
+    """
     norb = int(G.shape[-1])
     if K.shape != (norb, norb):
         raise ValueError(f"K shape {K.shape} != {(norb, norb)}")
@@ -269,32 +466,36 @@ def solve_vertex_q0(
     if W.shape != (grid.nb, grid.nk1, grid.nk2, norb, norb):
         raise ValueError("unexpected W shape")
 
+    solver = _check_vertex_solver(opts.solver)
     Kfield = np.broadcast_to(K, G.shape).copy()
-    Gamma = _initial_gamma_field(initial_gamma, Kfield)
-    gh = np.zeros_like(Gamma)
-    gf = np.zeros_like(Gamma)
-    gmt = np.zeros_like(Gamma)
-    gal1 = np.zeros_like(Gamma)
-    gal2 = np.zeros_like(Gamma)
-    converged = False
-    err = float("inf")
+    Gamma0 = _initial_gamma_field(initial_gamma, Kfield)
 
-    for it in range(1, int(opts.max_iter) + 1):
-        gh, gf, gmt, gal1, gal2 = vertex_corrections_q0(
-            G, W, Vq, Gamma, grid, opts
+    if solver == "gmres":
+        def apply_A(field):
+            kernel, _ = _vertex_kernel_sum(G, W, Vq, field, grid, opts)
+            return np.asarray(field, dtype=complex) - kernel
+
+        Gamma, converged, it, err = _gmres_matrix_free(
+            apply_A,
+            Kfield,
+            Gamma0,
+            tol=float(opts.tol),
+            max_iter=int(opts.max_iter),
+            restart=int(opts.gmres_restart),
+            verbose=bool(opts.verbose),
         )
-        rhs = Kfield + gh + gf + gmt + gal1 + gal2
-        Gnew = (1.0 - float(opts.mixing)) * Gamma + float(opts.mixing) * rhs
-        err = float(np.max(np.abs(Gnew - Gamma)))
-        Gamma = Gnew
-        if opts.verbose:
-            print(
-                f"supercell cGW vertex iter {it:4d}: err={err:.3e}, "
-                f"backend={opts.momentum_backend}"
-            )
-        if err < float(opts.tol):
-            converged = True
-            break
+    else:
+        Gamma, converged, it, err = _solve_vertex_linear(
+            G, W, Vq, Kfield, Gamma0, grid, opts
+        )
+
+    # Re-evaluate the decomposed corrections once at the final Gamma.  Besides
+    # populating diagnostics, this provides an independent exact equation
+    # residual rather than relying on a Krylov residual estimate.
+    kernel, parts = _vertex_kernel_sum(G, W, Vq, Gamma, grid, opts)
+    gh, gf, gmt, gal1, gal2 = parts
+    err = _maxabs(Kfield + kernel - Gamma)
+    converged = bool(np.isfinite(err) and err < float(opts.tol))
 
     return SupercellVertexResult(
         Gamma=Gamma,
@@ -304,8 +505,9 @@ def solve_vertex_q0(
         Gamma_AL1=gal1,
         Gamma_AL2=gal2,
         converged=converged,
-        iterations=it,
+        iterations=int(it),
         final_error=float(err),
+        solver=solver,
     )
 
 
