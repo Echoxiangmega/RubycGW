@@ -5,19 +5,18 @@ The default branch set is
 
     normal    no explicit source
     co        selected period-3 Q=(1/3,1/3) charge source, then h -> 0
-    intra-a   q=0 C3-breaking charge source on triangle A, then h -> 0
-    intra-b   q=0 C3-breaking charge source on triangle B, then h -> 0
+    intra     joint q=0 C3-breaking charge source on triangles A and B, then h -> 0
     ab        q=0 A-versus-B triangle charge-transfer source, then h -> 0
     same      physical-same uniform loop-current source, then h_eta -> 0
     opposite  physical-opposite uniform loop-current source, then h_eta -> 0
 
 The q=0 charge seeds are repeated identically in all three primitive sectors of
-the 18-site supercell.  ``intra-a`` uses the primitive pattern
-``(1,-1/2,-1/2,0,0,0)``, ``intra-b`` uses
-``(0,0,0,1,-1/2,-1/2)``, and ``ab`` uses
-``(1,1,1,-1,-1,-1)``.  Other C3-related orientations are symmetry-equivalent
-seed choices; after the source is removed the self-consistent solution is not
-constrained to keep only the seeded component.
+the 18-site supercell.  ``intra`` uses the primitive pattern
+``(1,-1/2,-1/2,1,-1/2,-1/2)`` so A and B triangle distortions are seeded
+together, while ``ab`` uses ``(1,1,1,-1,-1,-1)``.  Other C3-related
+orientations are symmetry-equivalent seed choices; after the source is removed
+the self-consistent solution is not constrained to keep only the seeded
+component.
 
 By default the script solves the full split-GW equations.  The selected period-3
 ``co`` branch starts from the input checkpoint, while normal/q=0-charge/LC
@@ -43,8 +42,14 @@ Phi.  Every converged point reports:
     Phi                    selected Q form-factor projection
     Delta_Q                generic period-three translation breaking
     Delta_translation_rms  sector-to-sector density RMS
-    Delta_A, Delta_B       q=0 intra-triangle charge disproportionation
+    Delta_intra            combined q=0 intra-triangle charge amplitude
+    Delta_A, Delta_B       triangle-resolved components for inspection
     Delta_AB               q=0 mean A-minus-B triangle charge imbalance
+
+For phase classification Delta_A and Delta_B are grouped into a single
+``intra-CO`` class through
+
+    Delta_intra = sqrt((Delta_A^2 + Delta_B^2)/2).
 
 Thus Phi=0 is not interpreted as absence of charge order.
 
@@ -92,7 +97,7 @@ from rubycgw.supercell_hf import (
 )
 
 
-CHARGE_BRANCHES = ("co", "intra-a", "intra-b", "ab")
+CHARGE_BRANCHES = ("co", "intra", "ab")
 CURRENT_BRANCHES = ("same", "opposite")
 DEFAULT_BRANCHES = ("normal",) + CHARGE_BRANCHES + CURRENT_BRANCHES
 
@@ -123,9 +128,7 @@ def _parse_args():
         nargs="+",
         choices=list(DEFAULT_BRANCHES),
         default=list(DEFAULT_BRANCHES),
-        help=(
-            "Branches to search. Default: normal co intra-a intra-b ab same opposite."
-        ),
+        help="Branches to search. Default: normal co intra ab same opposite.",
     )
     p.add_argument(
         "--charge-source-sequence",
@@ -135,7 +138,7 @@ def _parse_args():
         type=float,
         default=[0.10, 0.05, 0.02, 0.01, 0.005, 0.001, 0.0],
         help=(
-            "Temporary source ladder for co/intra-a/intra-b/ab charge branches. "
+            "Temporary source ladder for co/intra/ab charge branches. "
             "--co-source-sequence is retained as a backward-compatible alias."
         ),
     )
@@ -171,9 +174,9 @@ def _parse_args():
         type=float,
         default=1e-6,
         help=(
-            "Common threshold for generic charge amplitudes Delta_Q/Delta_A/Delta_B/|Delta_AB| "
-            "and for per-primitive-cell current amplitudes. Phi is reported but is not used alone "
-            "to decide whether charge order exists."
+            "Common threshold for generic charge amplitudes Delta_Q/Delta_intra/|Delta_AB| "
+            "and for per-primitive-cell current amplitudes. Delta_A/Delta_B are kept only "
+            "as triangle-resolved diagnostics; Phi is reported separately."
         ),
     )
     p.add_argument("--outdir", type=str, default=None)
@@ -206,7 +209,7 @@ def _branch_h0(
     grid: MatsubaraGrid,
 ) -> np.ndarray:
     # params/grid stay in the signature for backward compatibility with tests and
-    # older helper code.  All source Hamiltonians are generated from base_h0 so
+    # older helper code. All source Hamiltonians are generated from base_h0 so
     # every branch uses exactly the same one-body Ruby model.
     del params, grid
     if branch in CHARGE_BRANCHES:
@@ -234,10 +237,8 @@ def _classify(charge: dict[str, object], currents: dict[str, complex], threshold
     pieces: list[str] = []
     if float(charge["Delta_Q"]) > threshold:
         pieces.append("Q-CO")
-    if float(charge["Delta_A"]) > threshold:
-        pieces.append("intra-A-CO")
-    if float(charge["Delta_B"]) > threshold:
-        pieces.append("intra-B-CO")
+    if float(charge["Delta_intra"]) > threshold:
+        pieces.append("intra-CO")
     if abs(float(charge["Delta_AB"])) > threshold:
         pieces.append("AB-CO")
 
@@ -254,6 +255,7 @@ def _charge_fields(charge: dict[str, object]) -> dict[str, float]:
         "Phi_abs": float(abs(phi)),
         "Delta_Q": float(charge["Delta_Q"]),
         "Delta_translation_rms": float(charge["Delta_translation_rms"]),
+        "Delta_intra": float(charge["Delta_intra"]),
         "Delta_A": float(charge["Delta_A"]),
         "Delta_B": float(charge["Delta_B"]),
         "Delta_AB": float(charge["Delta_AB"]),
@@ -295,6 +297,7 @@ def _failed_endpoint_row(branch: str, method: str) -> dict:
         "Phi_abs": np.nan,
         "Delta_Q": np.nan,
         "Delta_translation_rms": np.nan,
+        "Delta_intra": np.nan,
         "Delta_A": np.nan,
         "Delta_B": np.nan,
         "Delta_AB": np.nan,
@@ -309,12 +312,18 @@ def _failed_endpoint_row(branch: str, method: str) -> dict:
     }
 
 
-def _print_point(prefix: str, charge: dict[str, object], m_same_pc: complex, m_opp_pc: complex, state: str) -> None:
+def _print_point(
+    prefix: str,
+    charge: dict[str, object],
+    m_same_pc: complex,
+    m_opp_pc: complex,
+    state: str,
+) -> None:
     print(
         f"{prefix}|Phi|={abs(complex(charge['Phi'])):.3e}, "
         f"Delta_Q={float(charge['Delta_Q']):.3e}, "
-        f"Delta_A={float(charge['Delta_A']):.3e}, "
-        f"Delta_B={float(charge['Delta_B']):.3e}, "
+        f"Delta_intra={float(charge['Delta_intra']):.3e} "
+        f"(A={float(charge['Delta_A']):.3e}, B={float(charge['Delta_B']):.3e}), "
         f"Delta_AB={float(charge['Delta_AB']):+.3e}, "
         f"|m_same|/pc={abs(m_same_pc):.3e}, "
         f"|m_opp|/pc={abs(m_opp_pc):.3e}, state={state}"
@@ -360,7 +369,7 @@ def main():
     )
     target_N = 3.0 * primitive_filling
 
-    # HF-only mode deliberately does not load checkpoint self-energies.  Full GW
+    # HF-only mode deliberately does not load checkpoint self-energies. Full GW
     # mode requires strict checkpoint compatibility and rejects legacy interaction data.
     if args.hf_only:
         seed_original = None
@@ -406,8 +415,8 @@ def main():
         print(
             f"input |Phi|={abs(complex(input_charge['Phi'])):.3e}, "
             f"Delta_Q={float(input_charge['Delta_Q']):.3e}, "
-            f"Delta_A={float(input_charge['Delta_A']):.3e}, "
-            f"Delta_B={float(input_charge['Delta_B']):.3e}, "
+            f"Delta_intra={float(input_charge['Delta_intra']):.3e} "
+            f"(A={float(input_charge['Delta_A']):.3e}, B={float(input_charge['Delta_B']):.3e}), "
             f"Delta_AB={float(input_charge['Delta_AB']):+.3e}; "
             "normal/q0-charge/LC seeds use primitive-translation projection, "
             "selected Q-CO seed keeps the original state"
@@ -688,13 +697,14 @@ def main():
         for rank, row in enumerate(valid_sorted, start=1):
             print(
                 f"#{rank} {row['method']:<2s} seed={row['seed_branch']:<8s} "
-                f"-> {row['classification']:<32s} "
+                f"-> {row['classification']:<28s} "
                 f"F/pc={row['F_per_primitive_cell']:+.12e}  "
                 f"DeltaF/pc={row['DeltaF_per_primitive_cell']:+.6e}"
             )
             print(
                 f"    |Phi|={row['Phi_abs']:.3e}  Delta_Q={row['Delta_Q']:.3e}  "
-                f"Delta_A={row['Delta_A']:.3e}  Delta_B={row['Delta_B']:.3e}  "
+                f"Delta_intra={row['Delta_intra']:.3e} "
+                f"(A={row['Delta_A']:.3e}, B={row['Delta_B']:.3e})  "
                 f"Delta_AB={row['Delta_AB']:+.3e}  "
                 f"|m_same|/pc={row['m_same_pc_abs']:.3e}  "
                 f"|m_opp|/pc={row['m_opposite_pc_abs']:.3e}"
