@@ -13,10 +13,16 @@ Charge diagnostics distinguish:
 
 * the previously selected period-three projection Phi;
 * generic period-three translation breaking Delta_Q, independent of form factor;
-* q=0 intra-triangle charge disproportionation Delta_A and Delta_B;
+* a combined q=0 intra-triangle charge amplitude Delta_intra;
+* triangle-resolved components Delta_A and Delta_B for inspection only;
 * q=0 mean charge imbalance Delta_AB between the two triangles.
 
-Thus Phi=0 by itself is no longer interpreted as absence of charge order.
+Thus Phi=0 by itself is no longer interpreted as absence of charge order.  For
+phase classification Delta_A and Delta_B are grouped into one ``q0 intra CO``
+class through
+
+    Delta_intra = sqrt((Delta_A^2 + Delta_B^2)/2).
+
 No cGW vertex solve is performed: these are one-point expectation values of the
 converged GW state.
 
@@ -62,8 +68,9 @@ def _parse_args():
         type=float,
         default=1e-6,
         help=(
-            "Charge-order threshold applied to Delta_Q, Delta_A, Delta_B and |Delta_AB|. "
-            "The selected |Phi| is reported separately."
+            "Charge-order threshold applied to Delta_Q, Delta_intra and |Delta_AB|. "
+            "Delta_A/Delta_B are printed as triangle-resolved components only; "
+            "the selected |Phi| is reported separately."
         ),
     )
     return p.parse_args()
@@ -138,6 +145,7 @@ def main():
     phi = complex(charge["Phi"])
     delta_Q = float(charge["Delta_Q"])
     delta_trans = float(charge["Delta_translation_rms"])
+    delta_intra = float(charge["Delta_intra"])
     delta_A = float(charge["Delta_A"])
     delta_B = float(charge["Delta_B"])
     delta_AB = float(charge["Delta_AB"])
@@ -165,8 +173,9 @@ def main():
     )
     print(f"  Delta_Q                 = {delta_Q:.12e}   (generic period-3 translation breaking)")
     print(f"  Delta_translation_rms   = {delta_trans:.12e}")
-    print(f"  Delta_A                 = {delta_A:.12e}   (q=0 internal CO on triangle A: sites 0,1,2)")
-    print(f"  Delta_B                 = {delta_B:.12e}   (q=0 internal CO on triangle B: sites 3,4,5)")
+    print(f"  Delta_intra             = {delta_intra:.12e}   (combined q=0 intra-triangle CO)")
+    print(f"    Delta_A component     = {delta_A:.12e}   (triangle A: sites 0,1,2)")
+    print(f"    Delta_B component     = {delta_B:.12e}   (triangle B: sites 3,4,5)")
     print(f"  Delta_AB                = {delta_AB:+.12e}   (mean A density - mean B density)")
     print("  n_q0[a] (sector-averaged primitive-cell densities):")
     print("    " + "  ".join(f"a{a}={x:.10f}" for a, x in enumerate(n_q0)))
@@ -203,8 +212,7 @@ def main():
 
     cthr = float(args.co_threshold)
     has_Q = delta_Q > cthr
-    has_A = delta_A > cthr
-    has_B = delta_B > cthr
+    has_intra = delta_intra > cthr
     has_AB = abs(delta_AB) > cthr
     selected_phi = abs(phi) > cthr
     has_same = abs(m_same_pc) > float(args.current_threshold)
@@ -213,10 +221,8 @@ def main():
     charge_labels = []
     if has_Q:
         charge_labels.append("period-3 Q-CO")
-    if has_A:
-        charge_labels.append("q0 intra-A CO")
-    if has_B:
-        charge_labels.append("q0 intra-B CO")
+    if has_intra:
+        charge_labels.append("q0 intra-triangle CO")
     if has_AB:
         charge_labels.append("q0 A/B imbalance")
 
@@ -234,7 +240,7 @@ def main():
         "(reported as a form-factor diagnostic, not used alone to decide whether charge order exists)"
     )
     print(
-        f"thresholds: charge amplitudes>{cthr:.1e}, "
+        f"thresholds: Delta_Q/Delta_intra/|Delta_AB|>{cthr:.1e}, "
         f"|m|/primitive-cell>{float(args.current_threshold):.1e}"
     )
     print("=" * 108)
