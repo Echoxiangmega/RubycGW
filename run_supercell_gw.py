@@ -9,14 +9,18 @@ Optimizations used by default:
    of being handed immediately to ordinary linear mixing;
 5. expensive fallback attempts have their own bounded iteration budget;
 6. failed-but-finite retries always continue from the best state reached;
-7. auto restart preloads the two nearest compatible zero-source checkpoints so
-   the first new V point can already use a secant predictor;
-8. strong-coupling continuation is automatically densified to avoid large V jumps;
-9. an optional diagnostic-only mode resolves the structure of a slow GW residual
-   without adding any extra GW fixed-point map evaluations.
+7. auto restart preloads the two nearest compatible converged zero-source
+   checkpoints so the first new V point can already use a secant predictor;
+8. a finite failed zero-source state is checkpointed too, but is eligible for
+   automatic restart only when the requested V is exactly the same;
+9. strong-coupling continuation is automatically densified to avoid large V jumps;
+10. an optional diagnostic-only mode resolves the structure of a slow GW residual
+    without adding any extra GW fixed-point map evaluations.
 
-Every converged zero-source state is checkpointed by default.  Use
-``--restart-from auto`` to continue from the nearest compatible checkpoints.
+Zero-source states are checkpointed by default.  Converged checkpoints may seed
+continuation to a different V.  Nonconverged checkpoints are marked explicitly
+and are same-V resume states only.  ``--restart-from auto`` implements this
+policy; use ``--restart-from none`` for a deliberately fresh run.
 """
 
 from __future__ import annotations
@@ -37,9 +41,11 @@ import numpy as np
 from rubycgw.checkpoint import (
     GWCheckpointSeed,
     checkpoint_filename,
+    find_exact_compatible_checkpoint,
     find_nearest_compatible_checkpoint,
     find_recent_compatible_checkpoints,
     load_supercell_checkpoint,
+    read_checkpoint_metadata,
     save_supercell_checkpoint,
 )
 from rubycgw.grids import MatsubaraGrid
@@ -789,8 +795,12 @@ def _parse_args():
     p.add_argument(
         "--restart-from",
         type=str,
-        default=None,
-        help="Checkpoint .npz path, or 'auto' for nearest compatible V<=target.",
+        default="auto",
+        help=(
+            "Checkpoint .npz path, 'auto' (default), or 'none'. Auto resumes a "
+            "nonconverged checkpoint only at exactly the same V; for a larger V it "
+            "ignores failed checkpoints and uses converged continuation states only."
+        ),
     )
     p.add_argument(
         "--checkpoint-dir",
@@ -864,22 +874,71 @@ def main():
         ti=args.ti, t1=args.t1, t2=args.t2, V=float(args.V)
     )
 
-    if args.restart_from is not None:
-        if args.restart_from.lower() == "auto":
-            restart_history_paths = find_recent_compatible_checkpoints(
+    restart_request = None if args.restart_from is None else args.restart_from.strip()
+    restart_enabled = (
+        restart_request is not None
+        and restart_request.lower() not in {"none", "off", "false"}
+    )
+
+    if restart_enabled:
+        if restart_request.lower() == "auto":
+            exact_path = find_exact_compatible_checkpoint(
                 checkpoint_dir,
                 args.V,
                 compatibility_params,
                 grid,
                 args.primitive_filling,
-                limit=2,
+                allow_nonconverged=True,
             )
-            restart_path = restart_history_paths[-1] if restart_history_paths else None
-            if restart_path is None:
-                print("No compatible checkpoint found; using ordinary V ramp.")
+            if exact_path is not None:
+                exact_meta = read_checkpoint_metadata(exact_path)
+                restart_path = exact_path
+                if bool(exact_meta.get("converged", False)):
+                    restart_history_paths = find_recent_compatible_checkpoints(
+                        checkpoint_dir,
+                        args.V,
+                        compatibility_params,
+                        grid,
+                        args.primitive_filling,
+                        limit=2,
+                    )
+                    if restart_path not in restart_history_paths:
+                        restart_history_paths.append(restart_path)
+                else:
+                    restart_history_paths = [restart_path]
+                    print(
+                        "Auto restart found an exact-V nonconverged checkpoint; "
+                        "resuming the same V from that state."
+                    )
+            else:
+                restart_history_paths = find_recent_compatible_checkpoints(
+                    checkpoint_dir,
+                    args.V,
+                    compatibility_params,
+                    grid,
+                    args.primitive_filling,
+                    limit=2,
+                )
+                restart_path = restart_history_paths[-1] if restart_history_paths else None
+                if restart_path is None:
+                    print("No compatible checkpoint found; using ordinary V ramp.")
         else:
-            restart_path = Path(args.restart_from)
-            restart_history_paths = [restart_path]
+            candidate = Path(restart_request)
+            candidate_meta = read_checkpoint_metadata(candidate)
+            candidate_converged = bool(candidate_meta.get("converged", False))
+            candidate_V = float(candidate_meta.get("V", np.nan))
+            if (
+                not candidate_converged
+                and not np.isclose(candidate_V, float(args.V), rtol=0.0, atol=1e-10)
+            ):
+                print(
+                    f"Ignoring explicit nonconverged checkpoint at V={candidate_V:g} "
+                    f"because requested V={args.V:g}. Failed checkpoints are same-V "
+                    "resume states only."
+                )
+            else:
+                restart_path = candidate
+                restart_history_paths = [restart_path]
 
         if restart_path is not None:
             if len(restart_history_paths) >= 2:
@@ -890,16 +949,17 @@ def main():
                     grid,
                     args.primitive_filling,
                 )
-                older_phi = complex(
-                    float(older_meta.get("charge_order_re", 0.0)),
-                    float(older_meta.get("charge_order_im", 0.0)),
-                )
-                _update_zero_history(
-                    zero_history,
-                    float(older_meta["V"]),
-                    older_seed,
-                    phi=older_phi,
-                )
+                if bool(older_meta.get("converged", False)):
+                    older_phi = complex(
+                        float(older_meta.get("charge_order_re", 0.0)),
+                        float(older_meta.get("charge_order_im", 0.0)),
+                    )
+                    _update_zero_history(
+                        zero_history,
+                        float(older_meta["V"]),
+                        older_seed,
+                        phi=older_phi,
+                    )
 
             previous, restart_meta, _ = load_supercell_checkpoint(
                 restart_path,
@@ -909,13 +969,14 @@ def main():
             )
             mu_guess = float(previous.mu)
             restart_V = float(restart_meta["V"])
-            restart_phi = complex(
-                float(restart_meta.get("charge_order_re", 0.0)),
-                float(restart_meta.get("charge_order_im", 0.0)),
-            )
-            _update_zero_history(
-                zero_history, restart_V, previous, phi=restart_phi
-            )
+            if bool(restart_meta.get("converged", False)):
+                restart_phi = complex(
+                    float(restart_meta.get("charge_order_re", 0.0)),
+                    float(restart_meta.get("charge_order_im", 0.0)),
+                )
+                _update_zero_history(
+                    zero_history, restart_V, previous, phi=restart_phi
+                )
             previous_point_V = restart_V
             previous_point_source = 0.0
 
@@ -947,7 +1008,10 @@ def main():
 
         if (
             np.isclose(restart_V, args.V)
-            and float(restart_meta.get("final_error", np.inf)) > args.gw_tol
+            and (
+                not bool(restart_meta.get("converged", False))
+                or float(restart_meta.get("final_error", np.inf)) > args.gw_tol
+            )
             and not schedule
         ):
             schedule = [float(args.V)]
@@ -1006,9 +1070,10 @@ def main():
         f"{args.strong_v_max_step:g} for V>={args.strong_v_onset:g}"
     )
     if restart_meta is not None:
+        status = "converged" if bool(restart_meta.get("converged", False)) else "NONCONVERGED"
         print(
             f"restart: {restart_path} "
-            f"(V={float(restart_meta['V']):g}, "
+            f"(V={float(restart_meta['V']):g}, status={status}, "
             f"err={float(restart_meta.get('final_error', np.nan)):.2e}, "
             f"|Phi|={float(restart_meta.get('charge_order_abs', 0.0)):.3e})"
         )
@@ -1149,6 +1214,41 @@ def main():
                         f"\n{label}: best state reached residual={gw.final_error:.3e}, "
                         f"requested tol={tol:.3e}."
                     )
+                    if (
+                        np.isclose(source, 0.0)
+                        and not args.no_checkpoints
+                        and _finite_gw_state(gw)
+                    ):
+                        ckpt = checkpoint_dir / checkpoint_filename(
+                            V, args.primitive_filling, grid
+                        )
+                        preserve_existing = False
+                        if ckpt.exists():
+                            try:
+                                old_meta = read_checkpoint_metadata(ckpt)
+                                preserve_existing = bool(old_meta.get("converged", False))
+                            except Exception:
+                                preserve_existing = False
+                        if preserve_existing:
+                            print(
+                                "  existing converged checkpoint preserved; failed state "
+                                "was not allowed to overwrite it:",
+                                ckpt,
+                            )
+                        else:
+                            save_supercell_checkpoint(
+                                ckpt,
+                                gw,
+                                params,
+                                grid,
+                                args.primitive_filling,
+                                source=0.0,
+                                allow_nonconverged=True,
+                            )
+                            print(
+                                "  NONCONVERGED checkpoint (same-V resume only):",
+                                ckpt,
+                            )
                 else:
                     print(
                         "\nSTOP: all GW attempts failed at "
