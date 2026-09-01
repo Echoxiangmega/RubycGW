@@ -129,13 +129,14 @@ def charge_source_pattern(channel: str) -> np.ndarray:
     ``co``
         The selected Q=(1/3,1/3) period-three pattern already used by the
         supercell calculation.
-    ``intra-a``
-        A q=0 C3-breaking field on triangle A.  In each primitive cell the
-        six-site pattern is ``(1,-1/2,-1/2,0,0,0)``.  The two other C3-related
-        orientations are symmetry-equivalent seeds.
-    ``intra-b``
-        The analogous q=0 C3-breaking field on triangle B,
-        ``(0,0,0,1,-1/2,-1/2)``.
+    ``intra``
+        A joint q=0 C3-breaking field on both triangles.  In each primitive
+        cell the six-site pattern is ``(1,-1/2,-1/2,1,-1/2,-1/2)``.  This is
+        the default intra-unit-cell charge seed because Delta_A and Delta_B are
+        typically induced together in the self-consistent solutions.
+    ``intra-a`` / ``intra-b``
+        Legacy one-triangle probe fields retained for diagnostics/backward
+        compatibility.  They are no longer separate default search branches.
     ``ab``
         A q=0 A-versus-B charge-transfer field,
         ``(1,1,1,-1,-1,-1)``.
@@ -148,6 +149,9 @@ def charge_source_pattern(channel: str) -> np.ndarray:
     channel = str(channel).lower()
     if channel == "co":
         pattern = period3_real_pattern()
+    elif channel == "intra":
+        p6 = np.array([1.0, -0.5, -0.5, 1.0, -0.5, -0.5], dtype=float)
+        pattern = np.tile(p6, NSECTOR)
     elif channel == "intra-a":
         p6 = np.array([1.0, -0.5, -0.5, 0.0, 0.0, 0.0], dtype=float)
         pattern = np.tile(p6, NSECTOR)
@@ -159,7 +163,7 @@ def charge_source_pattern(channel: str) -> np.ndarray:
         pattern = np.tile(p6, NSECTOR)
     else:
         raise ValueError(
-            f"unknown charge source channel {channel!r}; expected co, intra-a, intra-b, or ab"
+            f"unknown charge source channel {channel!r}; expected co, intra, intra-a, intra-b, or ab"
         )
 
     pattern = np.asarray(pattern, dtype=float).reshape(NSUP)
@@ -231,8 +235,16 @@ def charge_order_diagnostics(density: np.ndarray) -> dict[str, object]:
         RMS density difference between the three primitive-cell sectors after
         removing ``n_q0``.  For this three-sector real-density decomposition it
         equals ``Delta_Q/sqrt(3)`` up to roundoff.
+    ``Delta_intra``
+        Combined q=0 intra-triangle charge-disproportionation amplitude,
+
+            sqrt((Delta_A^2 + Delta_B^2)/2).
+
+        It is invariant under exchanging A and B and equals the common triangle
+        amplitude when Delta_A=Delta_B.  This is the quantity used for phase
+        classification.
     ``Delta_A`` / ``Delta_B``
-        q=0 intra-triangle disproportionation.  For A, for example,
+        Triangle-resolved components retained for detailed inspection.  For A,
 
             sqrt(((n0-n1)^2 + (n1-n2)^2 + (n2-n0)^2)/2).
 
@@ -274,12 +286,14 @@ def charge_order_diagnostics(density: np.ndarray) -> dict[str, object]:
             )
         )
     )
+    delta_intra = float(np.sqrt(0.5 * (delta_A**2 + delta_B**2)))
     delta_AB = float(np.mean(A) - np.mean(B))
 
     return {
         "Phi": charge_order_parameter(n.reshape(NSUP)),
         "Delta_Q": delta_Q,
         "Delta_translation_rms": translation_rms,
+        "Delta_intra": delta_intra,
         "Delta_A": delta_A,
         "Delta_B": delta_B,
         "Delta_AB": delta_AB,
