@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 """Scan normal-state cGW loop-current curvatures versus interaction V.
 
-This driver is intentionally separate from ``search_supercell_branches.py``.
-Its purpose is not to find the lowest broken-symmetry basin.  Instead it follows
-one zero-source, symmetry-preserving 18-site SC-GW branch at fixed primitive-cell
-filling and evaluates the cGW current response at every requested V.
+The scan follows one zero-source, symmetry-preserving 18-site SC-GW branch at
+fixed primitive-cell filling and evaluates the cGW current response at every V.
 
 Project conventions:
 
     r_+ = physical-opposite uniform q=0 loop-current curvature
     r_- = physical-same     uniform q=0 loop-current curvature
 
-The 18-site response also contains primitive Q=(1/3,1/3), which folds to
-q_sc=0.  The minimum curvature in the four-dimensional Q-current subspace is
-saved as ``r_Q_min`` so a finite-Q instability is not missed while plotting
-r_+(V) and r_-(V).
+The finite-Q minimum curvature is also saved as ``r_Q_min``.  The V grid is
+constructed automatically as ``np.linspace(V_start, V_stop, V_num)``.
 
 A true cold start is allowed.  The first V uses the existing weak-V SC-GW
 bootstrap when no ``--start-checkpoint`` is supplied; later V points use the
@@ -47,10 +43,7 @@ from rubycgw.grids import MatsubaraGrid
 from rubycgw.gw import GWOptions
 from rubycgw.lc_branch import current_diagnostics
 from rubycgw.model import RubyParameters
-from rubycgw.supercell import (
-    build_supercell_interaction,
-    charge_order_diagnostics,
-)
+from rubycgw.supercell import build_supercell_interaction, charge_order_diagnostics
 from rubycgw.supercell_cgw import (
     SupercellVertexOptions,
     curvature_from_susceptibility,
@@ -58,10 +51,7 @@ from rubycgw.supercell_cgw import (
     supercell_current_vertices,
     susceptibility_matrix_q0,
 )
-from rubycgw.supercell_gw_bootstrap import (
-    AndersonOptions,
-    solve_supercell_gw_anderson,
-)
+from rubycgw.supercell_gw_bootstrap import AndersonOptions, solve_supercell_gw_anderson
 
 
 Q_HARMONIC_INDICES = np.array([1, 2, 4, 5], dtype=int)
@@ -71,11 +61,22 @@ def _parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--primitive-filling", type=float, default=3.0)
     p.add_argument(
-        "--V-values",
-        nargs="+",
+        "--V-start",
         type=float,
         required=True,
-        help="Interaction values. They are deduplicated and scanned in ascending order.",
+        help="First interaction value in the scan.",
+    )
+    p.add_argument(
+        "--V-stop",
+        type=float,
+        required=True,
+        help="Last interaction value in the scan (included).",
+    )
+    p.add_argument(
+        "--V-num",
+        type=int,
+        required=True,
+        help="Number of equally spaced V points, including both endpoints.",
     )
     p.add_argument("--T", type=float, default=0.08)
     p.add_argument("--ti", type=float, default=0.4)
@@ -126,8 +127,7 @@ def _parse_args():
         default=1e-6,
         help=(
             "Abort if the continued background develops charge order or a uniform "
-            "loop current larger than this per primitive cell. The r(V) scan is "
-            "defined on the symmetric zero-current branch."
+            "loop current larger than this per primitive cell."
         ),
     )
     p.add_argument(
@@ -148,15 +148,23 @@ def _parse_args():
     return p.parse_args()
 
 
-def _prepare_v_values(values: list[float]) -> list[float]:
-    arr = np.asarray(values, dtype=float)
-    if arr.size == 0:
-        raise ValueError("at least one V value is required")
-    if not np.all(np.isfinite(arr)):
-        raise ValueError("all V values must be finite")
-    if np.any(arr < 0.0):
+def _prepare_v_values(V_start: float, V_stop: float, V_num: int) -> list[float]:
+    start = float(V_start)
+    stop = float(V_stop)
+    num = int(V_num)
+    if not (np.isfinite(start) and np.isfinite(stop)):
+        raise ValueError("--V-start and --V-stop must be finite")
+    if start < 0.0 or stop < 0.0:
         raise ValueError("V values must be nonnegative")
-    return [float(x) for x in np.unique(arr)]
+    if stop < start:
+        raise ValueError("Require --V-stop >= --V-start for ascending continuation")
+    if num < 1:
+        raise ValueError("--V-num must be at least 1")
+    if num == 1:
+        if not np.isclose(start, stop):
+            raise ValueError("With --V-num 1, require --V-start == --V-stop")
+        return [start]
+    return [float(x) for x in np.linspace(start, stop, num)]
 
 
 def _gw_options(args, mu0: float, target_N: float) -> GWOptions:
@@ -205,12 +213,7 @@ def _normal_breaking_scale(diag: dict[str, float]) -> float:
     )
 
 
-def _solve_cgw_response(
-    gw,
-    Vq: np.ndarray,
-    grid: MatsubaraGrid,
-    args,
-) -> tuple[dict, float, int]:
+def _solve_cgw_response(gw, Vq: np.ndarray, grid: MatsubaraGrid, args):
     Klocal, _ = supercell_current_vertices()
     bare = [np.broadcast_to(K, gw.G.shape).copy() for K in Klocal]
 
@@ -311,7 +314,11 @@ def _write_crossings(path: Path, rows: list[dict]) -> None:
         return
     V = np.asarray([r["V"] for r in rows], dtype=float)
     data = []
-    for channel, key in (("r_plus", "r_plus"), ("r_minus", "r_minus"), ("r_Q_min", "r_Q_min")):
+    for channel, key in (
+        ("r_plus", "r_plus"),
+        ("r_minus", "r_minus"),
+        ("r_Q_min", "r_Q_min"),
+    ):
         y = np.asarray([r[key] for r in rows], dtype=float)
         for v0, v1, vc in _zero_crossings(V, y):
             data.append(
@@ -360,7 +367,7 @@ def _plot_rows(outdir: Path, rows: list[dict]) -> None:
 
 def main():
     args = _parse_args()
-    V_values = _prepare_v_values(args.V_values)
+    V_values = _prepare_v_values(args.V_start, args.V_stop, args.V_num)
     if args.primitive_filling <= 0.0:
         raise ValueError("--primitive-filling must be positive")
     if args.gw_tol <= 0.0 or args.vertex_tol <= 0.0:
@@ -381,12 +388,7 @@ def main():
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     if args.outdir is None:
-        outdir = (
-            Path("results")
-            / "supercell18"
-            / "r_vs_V"
-            / f"{args.stage}_{stamp}"
-        )
+        outdir = Path("results") / "supercell18" / "r_vs_V" / f"{args.stage}_{stamp}"
     else:
         outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -402,6 +404,10 @@ def main():
     print(
         f"primitive filling={args.primitive_filling:g}, T={grid.T:g}, "
         f"grid={grid.nk1}x{grid.nk2}, nw={grid.nw}, nOmega={grid.nOmega}, stage={args.stage}"
+    )
+    print(
+        f"V grid: linspace({args.V_start:g}, {args.V_stop:g}, {args.V_num}) "
+        f"with dV={(V_values[1]-V_values[0]) if len(V_values)>1 else 0.0:g}"
     )
     print("V schedule:", " -> ".join(f"{v:g}" for v in V_values))
     print("output:", outdir)
