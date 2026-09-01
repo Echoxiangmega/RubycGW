@@ -5,20 +5,23 @@ The default branch set is
 
     normal    no explicit source
     co        selected period-3 Q=(1/3,1/3) charge source, then h -> 0
-    intra     joint q=0 C3-breaking charge source on triangles A and B, then h -> 0
+    intra+    joint q=0 C3-breaking source with one charge-rich site per triangle
+    intra-    opposite q=0 C3-breaking source with one charge-poor site per triangle
     ab        q=0 A-versus-B triangle charge-transfer source, then h -> 0
     same      physical-same uniform loop-current source, then h_eta -> 0
     opposite  physical-opposite uniform loop-current source, then h_eta -> 0
 
 The q=0 charge seeds are repeated identically in all three primitive sectors of
-the 18-site supercell.  ``intra`` uses the primitive pattern
-``(1,-1/2,-1/2,1,-1/2,-1/2)`` so A and B triangle distortions are seeded
-together, while ``ab`` uses ``(1,1,1,-1,-1,-1)``.  Other C3-related
-orientations are symmetry-equivalent seed choices; after the source is removed
-the self-consistent solution is not constrained to keep only the seeded
-component.
+the 18-site supercell. ``intra+`` uses the primitive pattern
+``(1,-1/2,-1/2,1,-1/2,-1/2)``, while ``intra-`` uses its exact negative
+``(-1,1/2,1/2,-1,1/2,1/2)``. Thus the branch search explicitly tests both the
+one-site-rich/two-site-poor and one-site-poor/two-site-rich intra-triangle
+basins. Both are classified as the same ``intra-CO`` phase if they survive at
+zero source. ``ab`` uses ``(1,1,1,-1,-1,-1)``. Other C3-related orientations
+are symmetry-equivalent seed choices; after the source is removed the
+self-consistent solution is not constrained to keep only the seeded component.
 
-By default the script solves the full split-GW equations.  The selected period-3
+By default the script solves the full split-GW equations. The selected period-3
 ``co`` branch starts from the input checkpoint, while normal/q=0-charge/LC
 branches start from its primitive-translation-symmetric projection.
 
@@ -31,13 +34,13 @@ Hartree-Fock,
 
 The first source point of each HF branch starts from zero HF self-energy; later
 source points use the previous HF solution, so a source-selected broken-symmetry
-branch can be followed adiabatically to h=0.  The input checkpoint then supplies
+branch can be followed adiabatically to h=0. The input checkpoint then supplies
 only (V,T,filling, hopping/grid parameters) and an initial chemical-potential
-guess.  Because its self-energies are not loaded in HF-only mode, even a legacy
+guess. Because its self-energies are not loaded in HF-only mode, even a legacy
 checkpoint can be used purely as a parameter container.
 
 Charge classification is broader than the selected period-three order parameter
-Phi.  Every converged point reports:
+Phi. Every converged point reports:
 
     Phi                    selected Q form-factor projection
     Delta_Q                generic period-three translation breaking
@@ -53,7 +56,7 @@ For phase classification Delta_A and Delta_B are grouped into a single
 
 Thus Phi=0 is not interpreted as absence of charge order.
 
-Only zero-source endpoints are ranked thermodynamically.  GW mode uses the
+Only zero-source endpoints are ranked thermodynamically. GW mode uses the
 split-GW Luttinger-Ward free energy; HF-only mode uses the finite-temperature
 Hartree-Fock free energy evaluated directly from the static density matrix.
 """
@@ -97,7 +100,7 @@ from rubycgw.supercell_hf import (
 )
 
 
-CHARGE_BRANCHES = ("co", "intra", "ab")
+CHARGE_BRANCHES = ("co", "intra+", "intra-", "ab")
 CURRENT_BRANCHES = ("same", "opposite")
 DEFAULT_BRANCHES = ("normal",) + CHARGE_BRANCHES + CURRENT_BRANCHES
 
@@ -128,7 +131,7 @@ def _parse_args():
         nargs="+",
         choices=list(DEFAULT_BRANCHES),
         default=list(DEFAULT_BRANCHES),
-        help="Branches to search. Default: normal co intra ab same opposite.",
+        help="Branches to search. Default: normal co intra+ intra- ab same opposite.",
     )
     p.add_argument(
         "--charge-source-sequence",
@@ -138,7 +141,7 @@ def _parse_args():
         type=float,
         default=[0.10, 0.05, 0.02, 0.01, 0.005, 0.001, 0.0],
         help=(
-            "Temporary source ladder for co/intra/ab charge branches. "
+            "Temporary source ladder for co/intra+/intra-/ab charge branches. "
             "--co-source-sequence is retained as a backward-compatible alias."
         ),
     )
