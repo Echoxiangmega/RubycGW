@@ -12,11 +12,12 @@ from rubycgw.supercell import (
 )
 
 
-def test_merged_default_branch_set():
+def test_split_intra_default_branch_set():
     assert branch_search.DEFAULT_BRANCHES == (
         "normal",
         "co",
-        "intra",
+        "intra+",
+        "intra-",
         "ab",
         "same",
         "opposite",
@@ -25,7 +26,8 @@ def test_merged_default_branch_set():
 
 def test_q0_charge_source_patterns_repeat_primitive_motif():
     expected = {
-        "intra": np.array([1.0, -0.5, -0.5, 1.0, -0.5, -0.5]),
+        "intra+": np.array([1.0, -0.5, -0.5, 1.0, -0.5, -0.5]),
+        "intra-": np.array([-1.0, 0.5, 0.5, -1.0, 0.5, 0.5]),
         "ab": np.array([1.0, 1.0, 1.0, -1.0, -1.0, -1.0]),
     }
     for channel, p6 in expected.items():
@@ -37,18 +39,27 @@ def test_q0_charge_source_patterns_repeat_primitive_motif():
         assert abs(np.max(np.abs(pattern)) - 1.0) < 1e-14
 
 
-def test_joint_intra_source_targets_both_triangles_equally():
+def test_intra_plus_and_minus_are_exact_opposites():
+    plus = charge_source_pattern("intra+")
+    minus = charge_source_pattern("intra-")
+    assert np.max(np.abs(plus + minus)) < 1e-14
+    # Legacy helper name keeps the old positive pattern, but is not a branch label.
+    assert np.max(np.abs(charge_source_pattern("intra") - plus)) < 1e-14
+
+
+def test_both_intra_sources_target_both_triangles_equally():
     n0 = 0.4
     amp = 0.07
 
-    density = n0 + amp * charge_source_pattern("intra")
-    d = charge_order_diagnostics(density)
-    expected = 1.5 * amp
-    assert d["Delta_Q"] < 1e-13
-    assert abs(d["Delta_A"] - expected) < 1e-13
-    assert abs(d["Delta_B"] - expected) < 1e-13
-    assert abs(d["Delta_intra"] - expected) < 1e-13
-    assert abs(d["Delta_AB"]) < 1e-13
+    for channel in ("intra+", "intra-"):
+        density = n0 + amp * charge_source_pattern(channel)
+        d = charge_order_diagnostics(density)
+        expected = 1.5 * amp
+        assert d["Delta_Q"] < 1e-13
+        assert abs(d["Delta_A"] - expected) < 1e-13
+        assert abs(d["Delta_B"] - expected) < 1e-13
+        assert abs(d["Delta_intra"] - expected) < 1e-13
+        assert abs(d["Delta_AB"]) < 1e-13
 
 
 def test_ab_source_targets_only_triangle_imbalance():
@@ -76,7 +87,7 @@ def test_add_charge_source_only_changes_diagonal():
     h0 = build_supercell_h0(grid.kmesh(), params)
     h = 0.123
 
-    for channel in ("co", "intra", "ab"):
+    for channel in ("co", "intra+", "intra-", "ab"):
         sourced = add_charge_source(h0, h, channel)
         delta = sourced - h0
         pattern = charge_source_pattern(channel)
@@ -99,7 +110,7 @@ def test_branch_h0_uses_charge_source_patterns():
         assert np.max(np.abs(got - ref)) < 1e-14
 
 
-def test_classification_merges_delta_A_and_delta_B():
+def test_classification_merges_delta_A_and_delta_B_and_intra_seed_sign():
     currents = {"same_q0": 0.0j, "opposite_q0": 0.0j}
     charge = {
         "Delta_Q": 0.0,
