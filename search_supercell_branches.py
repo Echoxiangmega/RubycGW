@@ -4,7 +4,7 @@
 The default branch set is deliberately small:
 
     normal    primitive-translation-symmetric branch, no source
-    co        period-3 charge source, then h_CO -> 0
+    co        selected period-3 charge source, then h_CO -> 0
     same      physical-same uniform loop-current source, then h_eta -> 0
     opposite  physical-opposite uniform loop-current source, then h_eta -> 0
 
@@ -25,6 +25,17 @@ can be followed adiabatically to h=0.  The input checkpoint then supplies only
 (V,T,filling, hopping/grid parameters) and an initial chemical-potential guess.
 Because its self-energies are not loaded in HF-only mode, even a legacy
 checkpoint can be used purely as a parameter container.
+
+Charge classification is deliberately broader than the selected period-three
+order parameter Phi.  Every converged point reports:
+
+    Phi                    selected Q form-factor projection
+    Delta_Q                generic period-three translation breaking
+    Delta_translation_rms  sector-to-sector density RMS
+    Delta_A, Delta_B       q=0 intra-triangle charge disproportionation
+    Delta_AB               q=0 mean A-minus-B triangle charge imbalance
+
+Thus Phi=0 is not interpreted as absence of charge order.
 
 Only zero-source endpoints are ranked thermodynamically.  GW mode uses the
 split-GW Luttinger-Ward free energy; HF-only mode uses the finite-temperature
@@ -60,7 +71,7 @@ from rubycgw.model import RubyParameters
 from rubycgw.supercell import (
     build_supercell_h0,
     build_supercell_interaction,
-    charge_order_parameter,
+    charge_order_diagnostics,
 )
 from rubycgw.supercell_gw_bootstrap import AndersonOptions, solve_matrix_gw_anderson
 from rubycgw.supercell_hf import (
@@ -105,7 +116,7 @@ def _parse_args():
         nargs="+",
         type=float,
         default=[0.10, 0.05, 0.02, 0.01, 0.005, 0.001, 0.0],
-        help="Temporary period-3 charge source ladder.",
+        help="Temporary selected period-3 charge source ladder.",
     )
     p.add_argument(
         "--current-source-sequence",
@@ -134,7 +145,16 @@ def _parse_args():
     p.add_argument("--mu-tol", type=float, default=5e-12)
     p.add_argument("--mu-max-iter", type=int, default=60)
     p.add_argument("--verbose-iterations", action="store_true")
-    p.add_argument("--order-threshold", type=float, default=1e-6)
+    p.add_argument(
+        "--order-threshold",
+        type=float,
+        default=1e-6,
+        help=(
+            "Common threshold for generic charge amplitudes Delta_Q/Delta_A/Delta_B/|Delta_AB| "
+            "and for per-primitive-cell current amplitudes. Phi is reported but is not used alone "
+            "to decide whether charge order exists."
+        ),
+    )
     p.add_argument("--outdir", type=str, default=None)
     return p.parse_args()
 
@@ -183,18 +203,35 @@ def _branch_schedule(branch: str, args) -> list[float]:
     return _schedule(args.current_source_sequence)
 
 
-def _classify(phi: complex, currents: dict[str, complex], threshold: float) -> str:
-    co = abs(phi) > threshold
-    same = abs(currents["same_q0"]) / np.sqrt(3.0) > threshold
-    opposite = abs(currents["opposite_q0"]) / np.sqrt(3.0) > threshold
-    pieces = []
-    if co:
-        pieces.append("CO")
-    if same:
+def _classify(charge: dict[str, object], currents: dict[str, complex], threshold: float) -> str:
+    pieces: list[str] = []
+    if float(charge["Delta_Q"]) > threshold:
+        pieces.append("Q-CO")
+    if float(charge["Delta_A"]) > threshold:
+        pieces.append("intra-A-CO")
+    if float(charge["Delta_B"]) > threshold:
+        pieces.append("intra-B-CO")
+    if abs(float(charge["Delta_AB"])) > threshold:
+        pieces.append("AB-CO")
+
+    if abs(currents["same_q0"]) / np.sqrt(3.0) > threshold:
         pieces.append("same-LC")
-    if opposite:
+    if abs(currents["opposite_q0"]) / np.sqrt(3.0) > threshold:
         pieces.append("opposite-LC")
     return "+".join(pieces) if pieces else "normal"
+
+
+def _charge_fields(charge: dict[str, object]) -> dict[str, float]:
+    phi = complex(charge["Phi"])
+    return {
+        "Phi_abs": float(abs(phi)),
+        "Delta_Q": float(charge["Delta_Q"]),
+        "Delta_translation_rms": float(charge["Delta_translation_rms"]),
+        "Delta_A": float(charge["Delta_A"]),
+        "Delta_B": float(charge["Delta_B"]),
+        "Delta_AB": float(charge["Delta_AB"]),
+        "Delta_AB_abs": float(abs(float(charge["Delta_AB"]))),
+    }
 
 
 def _hf_current_diagnostics(rho: np.ndarray, grid: MatsubaraGrid) -> dict[str, complex]:
@@ -229,6 +266,12 @@ def _failed_endpoint_row(branch: str, method: str) -> dict:
         "classification": "no-converged-zero-source-endpoint",
         "mu": np.nan,
         "Phi_abs": np.nan,
+        "Delta_Q": np.nan,
+        "Delta_translation_rms": np.nan,
+        "Delta_A": np.nan,
+        "Delta_B": np.nan,
+        "Delta_AB": np.nan,
+        "Delta_AB_abs": np.nan,
         "m_same_pc_abs": np.nan,
         "m_opposite_pc_abs": np.nan,
         "Omega_supercell": np.nan,
@@ -237,6 +280,18 @@ def _failed_endpoint_row(branch: str, method: str) -> dict:
         "DeltaF_per_primitive_cell": np.nan,
         "final_error": np.nan,
     }
+
+
+def _print_point(prefix: str, charge: dict[str, object], m_same_pc: complex, m_opp_pc: complex, state: str) -> None:
+    print(
+        f"{prefix}|Phi|={abs(complex(charge['Phi'])):.3e}, "
+        f"Delta_Q={float(charge['Delta_Q']):.3e}, "
+        f"Delta_A={float(charge['Delta_A']):.3e}, "
+        f"Delta_B={float(charge['Delta_B']):.3e}, "
+        f"Delta_AB={float(charge['Delta_AB']):+.3e}, "
+        f"|m_same|/pc={abs(m_same_pc):.3e}, "
+        f"|m_opp|/pc={abs(m_opp_pc):.3e}, state={state}"
+    )
 
 
 def main():
@@ -278,11 +333,8 @@ def main():
     )
     target_N = 3.0 * primitive_filling
 
-    # HF-only mode deliberately does not load checkpoint self-energies.  This is
-    # important after changes of approximation/interaction convention: an old
-    # checkpoint may still be used to provide parameters and a mu guess without
-    # contaminating the HF state.  Full GW mode, in contrast, requires strict
-    # checkpoint compatibility and therefore rejects legacy interaction data.
+    # HF-only mode deliberately does not load checkpoint self-energies.  Full GW
+    # mode requires strict checkpoint compatibility and rejects legacy interaction data.
     if args.hf_only:
         seed_original = None
         seed_deco = None
@@ -307,7 +359,7 @@ def main():
     base_h0 = build_supercell_h0(grid.kmesh(), params, source_strength=0.0)
     Vq = build_supercell_interaction(grid.qmesh(), params)
 
-    print("=" * 104)
+    print("=" * 112)
     print("18-site focused CO/LC branch search")
     print(
         f"V={params.V:g}, T={grid.T:g}, primitive filling={primitive_filling:g}, "
@@ -322,13 +374,18 @@ def main():
             "and the initial mu guess; its self-energies are not loaded"
         )
     else:
+        input_charge = charge_order_diagnostics(density_original)
         print("approximation: FULL SPLIT-GW")
         print(
-            f"input |Phi|={abs(charge_order_parameter(density_original)):.6e}; "
+            f"input |Phi|={abs(complex(input_charge['Phi'])):.3e}, "
+            f"Delta_Q={float(input_charge['Delta_Q']):.3e}, "
+            f"Delta_A={float(input_charge['Delta_A']):.3e}, "
+            f"Delta_B={float(input_charge['Delta_B']):.3e}, "
+            f"Delta_AB={float(input_charge['Delta_AB']):+.3e}; "
             "LC/normal seeds use primitive-translation projection, CO seed keeps the original state"
         )
     print("Only zero-source endpoints are ranked by the free energy of the selected approximation.")
-    print("=" * 104)
+    print("=" * 112)
 
     endpoint_rows: list[dict] = []
     scan_rows: list[dict] = []
@@ -368,37 +425,34 @@ def main():
                     verbose=bool(args.hf_verbose),
                 )
                 runtime = time.perf_counter() - t0
-                phi = charge_order_parameter(hf.density)
+                charge = charge_order_diagnostics(hf.density)
                 currents = _hf_current_diagnostics(hf.rho, grid)
                 m_same_pc = currents["same_q0"] / np.sqrt(3.0)
                 m_opp_pc = currents["opposite_q0"] / np.sqrt(3.0)
-                state_label = _classify(phi, currents, args.order_threshold)
+                state_label = _classify(charge, currents, args.order_threshold)
 
-                scan_rows.append(
-                    {
-                        "method": "HF",
-                        "seed_branch": branch,
-                        "step": istep,
-                        "source": float(h),
-                        "seed": seed_label,
-                        "converged": bool(hf.converged),
-                        "iterations": int(hf.iterations),
-                        "final_error": float(hf.final_error),
-                        "runtime_s": float(runtime),
-                        "mu": float(hf.mu),
-                        "Phi_abs": float(abs(phi)),
-                        "m_same_pc_abs": float(abs(m_same_pc)),
-                        "m_opposite_pc_abs": float(abs(m_opp_pc)),
-                        "classification": state_label,
-                    }
-                )
+                row = {
+                    "method": "HF",
+                    "seed_branch": branch,
+                    "step": istep,
+                    "source": float(h),
+                    "seed": seed_label,
+                    "converged": bool(hf.converged),
+                    "iterations": int(hf.iterations),
+                    "final_error": float(hf.final_error),
+                    "runtime_s": float(runtime),
+                    "mu": float(hf.mu),
+                    **_charge_fields(charge),
+                    "m_same_pc_abs": float(abs(m_same_pc)),
+                    "m_opposite_pc_abs": float(abs(m_opp_pc)),
+                    "classification": state_label,
+                }
+                scan_rows.append(row)
                 print(
                     f"    HF conv={hf.converged}, it={hf.iterations}, res={hf.final_error:.3e}, "
-                    f"mu={hf.mu:.9f}, |Phi|={abs(phi):.6e}, "
-                    f"|m_same|/pc={abs(m_same_pc):.6e}, "
-                    f"|m_opp|/pc={abs(m_opp_pc):.6e}, state={state_label}, "
-                    f"time={runtime:.1f}s"
+                    f"mu={hf.mu:.9f}, time={runtime:.1f}s"
                 )
+                _print_point("    ", charge, m_same_pc, m_opp_pc, state_label)
                 if not hf.converged:
                     print(f"    STOP branch {branch}: HF source point did not converge")
                     break
@@ -417,11 +471,11 @@ def main():
                 endpoint_rows.append(_failed_endpoint_row(branch, "HF"))
                 continue
 
-            phi = charge_order_parameter(endpoint.density)
+            charge = charge_order_diagnostics(endpoint.density)
             currents = _hf_current_diagnostics(endpoint.rho, grid)
             m_same_pc = currents["same_q0"] / np.sqrt(3.0)
             m_opp_pc = currents["opposite_q0"] / np.sqrt(3.0)
-            label = _classify(phi, currents, args.order_threshold)
+            label = _classify(charge, currents, args.order_threshold)
             endpoint_rows.append(
                 {
                     "method": "HF",
@@ -429,7 +483,7 @@ def main():
                     "endpoint_found": True,
                     "classification": label,
                     "mu": float(endpoint.mu),
-                    "Phi_abs": float(abs(phi)),
+                    **_charge_fields(charge),
                     "m_same_pc_abs": float(abs(m_same_pc)),
                     "m_opposite_pc_abs": float(abs(m_opp_pc)),
                     "Omega_supercell": float(endpoint_thermo.grand_potential),
@@ -444,6 +498,7 @@ def main():
                 f"F/pc={endpoint_thermo.free_energy_per_primitive_cell:+.12e}, "
                 f"Omega/sc={endpoint_thermo.grand_potential:+.12e}"
             )
+            _print_point("      ", charge, m_same_pc, m_opp_pc, label)
             continue
 
         # Full-GW mode: retain the original checkpoint-based branch strategy.
@@ -478,37 +533,34 @@ def main():
             )
             runtime = time.perf_counter() - t0
 
-            phi = charge_order_parameter(gw.density)
+            charge = charge_order_diagnostics(gw.density)
             currents = current_diagnostics(gw.G, grid)
             m_same_pc = currents["same_q0"] / np.sqrt(3.0)
             m_opp_pc = currents["opposite_q0"] / np.sqrt(3.0)
-            state_label = _classify(phi, currents, args.order_threshold)
+            state_label = _classify(charge, currents, args.order_threshold)
 
-            scan_rows.append(
-                {
-                    "method": "GW",
-                    "seed_branch": branch,
-                    "step": istep,
-                    "source": float(h),
-                    "seed": seed_label,
-                    "converged": bool(gw.converged),
-                    "iterations": int(gw.iterations),
-                    "final_error": float(gw.final_error),
-                    "runtime_s": float(runtime),
-                    "mu": float(gw.mu),
-                    "Phi_abs": float(abs(phi)),
-                    "m_same_pc_abs": float(abs(m_same_pc)),
-                    "m_opposite_pc_abs": float(abs(m_opp_pc)),
-                    "classification": state_label,
-                }
-            )
+            row = {
+                "method": "GW",
+                "seed_branch": branch,
+                "step": istep,
+                "source": float(h),
+                "seed": seed_label,
+                "converged": bool(gw.converged),
+                "iterations": int(gw.iterations),
+                "final_error": float(gw.final_error),
+                "runtime_s": float(runtime),
+                "mu": float(gw.mu),
+                **_charge_fields(charge),
+                "m_same_pc_abs": float(abs(m_same_pc)),
+                "m_opposite_pc_abs": float(abs(m_opp_pc)),
+                "classification": state_label,
+            }
+            scan_rows.append(row)
             print(
                 f"    GW conv={gw.converged}, it={gw.iterations}, res={gw.final_error:.3e}, "
-                f"mu={gw.mu:.9f}, |Phi|={abs(phi):.6e}, "
-                f"|m_same|/pc={abs(m_same_pc):.6e}, "
-                f"|m_opp|/pc={abs(m_opp_pc):.6e}, state={state_label}, "
-                f"time={runtime:.1f}s"
+                f"mu={gw.mu:.9f}, time={runtime:.1f}s"
             )
+            _print_point("    ", charge, m_same_pc, m_opp_pc, state_label)
             if not gw.converged:
                 print(f"    STOP branch {branch}: GW source point did not converge")
                 break
@@ -542,11 +594,11 @@ def main():
             endpoint_rows.append(_failed_endpoint_row(branch, "GW"))
             continue
 
-        phi = charge_order_parameter(endpoint.density)
+        charge = charge_order_diagnostics(endpoint.density)
         currents = current_diagnostics(endpoint.G, grid)
         m_same_pc = currents["same_q0"] / np.sqrt(3.0)
         m_opp_pc = currents["opposite_q0"] / np.sqrt(3.0)
-        label = _classify(phi, currents, args.order_threshold)
+        label = _classify(charge, currents, args.order_threshold)
         endpoint_rows.append(
             {
                 "method": "GW",
@@ -554,7 +606,7 @@ def main():
                 "endpoint_found": True,
                 "classification": label,
                 "mu": float(endpoint.mu),
-                "Phi_abs": float(abs(phi)),
+                **_charge_fields(charge),
                 "m_same_pc_abs": float(abs(m_same_pc)),
                 "m_opposite_pc_abs": float(abs(m_opp_pc)),
                 "Omega_supercell": float(endpoint_thermo.grand_potential),
@@ -569,6 +621,7 @@ def main():
             f"F/pc={endpoint_thermo.free_energy_per_primitive_cell:+.12e}, "
             f"Omega/sc={endpoint_thermo.grand_potential:+.12e}"
         )
+        _print_point("      ", charge, m_same_pc, m_opp_pc, label)
 
     if scan_rows:
         with (outdir / "branch_scan.csv").open("w", newline="", encoding="utf-8") as f:
@@ -597,19 +650,23 @@ def main():
         writer.writeheader()
         writer.writerows(endpoint_rows)
 
-    print("\n" + "=" * 104)
+    print("\n" + "=" * 112)
     print("ZERO-SOURCE BRANCH ATLAS")
-    print("=" * 104)
+    print("=" * 112)
     if not valid_sorted:
         print("No converged zero-source endpoint was obtained.")
     else:
         for rank, row in enumerate(valid_sorted, start=1):
             print(
                 f"#{rank} {row['method']:<2s} seed={row['seed_branch']:<8s} "
-                f"-> {row['classification']:<18s} "
+                f"-> {row['classification']:<32s} "
                 f"F/pc={row['F_per_primitive_cell']:+.12e}  "
-                f"DeltaF/pc={row['DeltaF_per_primitive_cell']:+.6e}  "
-                f"|Phi|={row['Phi_abs']:.3e}  "
+                f"DeltaF/pc={row['DeltaF_per_primitive_cell']:+.6e}"
+            )
+            print(
+                f"    |Phi|={row['Phi_abs']:.3e}  Delta_Q={row['Delta_Q']:.3e}  "
+                f"Delta_A={row['Delta_A']:.3e}  Delta_B={row['Delta_B']:.3e}  "
+                f"Delta_AB={row['Delta_AB']:+.3e}  "
                 f"|m_same|/pc={row['m_same_pc_abs']:.3e}  "
                 f"|m_opp|/pc={row['m_opposite_pc_abs']:.3e}"
             )
