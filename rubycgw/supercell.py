@@ -129,14 +129,20 @@ def charge_source_pattern(channel: str) -> np.ndarray:
     ``co``
         The selected Q=(1/3,1/3) period-three pattern already used by the
         supercell calculation.
+    ``intra+``
+        Joint q=0 C3 breaking on both triangles with primitive pattern
+        ``(1,-1/2,-1/2,1,-1/2,-1/2)``: one site is charge-rich relative to the
+        other two on each triangle.
+    ``intra-``
+        The opposite branch, exactly ``-intra+``, with primitive pattern
+        ``(-1,1/2,1/2,-1,1/2,1/2)``: one site is charge-poor relative to the
+        other two on each triangle.
     ``intra``
-        A joint q=0 C3-breaking field on both triangles.  In each primitive
-        cell the six-site pattern is ``(1,-1/2,-1/2,1,-1/2,-1/2)``.  This is
-        the default intra-unit-cell charge seed because Delta_A and Delta_B are
-        typically induced together in the self-consistent solutions.
+        Legacy alias for ``intra+`` retained for helper-code compatibility.  It
+        is not a default branch-search label anymore.
     ``intra-a`` / ``intra-b``
         Legacy one-triangle probe fields retained for diagnostics/backward
-        compatibility.  They are no longer separate default search branches.
+        compatibility.  They are not separate default search branches.
     ``ab``
         A q=0 A-versus-B charge-transfer field,
         ``(1,1,1,-1,-1,-1)``.
@@ -149,8 +155,11 @@ def charge_source_pattern(channel: str) -> np.ndarray:
     channel = str(channel).lower()
     if channel == "co":
         pattern = period3_real_pattern()
-    elif channel == "intra":
+    elif channel in {"intra", "intra+"}:
         p6 = np.array([1.0, -0.5, -0.5, 1.0, -0.5, -0.5], dtype=float)
+        pattern = np.tile(p6, NSECTOR)
+    elif channel == "intra-":
+        p6 = np.array([-1.0, 0.5, 0.5, -1.0, 0.5, 0.5], dtype=float)
         pattern = np.tile(p6, NSECTOR)
     elif channel == "intra-a":
         p6 = np.array([1.0, -0.5, -0.5, 0.0, 0.0, 0.0], dtype=float)
@@ -163,7 +172,8 @@ def charge_source_pattern(channel: str) -> np.ndarray:
         pattern = np.tile(p6, NSECTOR)
     else:
         raise ValueError(
-            f"unknown charge source channel {channel!r}; expected co, intra, intra-a, intra-b, or ab"
+            f"unknown charge source channel {channel!r}; expected co, intra+, intra-, ab "
+            "(or legacy intra/intra-a/intra-b)"
         )
 
     pattern = np.asarray(pattern, dtype=float).reshape(NSUP)
