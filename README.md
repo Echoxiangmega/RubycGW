@@ -16,6 +16,7 @@ The maintained documentation lives in [`docs/`](docs/README.md). In particular:
 - [`docs/convergence_scan.md`](docs/convergence_scan.md): automated `nw`, `nOmega`, and `nk` scans, continuation and fast MT mode;
 - [`docs/performance_and_reuse.md`](docs/performance_and_reuse.md): performance bottlenecks and what can be reused between scan points;
 - [`docs/orbital_moment.md`](docs/orbital_moment.md): checkpoint-to-bond-current and local plaquette orbital-moment post-processing;
+- [`docs/electromagnetic_response.md`](docs/electromagnetic_response.md): Peierls-flux covariant response and finite-difference validation;
 - [`docs/tutorial.md`](docs/tutorial.md): complete theory tutorial and main PDF source.
 
 The GitHub Actions workflow `build tutorial PDF` automatically regenerates
@@ -29,7 +30,7 @@ This repository preserves the earlier Ruby calculation conventions:
 - sites are `0,1,2,3,4,5`;
 - reduced reciprocal coordinates use `exp(2 pi i k.R)`;
 - the hopping list is the previous `ti/t1/t2` 12-bond list;
-- the same NN bonds carry density interaction `V`;
+- density interaction `V` acts on the six intra-triangle bonds only;
 - `eta_A` uses `0 -> 1 -> 2 -> 0`;
 - `eta_B` uses `3 -> 4 -> 5 -> 3`;
 - `eta_plus = (eta_A + eta_B)/sqrt(2)` = **physical opposite circulation**;
@@ -41,33 +42,33 @@ This repository preserves the earlier Ruby calculation conventions:
 G^{-1} = G0^{-1} - Sigma_H - Sigma_GW
 P_ab(Q) = (T/Nk) sum_k G_ab(k+Q) G_ba(k)
 W(Q) = V(Q) + V(Q) P(Q) W(Q)
-Sigma_GW,ab(k) = -(T/Nk) sum_Q G_ab(k+Q) W_ba(Q)
+Sigma_GW = Sigma_F + Sigma_c
+Sigma_c,ab(k) = -(T/Nk) sum_Q G_ab(k+Q) [W(Q)-V(Q)]_ba
 ```
 
-The q=(0,0) cGW layer solves
+The supercell cGW layer uses the decomposition
 
 ```text
-Gamma_eta = K_eta + Gamma_H + Gamma_MT + Gamma_AL1 + Gamma_AL2
+Gamma = K + Gamma_H + Gamma_F + Gamma_MT,c + Gamma_AL1 + Gamma_AL2
 ```
 
-and the response is
-
-```text
-chi_eta = -(T/Nk) sum_k Tr[K_eta G(k) Gamma_eta(k) G(k)] .
-```
+and the electromagnetic module applies the same functional derivative to a
+periodic Peierls-flux source. At fixed filling it also includes `dmu/dphi` by
+solving the additional chemical-potential vertex `K_mu=-I`.
 
 ## Code layout
 
-- `rubycgw/model.py`: Ruby hopping, NN interaction matrix, eta vertices.
+- `rubycgw/model.py`: Ruby hopping, interaction matrix, eta vertices.
 - `rubycgw/grids.py`: momentum/Matsubara grids and allocation-light `k+Q` shifts.
-- `rubycgw/gw.py`: noninteracting reference plus self-consistent Hartree + GW solver, with optional continuation warm start.
+- `rubycgw/gw.py`: noninteracting reference plus self-consistent Hartree + GW solver.
 - `rubycgw/susceptibility.py`: `G0G0`, `GG`, and full-vertex eta response.
-- `rubycgw/cgw.py`: q=0 Hartree, MT, AL1, AL2 vertex corrections; fused correction loop and vertex warm start.
-- `rubycgw/orbital_moment.py`: reconstruct an 18-site checkpoint Green function and evaluate triangle bond currents/local plaquette moments.
-- `run_ruby_cgw.py`: staged `G0G0 -> GG -> GW+MT -> full cGW` reference run.
-- `convergence_scan.py`: automated cutoff convergence scans with CSV/PNG output.
-- `analyze_orbital_moment.py`: checkpoint orbital-moment command-line post-processor.
-- `tests/`: convention, filling, Hermiticity and V=0 regression checks.
+- `rubycgw/cgw.py`: primitive-cell q=0 cGW response.
+- `rubycgw/supercell_cgw.py`: 18-site Hartree/Fock/MT/AL covariant response.
+- `rubycgw/orbital_moment.py`: checkpoint Green function, bond currents, local plaquette moments.
+- `rubycgw/electromagnetic.py`: Peierls source, `Gamma_phi`, `G_phi`, `P_phi`, `W_phi`, self-energy derivatives, and finite-difference validation.
+- `analyze_orbital_moment.py`: checkpoint local-orbital-moment post-processor.
+- `analyze_em_response.py`: checkpoint electromagnetic covariant response and optional `+/-delta_phi` validation.
+- `tests/`: convention, GW/cGW, orbital-moment and electromagnetic-response tests.
 
 ## Run
 
@@ -85,11 +86,27 @@ python analyze_orbital_moment.py checkpoints/example.npz \
   --json orbital_moment.json
 ```
 
-Add `--energy-unit-ev E0 --lattice-constant-angstrom a` to also report
-charge current in amperes and plaquette moments in Bohr magnetons.  The direct
-checkpoint tool measures an already-present loop current; the electromagnetic
-covariant response `dG/dA` is a separate calculation and is not implied by this
-post-processing step.
+Electromagnetic covariant response from the same kind of checkpoint:
+
+```bash
+python analyze_em_response.py checkpoints/example.npz \
+  --channel same \
+  --npz em_same.npz
+```
+
+Validate it against two fully self-consistent GW calculations at `+/-delta_phi`:
+
+```bash
+python analyze_em_response.py checkpoints/example.npz \
+  --channel same \
+  --finite-difference 1e-4 \
+  --json em_same_validation.json
+```
+
+The present Peierls-flux response is periodic in the supercell and is intended
+for local/current-channel response and validation. A strict uniform bulk
+orbital magnetization still requires the long-wavelength transverse `A(q)`
+limit.
 
 Full staged convergence scan:
 
@@ -110,4 +127,4 @@ Compatible scans use continuation by default. Add `--no-continuation` to force e
 
 ## Numerical note
 
-The stored fermion Matsubara box is finite. Values of `G(i omega+i Omega)` outside the stored box are zero. Performance-critical loops now operate only on the valid Matsubara slice, but production results still require explicit `nw`, `nOmega`, and `nk` convergence tests.
+The stored fermion Matsubara box is finite. Values of `G(i omega+i Omega)` outside the stored box are zero. Production results require explicit `nw`, `nOmega`, and `nk` convergence tests. For electromagnetic validation, decrease `delta_phi` until the finite-difference error stops improving; if it plateaus, increase `nw` before interpreting the mismatch as a vertex error.
