@@ -13,5 +13,5 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install -r requirements.txt
-      - run: python -m py_compile run_ruby_cgw.py convergence_scan.py filling_scan.py run_supercell_gw.py run_supercell_cgw.py scan_supercell_cgw_vs_V.py run_supercell_lc_branch.py search_supercell_branches.py compare_supercell_free_energy.py inspect_supercell_checkpoint.py plot_supercell_bands.py plot_supercell_order_realspace.py interpolate_supercell_checkpoint.py interpolate_supercell_checkpoint_T.py diagnose_nomega_seam.py diagnose_w_split_cutoff.py analyze_orbital_moment.py analyze_em_response.py
+      - run: python -m py_compile run_ruby_cgw.py convergence_scan.py filling_scan.py run_supercell_gw.py run_supercell_cgw.py scan_supercell_cgw_vs_V.py run_supercell_lc_branch.py search_supercell_branches.py compare_supercell_free_energy.py inspect_supercell_checkpoint.py plot_supercell_bands.py plot_supercell_order_realspace.py interpolate_supercell_checkpoint.py interpolate_supercell_checkpoint_T.py diagnose_nomega_seam.py diagnose_w_split_cutoff.py analyze_orbital_moment.py analyze_em_response.py analyze_bulk_magnetization.py
       - run: python -m pytest -q
