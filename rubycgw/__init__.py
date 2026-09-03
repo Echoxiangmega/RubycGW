@@ -27,6 +27,18 @@ from .orbital_moment import (
     equal_time_density_matrix,
     triangle_signed_area,
 )
+from .electromagnetic import (
+    EM_CHANNELS,
+    ElectromagneticBackground,
+    ElectromagneticResponse,
+    FiniteDifferenceResponse,
+    build_supercell_h0_peierls,
+    peierls_flux_vertex,
+    load_electromagnetic_background,
+    solve_electromagnetic_response,
+    finite_difference_electromagnetic_response,
+    compare_covariant_to_finite_difference,
+)
 
 __all__ = [
     "RubyParameters", "MatsubaraGrid", "GWOptions", "GWResult",
@@ -39,4 +51,9 @@ __all__ = [
     "solve_matrix_gw_fast", "solve_supercell_gw_fast",
     "OrbitalMomentResult", "analyze_checkpoint_orbital_moments",
     "equal_time_density_matrix", "triangle_signed_area",
+    "EM_CHANNELS", "ElectromagneticBackground", "ElectromagneticResponse",
+    "FiniteDifferenceResponse", "build_supercell_h0_peierls",
+    "peierls_flux_vertex", "load_electromagnetic_background",
+    "solve_electromagnetic_response", "finite_difference_electromagnetic_response",
+    "compare_covariant_to_finite_difference",
 ]
