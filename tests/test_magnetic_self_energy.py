@@ -1,11 +1,20 @@
 import numpy as np
 
+from rubycgw.bulk_orbital_magnetization import (
+    bulk_orbital_magnetization_from_arrays,
+    spectral_cartesian_covariant_derivatives,
+    supercell_h0_cartesian_derivatives,
+)
 from rubycgw.grids import MatsubaraGrid
+from rubycgw.gw import GWOptions
 from rubycgw.magnetic_self_energy import (
     geometric_uniform_B_green_source,
     solve_uniform_B_self_energy_derivative,
 )
+from rubycgw.model import RubyParameters
+from rubycgw.supercell import build_supercell_h0, build_supercell_interaction
 from rubycgw.supercell_cgw import SupercellVertexOptions
+from rubycgw.supercell_gw_fast import solve_matrix_gw_fast
 
 
 def test_geometric_uniform_B_source_matches_a13_rewrite():
@@ -101,3 +110,59 @@ def test_hartree_only_uniform_B_sigma_solver_satisfies_linearized_gw_equation():
     assert np.max(np.abs(sigma[..., 1, 0])) < 1e-12
     ref = sigma[0, 0, 0]
     assert np.max(np.abs(sigma - ref[None, None, None, :, :])) < 1e-12
+
+
+def test_interacting_time_reversal_symmetric_ruby_has_zero_complete_bulk_M():
+    grid = MatsubaraGrid(nk1=1, nk2=1, nw=10, nOmega=2, T=0.30)
+    params = RubyParameters(ti=0.4, t1=0.2, t2=0.15, V=0.01)
+    h0 = build_supercell_h0(grid.kmesh(), params)
+    Vq = build_supercell_interaction(grid.qmesh(), params)
+
+    gw_opts = GWOptions(
+        mu=0.08,
+        target_filling=None,
+        max_iter=100,
+        tol=3e-10,
+        mixing=0.35,
+        mixing_method="pulay",
+        pulay_history=6,
+        pulay_start=3,
+        verbose=False,
+        momentum_backend="direct",
+    )
+    gw = solve_matrix_gw_fast(h0, Vq, grid, opts=gw_opts)
+    assert gw.converged
+
+    sigma_total = gw.Sigma_GW + gw.Sigma_H[None, None, None, :, :]
+    Dx_H0, Dy_H0 = supercell_h0_cartesian_derivatives(grid.kmesh(), params)
+    Dx_Sigma, Dy_Sigma = spectral_cartesian_covariant_derivatives(sigma_total)
+    Jx = Dx_H0[None, :, :, :, :] + Dx_Sigma
+    Jy = Dy_H0[None, :, :, :, :] + Dy_Sigma
+
+    vopts = SupercellVertexOptions(
+        max_iter=60,
+        tol=2e-10,
+        solver="gmres",
+        gmres_restart=8,
+        verbose=False,
+        momentum_backend="direct",
+    )
+    field = solve_uniform_B_self_energy_derivative(
+        gw.G, gw.W, Vq, Jx, Jy, grid, opts=vopts
+    )
+    assert field.converged
+    assert field.final_error < 2e-10
+
+    bulk = bulk_orbital_magnetization_from_arrays(
+        h0,
+        gw.G,
+        sigma_total,
+        gw.mu,
+        grid,
+        params,
+        sigma_b=field.Sigma_B_code,
+    )
+    assert bulk.complete
+    assert abs(bulk.main_term_code) < 2e-10
+    assert abs(bulk.field_self_energy_term_code) < 2e-10
+    assert abs(bulk.total_code) < 2e-10
