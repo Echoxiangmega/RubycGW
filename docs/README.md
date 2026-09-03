@@ -11,6 +11,7 @@
 - [orbital_moment.md](orbital_moment.md)：从 checkpoint 重建 `G`，计算 bond current 与局域 plaquette orbital moment。
 - [electromagnetic_response.md](electromagnetic_response.md)：Peierls-flux electromagnetic covariant response、固定 filling 的 `dmu/dphi` 以及与 `+/-delta_phi` 完整 GW 有限差分的验证。
 - [bulk_orbital_magnetization.md](bulk_orbital_magnetization.md)：Nourafkan bulk orbital magnetization、带 orbital embedding 的物理 `k` 导数，以及非局域 GW 中 `dSigma^(B)/dB` 第二项的处理。
+- [uniform_B_self_energy_derivation.md](uniform_B_self_energy_derivation.md)：从 Nourafkan Eq. (A13) 出发，完整推导 `G_B = Y_B + G Sigma_B G`、仓库记号 `C_GW[delta G]`、Hartree/Fock/MT/AL 线性化、自洽方程 `(I-L)Sigma_B=C_GW[Y_B]`、GMRES 实现以及第二项 `M2` 的代码对应关系；含参考文献和实现 caveat。
 - [api_reference.md](api_reference.md)：模块、类和主要函数的接口、输入输出 shape 和用途。
 - [numerics_and_validation.md](numerics_and_validation.md)：Matsubara cutoff、mixing、收敛测试、V=0 极限、时间反演检查和结果可信度判断。
 - [convergence_scan.md](convergence_scan.md)：自动 `nw/nOmega/nk` convergence scan、fast MT 模式和 continuation。
