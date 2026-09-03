@@ -21,6 +21,12 @@ from .supercell import (
 )
 from .supercell_gw import solve_matrix_gw, solve_supercell_gw
 from .supercell_gw_fast import solve_matrix_gw_fast, solve_supercell_gw_fast
+from .orbital_moment import (
+    OrbitalMomentResult,
+    analyze_checkpoint_orbital_moments,
+    equal_time_density_matrix,
+    triangle_signed_area,
+)
 
 __all__ = [
     "RubyParameters", "MatsubaraGrid", "GWOptions", "GWResult",
@@ -31,4 +37,6 @@ __all__ = [
     "charge_order_parameter", "period3_complex_mode", "period3_real_pattern",
     "solve_matrix_gw", "solve_supercell_gw",
     "solve_matrix_gw_fast", "solve_supercell_gw_fast",
+    "OrbitalMomentResult", "analyze_checkpoint_orbital_moments",
+    "equal_time_density_matrix", "triangle_signed_area",
 ]

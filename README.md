@@ -15,6 +15,7 @@ The maintained documentation lives in [`docs/`](docs/README.md). In particular:
 - [`docs/numerics_and_validation.md`](docs/numerics_and_validation.md): convergence and validation checks;
 - [`docs/convergence_scan.md`](docs/convergence_scan.md): automated `nw`, `nOmega`, and `nk` scans, continuation and fast MT mode;
 - [`docs/performance_and_reuse.md`](docs/performance_and_reuse.md): performance bottlenecks and what can be reused between scan points;
+- [`docs/orbital_moment.md`](docs/orbital_moment.md): checkpoint-to-bond-current and local plaquette orbital-moment post-processing;
 - [`docs/tutorial.md`](docs/tutorial.md): complete theory tutorial and main PDF source.
 
 The GitHub Actions workflow `build tutorial PDF` automatically regenerates
@@ -62,8 +63,10 @@ chi_eta = -(T/Nk) sum_k Tr[K_eta G(k) Gamma_eta(k) G(k)] .
 - `rubycgw/gw.py`: noninteracting reference plus self-consistent Hartree + GW solver, with optional continuation warm start.
 - `rubycgw/susceptibility.py`: `G0G0`, `GG`, and full-vertex eta response.
 - `rubycgw/cgw.py`: q=0 Hartree, MT, AL1, AL2 vertex corrections; fused correction loop and vertex warm start.
+- `rubycgw/orbital_moment.py`: reconstruct an 18-site checkpoint Green function and evaluate triangle bond currents/local plaquette moments.
 - `run_ruby_cgw.py`: staged `G0G0 -> GG -> GW+MT -> full cGW` reference run.
 - `convergence_scan.py`: automated cutoff convergence scans with CSV/PNG output.
+- `analyze_orbital_moment.py`: checkpoint orbital-moment command-line post-processor.
 - `tests/`: convention, filling, Hermiticity and V=0 regression checks.
 
 ## Run
@@ -73,6 +76,20 @@ python -m pip install -r requirements.txt
 python -m pytest -q
 python run_ruby_cgw.py
 ```
+
+Local orbital moments from a converged zero-source 18-site GW checkpoint:
+
+```bash
+python analyze_orbital_moment.py checkpoints/example.npz \
+  --csv orbital_moment.csv \
+  --json orbital_moment.json
+```
+
+Add `--energy-unit-ev E0 --lattice-constant-angstrom a` to also report
+charge current in amperes and plaquette moments in Bohr magnetons.  The direct
+checkpoint tool measures an already-present loop current; the electromagnetic
+covariant response `dG/dA` is a separate calculation and is not implied by this
+post-processing step.
 
 Full staged convergence scan:
 
