@@ -39,6 +39,13 @@ from .electromagnetic import (
     finite_difference_electromagnetic_response,
     compare_covariant_to_finite_difference,
 )
+from .bulk_orbital_magnetization import (
+    BulkOrbitalMagnetizationResult,
+    analyze_checkpoint_bulk_orbital_magnetization,
+    bulk_orbital_magnetization_from_arrays,
+    spectral_cartesian_covariant_derivatives,
+    supercell_h0_cartesian_derivatives,
+)
 
 __all__ = [
     "RubyParameters", "MatsubaraGrid", "GWOptions", "GWResult",
@@ -56,4 +63,9 @@ __all__ = [
     "peierls_flux_vertex", "load_electromagnetic_background",
     "solve_electromagnetic_response", "finite_difference_electromagnetic_response",
     "compare_covariant_to_finite_difference",
+    "BulkOrbitalMagnetizationResult",
+    "analyze_checkpoint_bulk_orbital_magnetization",
+    "bulk_orbital_magnetization_from_arrays",
+    "spectral_cartesian_covariant_derivatives",
+    "supercell_h0_cartesian_derivatives",
 ]
