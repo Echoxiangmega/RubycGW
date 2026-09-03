@@ -2,6 +2,8 @@
 
 This module evaluates the interacting bulk orbital-magnetization formula of R. Nourafkan, G. Kotliar, and A.-M. S. Tremblay, *Phys. Rev. B* **90**, 125132 (2014), Eq. (2), for the 18-site Ruby GW checkpoint.
 
+For a line-by-line derivation of the second term, including the exact role of Nourafkan Eq. (A13), the repository-defined Jacobian-vector operator `C_GW`, the Hartree/Fock/MT/AL decomposition, the self-consistent `G_B`--`Sigma_B` loop, and the matrix-free GMRES implementation, see [uniform_B_self_energy_derivation.md](uniform_B_self_energy_derivation.md). That note also distinguishes notation taken from the paper from notation introduced only for this implementation and lists the relevant references.
+
 ## 1. Complete Eq. (2)
 
 For a two-dimensional system and the `z` component,
@@ -118,6 +120,8 @@ the linearized self-energy response to an arbitrary Green-function tangent `X` i
 +\delta\Sigma_{MT}[X]+\delta\Sigma_{AL1}[X]+\delta\Sigma_{AL2}[X].
 \]
 
+Here `C_GW` is repository notation for the Jacobian-vector product `(delta Sigma_GW / delta G) X`; it is not notation used by Nourafkan et al. The detailed derivation and code mapping are given in [uniform_B_self_energy_derivation.md](uniform_B_self_energy_derivation.md).
+
 The magnetic self-energy derivative therefore satisfies
 
 \[
@@ -140,7 +144,7 @@ The repository solves this equation with the same restarted matrix-free GMRES st
 
 No finite magnetic supercell and no finite-B subtraction are needed.
 
-For the density-density interaction used here there is no explicit linear coupling of the interaction to `B`; the gauge-invariant linear field dependence of GW therefore enters through `G_b`. This is the diagrammatic content used in the Nourafkan derivation.
+For the density-density interaction used here there is no explicit linear coupling of the interaction to `B`; the gauge-invariant linear field dependence of GW therefore enters through `G_b`. The precise GW-level identification of the gauge-invariant tilde self-energy derivative is an implementation assumption that should continue to be checked with independent uniform-field or Ward-identity benchmarks; see the caveat section of the detailed derivation note.
 
 ## 4. Finite mesh caveat
 
@@ -216,3 +220,11 @@ The test suite checks:
 6. the algebraic rewriting of Nourafkan A13 into the implemented geometric `Y_b` source;
 7. exact `Sigma_B=0` for a noninteracting self-energy functional;
 8. the direct fixed-point residual of the uniform-B self-energy equation in a Hartree-only test.
+
+## 8. References
+
+See the full annotated reference list in [uniform_B_self_energy_derivation.md](uniform_B_self_energy_derivation.md). The central sources are:
+
+1. R. Nourafkan, G. Kotliar, and A.-M. S. Tremblay, *Phys. Rev. B* **90**, 125132 (2014), DOI: 10.1103/PhysRevB.90.125132, arXiv:1404.3673.
+2. L. Hedin, *Phys. Rev.* **139**, A796 (1965), DOI: 10.1103/PhysRev.139.A796.
+3. H. Li, Z. Sun, Y. Su, H. Lin, H. Huang, and D. Li, *Phys. Rev. B* **107**, 085106 (2023), DOI: 10.1103/PhysRevB.107.085106, arXiv:2208.10401.
