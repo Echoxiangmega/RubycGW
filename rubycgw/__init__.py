@@ -46,6 +46,13 @@ from .bulk_orbital_magnetization import (
     spectral_cartesian_covariant_derivatives,
     supercell_h0_cartesian_derivatives,
 )
+from .magnetic_self_energy import (
+    MagneticSelfEnergyResponse,
+    geometric_uniform_B_green_source,
+    self_energy_tangent_from_G_tangent,
+    solve_uniform_B_self_energy_derivative,
+    solve_checkpoint_uniform_B_self_energy_derivative,
+)
 
 __all__ = [
     "RubyParameters", "MatsubaraGrid", "GWOptions", "GWResult",
@@ -68,4 +75,9 @@ __all__ = [
     "bulk_orbital_magnetization_from_arrays",
     "spectral_cartesian_covariant_derivatives",
     "supercell_h0_cartesian_derivatives",
+    "MagneticSelfEnergyResponse",
+    "geometric_uniform_B_green_source",
+    "self_energy_tangent_from_G_tangent",
+    "solve_uniform_B_self_energy_derivative",
+    "solve_checkpoint_uniform_B_self_energy_derivative",
 ]
