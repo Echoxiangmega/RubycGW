@@ -6,10 +6,16 @@ from .gw import (
     GWOptions,
     GWResult,
     NonInteractingResult,
-    solve_gw,
     solve_noninteracting,
 )
-from .cgw import VertexOptions, VertexResult, solve_vertex_q0
+from .primitive_gw import solve_gw, rebuild_primitive_fixed_point
+from .cgw import (
+    VertexOptions,
+    VertexResult,
+    solve_vertex_q0,
+    susceptibility_matrix_q0,
+    physical_symmetric_susceptibility,
+)
 from .susceptibility import chi_eta, channel_summary
 from .supercell import (
     NSUP,
@@ -21,6 +27,13 @@ from .supercell import (
 )
 from .supercell_gw import solve_matrix_gw, solve_supercell_gw
 from .supercell_gw_fast import solve_matrix_gw_fast, solve_supercell_gw_fast
+from .pseudospin import (
+    available_pseudospin_channels,
+    canonical_channel_name,
+    primitive_cell_pseudospin_channels,
+    primitive_pseudospin_vertex,
+    primitive_triangle_pseudospin_vertices,
+)
 from .orbital_moment import (
     OrbitalMomentResult,
     analyze_checkpoint_orbital_moments,
@@ -58,7 +71,12 @@ __all__ = [
     "RubyParameters", "MatsubaraGrid", "GWOptions", "GWResult",
     "NonInteractingResult", "VertexOptions", "VertexResult", "build_h0",
     "build_interaction", "eta_vertices", "solve_gw", "solve_noninteracting",
-    "solve_vertex_q0", "chi_eta", "channel_summary",
+    "rebuild_primitive_fixed_point", "solve_vertex_q0", "chi_eta",
+    "channel_summary", "susceptibility_matrix_q0",
+    "physical_symmetric_susceptibility",
+    "available_pseudospin_channels", "canonical_channel_name",
+    "primitive_cell_pseudospin_channels", "primitive_pseudospin_vertex",
+    "primitive_triangle_pseudospin_vertices",
     "NSUP", "build_supercell_h0", "build_supercell_interaction",
     "charge_order_parameter", "period3_complex_mode", "period3_real_pattern",
     "solve_matrix_gw", "solve_supercell_gw",
