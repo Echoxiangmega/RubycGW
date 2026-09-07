@@ -33,6 +33,7 @@ from rubycgw.ed18 import (
 )
 from rubycgw.ed18_plot import (
     ground_sector_label,
+    leading_subspace_weights,
     save_ed18_plots,
 )
 from rubycgw.model import RubyParameters
@@ -223,6 +224,9 @@ def main():
     leading_weights /= np.maximum(
         np.sum(leading_weights, axis=-1, keepdims=True), 1e-300
     )
+    leading_subspace_w, leading_subspace_dim = leading_subspace_weights(
+        Sevals, Sevecs
+    )
 
     out = Path(args.out)
     if out.suffix.lower() != ".npz":
@@ -253,6 +257,8 @@ def main():
         structure_means=means,
         structure_diagonal=Sdiag,
         leading_mode_weights=leading_weights,
+        leading_subspace_weights=leading_subspace_w,
+        leading_subspace_dimension=leading_subspace_dim,
         leading_q=leading_q,
         cluster_warning=np.asarray(
             "18-site index-3 torus contains Gamma and +/-Q only; M is not commensurate"
