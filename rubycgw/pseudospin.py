@@ -18,6 +18,16 @@ Pauli eigenvalues +/-1.  The legacy eta/current vertices are larger by sqrt(3),
 so diagonal z susceptibilities from this module are one third of the legacy
 eta susceptibilities.  This normalization is intentional: it allows direct
 comparison of chi_xx, chi_yy, and chi_zz as pseudospin components.
+
+For the 18-site supercell, production q_sc=0 response should normally be driven
+by a *harmonic bare vertex* directly.  In particular, the primitive q=0 vertex
+is the normalized block-diagonal operator
+
+    K_{mu,q0} = diag(K_mu, K_mu, K_mu) / sqrt(3).
+
+This is a cGW functional-derivative direction, not a finite perturbation added
+to the self-consistent GW Hamiltonian.  Sector-local vertices are retained only
+as a useful basis/regression representation.
 """
 
 from __future__ import annotations
@@ -144,12 +154,16 @@ def primitive_pseudospin_vertex(name: str) -> np.ndarray:
 def supercell_pseudospin_vertices(
     channel_names: list[str] | tuple[str, ...],
 ) -> tuple[np.ndarray, list[str], list[str]]:
-    """Embed requested primitive-cell channels into the three supercell sectors.
+    """Embed requested primitive-cell channels into the three local sectors.
 
     The returned order is channel-major, then sector::
 
         channel0_s0, channel0_s1, channel0_s2,
         channel1_s0, ...
+
+    This local-sector basis is retained for regression and for analyses that
+    explicitly need the full three-sector response matrix.  For a specified
+    harmonic response, prefer :func:`supercell_pseudospin_harmonic_vertices`.
     """
     canonical = [canonical_channel_name(x) for x in channel_names]
     vertices: list[np.ndarray] = []
@@ -162,6 +176,62 @@ def supercell_pseudospin_vertices(
             mat[sl, sl] = k6
             vertices.append(mat)
             labels.append(f"{ch}_s{s}")
+    if not vertices:
+        raise ValueError("at least one pseudospin channel is required")
+    return np.stack(vertices, axis=0), labels, canonical
+
+
+def _harmonic_row(harmonic: str) -> tuple[str, np.ndarray]:
+    key = str(harmonic).strip()
+    aliases = {"q0": "q0", "qc": "Qc", "Qc": "Qc", "qs": "Qs", "Qs": "Qs"}
+    if key not in aliases:
+        raise ValueError("harmonic must be one of q0,Qc,Qs")
+    canonical = aliases[key]
+    index = {"q0": 0, "Qc": 1, "Qs": 2}[canonical]
+    return canonical, np.asarray(sector_harmonic_matrix()[index], dtype=float)
+
+
+def supercell_pseudospin_harmonic_vertex(
+    channel_name: str,
+    harmonic: str = "q0",
+) -> tuple[np.ndarray, str, str]:
+    """Return one direct 18x18 harmonic bare vertex for supercell cGW.
+
+    No finite external field is applied.  The returned matrix is simply the
+    operator derivative direction ``K`` in the linear cGW equation
+
+        (I-L) Gamma = K.
+
+    For ``harmonic='q0'`` this is
+
+        diag(K6,K6,K6)/sqrt(3),
+
+    exactly equal to first constructing the three sector-local vertices and
+    applying the orthogonal (s0,s1,s2)->(q0,Qc,Qs) transform.
+    """
+    ch = canonical_channel_name(channel_name)
+    harm, coeff = _harmonic_row(harmonic)
+    k6 = primitive_pseudospin_vertex(ch)
+    mat = np.zeros((NSUP, NSUP), dtype=complex)
+    for s, weight in enumerate(coeff):
+        sl = slice(NSUB * s, NSUB * (s + 1))
+        mat[sl, sl] = float(weight) * k6
+    return mat, f"{ch}_{harm}", ch
+
+
+def supercell_pseudospin_harmonic_vertices(
+    channel_names: list[str] | tuple[str, ...],
+    harmonic: str = "q0",
+) -> tuple[np.ndarray, list[str], list[str]]:
+    """Return direct harmonic bare vertices, one per requested pseudospin channel."""
+    vertices: list[np.ndarray] = []
+    labels: list[str] = []
+    canonical: list[str] = []
+    for name in channel_names:
+        mat, label, ch = supercell_pseudospin_harmonic_vertex(name, harmonic)
+        vertices.append(mat)
+        labels.append(label)
+        canonical.append(ch)
     if not vertices:
         raise ValueError("at least one pseudospin channel is required")
     return np.stack(vertices, axis=0), labels, canonical
