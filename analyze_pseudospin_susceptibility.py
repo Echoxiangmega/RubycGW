@@ -1,32 +1,42 @@
 #!/usr/bin/env python3
-"""Compute cGW susceptibilities for Ruby chirality-pseudospin channels.
+"""Direct q=0 cGW susceptibilities for Ruby chirality-pseudospin channels.
+
+This driver evaluates linear response on a converged zero-field 18-site
+supercell SC-GW fixed point.  It does NOT perform finite-field calculations and
+does NOT solve three sector-local perturbations first.  Instead it constructs
+the requested normalized q=0 bare operator vertex directly,
+
+    K_{mu,q0} = diag(K_mu,K_mu,K_mu) / sqrt(3),
+
+and solves the usual covariant-GW equation
+
+    (I-L) Gamma_{mu,q0} = K_{mu,q0}.
+
+Thus one requested diagonal susceptibility such as chi_xx requires one cGW
+vertex solve.  A cross response chi_ab requires only the right/driven vertex
+Gamma_b.  A full N-channel matrix requires N cGW solves.
 
 Examples
 --------
-Diagonal TR-even orbital/charge susceptibility at primitive q=0::
 
     python analyze_pseudospin_susceptibility.py --V 1.4 --primitive-filling 2 \
         --chi x_even,x_even --harmonic q0
 
-Loop-current pseudospin susceptibility (physical same circulation)::
+    python analyze_pseudospin_susceptibility.py --V 1.4 --primitive-filling 2 \
+        --chi y_even,y_even --harmonic q0
 
     python analyze_pseudospin_susceptibility.py --V 1.4 --primitive-filling 2 \
         --chi z_same,z_same --harmonic q0
 
-Cross susceptibility::
-
-    python analyze_pseudospin_susceptibility.py --V 1.4 --primitive-filling 2 \
-        --chi x_even,y_even --harmonic q0
-
-Or request a full matrix among several channels::
-
     python analyze_pseudospin_susceptibility.py --V 1.4 --primitive-filling 2 \
         --channels x_even y_even z_same z_opposite --harmonic q0
 
-The x/y vertices are the TR-even E-type intra-triangle charge/orbital order
-parameters.  z is the TR-odd loop chirality.  z is normalized as a Pauli
-pseudospin, so chi_zz is 1/3 of the legacy eta-current susceptibility for the
-same physical channel.
+The x/y vertices are TR-even E-type intra-triangle charge/orbital order
+parameters.  z is the TR-odd loop chirality.  z is Pauli-normalized, so a
+diagonal chi_zz is one third of the legacy eta-current susceptibility for the
+same physical current channel.
+
+Finite-Q pseudospin response is intentionally deferred in this driver.
 """
 
 from __future__ import annotations
@@ -42,17 +52,13 @@ from rubycgw.model import RubyParameters
 from rubycgw.pseudospin import (
     available_pseudospin_channels,
     canonical_channel_name,
-    harmonic_block_indices,
-    pseudospin_harmonic_labels,
-    pseudospin_harmonic_transform,
-    supercell_pseudospin_vertices,
+    supercell_pseudospin_harmonic_vertices,
 )
 from rubycgw.supercell import build_supercell_h0, build_supercell_interaction
 from rubycgw.supercell_cgw import (
     SupercellVertexOptions,
     physical_symmetric_susceptibility,
     solve_vertex_q0,
-    susceptibility_matrix_q0,
 )
 from rubycgw.supercell_gw import (
     compute_polarization_matrix,
@@ -82,35 +88,28 @@ def _parse_args():
         "--chi",
         default=None,
         help=(
-            "One requested pair, e.g. x_even,x_even or z_same,z_opposite. "
-            "The required channels are solved automatically."
+            "One response chi[left,right], e.g. x_even,x_even or x_even,y_even. "
+            "Only the right/driven cGW vertex is solved."
         ),
     )
     p.add_argument(
         "--channels",
         nargs="+",
         default=None,
-        help=(
-            "Channels for a full susceptibility matrix. Examples: Ax Ay Az, "
-            "x_even y_even z_same."
-        ),
+        help="Channels for a full q=0 susceptibility matrix.",
     )
-    p.add_argument(
-        "--list-channels",
-        action="store_true",
-        help="Print available channel names and exit.",
-    )
+    p.add_argument("--list-channels", action="store_true")
     p.add_argument(
         "--harmonic",
-        choices=["q0", "Qc", "Qs", "all"],
+        choices=["q0"],
         default="q0",
-        help="Primitive-cell harmonic folded into supercell q_sc=0.",
+        help="Only primitive q=0 is enabled in the current production driver.",
     )
     p.add_argument(
         "--stage",
         choices=["gg", "split-mt", "full"],
         default="full",
-        help="gg=bubble; split-mt=H+F+MT; full=add AL1/AL2.",
+        help="gg=bubble; split-mt=H+F+MT(W-V); full=also AL1/AL2.",
     )
     p.add_argument("--vertex-max-iter", type=int, default=150)
     p.add_argument("--vertex-tol", type=float, default=1e-8)
@@ -120,33 +119,31 @@ def _parse_args():
     p.add_argument("--vertex-verbose", action="store_true")
     p.add_argument("--momentum-backend", choices=["fft", "direct"], default="fft")
     p.add_argument("--max-scgw-residual", type=float, default=1e-6)
-    p.add_argument("--out", default="pseudospin_susceptibility.npz")
+    p.add_argument("--out", default="pseudospin_susceptibility_q0.npz")
     return p.parse_args()
 
 
-def _select_channels(args):
+def _select_response(args):
     if args.chi and args.channels:
         raise ValueError("use either --chi or --channels, not both")
-    requested_pair = None
+
     if args.chi:
         fields = [x.strip() for x in str(args.chi).split(",") if x.strip()]
         if len(fields) != 2:
             raise ValueError("--chi expects exactly two comma-separated channel names")
-        left, right = [canonical_channel_name(x) for x in fields]
-        requested_pair = (left, right)
+        left = canonical_channel_name(fields[0])
+        right = canonical_channel_name(fields[1])
+        return [left], [right], (left, right)
+
+    if args.channels:
         channels = []
-        for ch in (left, right):
-            if ch not in channels:
-                channels.append(ch)
-    elif args.channels:
-        channels = []
-        for x in args.channels:
-            ch = canonical_channel_name(x)
+        for raw in args.channels:
+            ch = canonical_channel_name(raw)
             if ch not in channels:
                 channels.append(ch)
     else:
         channels = ["x_even", "y_even", "z_same", "z_opposite"]
-    return channels, requested_pair
+    return channels, channels, None
 
 
 def _exact_checkpoint(args, params, grid):
@@ -189,8 +186,30 @@ def _verify_and_rebuild(seed, params, grid, backend):
     return h0, Vq, G, P, W, density, rH, rGW
 
 
-def _format_matrix(mat):
-    arr = np.asarray(mat)
+def _susceptibility_rect_q0(
+    G: np.ndarray,
+    left_vertices: np.ndarray,
+    right_gammas: list[np.ndarray],
+    grid: MatsubaraGrid,
+) -> np.ndarray:
+    """Return chi_ab=-int Tr[K_left,a G Gamma_right,b G]."""
+    K = np.asarray(left_vertices, dtype=complex)
+    chi = np.zeros((K.shape[0], len(right_gammas)), dtype=complex)
+    pref = -(grid.T / grid.nk)
+    for b, gamma in enumerate(right_gammas):
+        chi[:, b] = pref * np.einsum(
+            "iab,nxybc,nxycd,nxyda->i",
+            K,
+            G,
+            np.asarray(gamma, dtype=complex),
+            G,
+            optimize=True,
+        )
+    return chi
+
+
+def _format_real_matrix(mat):
+    arr = np.asarray(mat, dtype=float)
     return "\n".join(
         "  " + " ".join(f"{float(x):+.7e}" for x in row)
         for row in arr
@@ -206,19 +225,27 @@ def main():
         print("Aliases: same -> z_same, opposite -> z_opposite")
         return
 
-    channels, requested_pair = _select_channels(args)
+    left_channels, right_channels, requested_pair = _select_response(args)
     params = RubyParameters(ti=args.ti, t1=args.t1, t2=args.t2, V=args.V)
     grid = MatsubaraGrid(
-        nk1=args.nk1, nk2=args.nk2, nw=args.nw,
-        nOmega=args.nomega, T=args.T,
+        nk1=args.nk1,
+        nk2=args.nk2,
+        nw=args.nw,
+        nOmega=args.nomega,
+        T=args.T,
     )
 
     checkpoint, seed, meta, _ = _exact_checkpoint(args, params, grid)
     print("checkpoint:", checkpoint)
-    print("channels:", ", ".join(channels))
+    print("left operators :", ", ".join(left_channels))
+    print("cGW derivatives:", ", ".join(right_channels))
+    print(
+        "response mode: direct zero-field cGW derivative at primitive q=0; "
+        "no finite perturbation and no sector-local precursor solves"
+    )
     print(
         "normalization: x,y,z all project to Pauli pseudospins; "
-        "z susceptibility = legacy eta-current susceptibility / 3"
+        "diagonal z susceptibility = legacy eta-current susceptibility / 3"
     )
 
     h0, Vq, G, P, W, density, rH, rGW = _verify_and_rebuild(
@@ -234,13 +261,19 @@ def main():
             f"checkpoint is not a fixed point of the current SC-GW map: {sc_res:.3e}"
         )
 
-    Klocal, local_labels, canonical = supercell_pseudospin_vertices(channels)
-    bare = [np.broadcast_to(K, G.shape).copy() for K in Klocal]
-    chi_gg = susceptibility_matrix_q0(G, Klocal, bare, grid)
+    Kleft, left_labels, left_canonical = supercell_pseudospin_harmonic_vertices(
+        left_channels, harmonic="q0"
+    )
+    Kright, right_labels, right_canonical = supercell_pseudospin_harmonic_vertices(
+        right_channels, harmonic="q0"
+    )
 
+    bare_right = [np.broadcast_to(K, G.shape).copy() for K in Kright]
+    chi_gg = _susceptibility_rect_q0(G, Kleft, bare_right, grid)
+
+    vertex_results = []
     if args.stage == "gg":
-        gammas = bare
-        vertex_results = []
+        gammas = bare_right
     else:
         vopts = SupercellVertexOptions(
             max_iter=args.vertex_max_iter,
@@ -256,72 +289,78 @@ def main():
             momentum_backend=args.momentum_backend,
         )
         gammas = []
-        vertex_results = []
-        for i, (label, K) in enumerate(zip(local_labels, Klocal), start=1):
-            print(f"--- vertex {i}/{len(local_labels)}: {label} ({args.stage}) ---")
+        for i, (label, K) in enumerate(zip(right_labels, Kright), start=1):
+            print(f"--- direct cGW vertex {i}/{len(right_labels)}: {label} ({args.stage}) ---")
             result = solve_vertex_q0(G, W, Vq, K, grid, opts=vopts)
             vertex_results.append(result)
+            if not result.converged:
+                raise RuntimeError(
+                    f"vertex {label} did not converge: residual={result.final_error:.3e}"
+                )
             gammas.append(result.Gamma)
             print(
-                f"{label}: converged={result.converged}, it={result.iterations}, "
-                f"residual={result.final_error:.3e}"
+                f"{label}: solver={result.solver}, it={result.iterations}, "
+                f"residual={result.final_error:.3e}, "
+                f"|H|={np.max(np.abs(result.Gamma_H)):.3e}, "
+                f"|F|={np.max(np.abs(result.Gamma_F)):.3e}, "
+                f"|MTc|={np.max(np.abs(result.Gamma_MT)):.3e}, "
+                f"|AL1|={np.max(np.abs(result.Gamma_AL1)):.3e}, "
+                f"|AL2|={np.max(np.abs(result.Gamma_AL2)):.3e}"
             )
-        bad = [
-            local_labels[i] for i, r in enumerate(vertex_results) if not r.converged
-        ]
-        if bad:
-            raise RuntimeError("vertex solve did not converge for: " + ", ".join(bad))
 
-    chi_raw = susceptibility_matrix_q0(G, Klocal, gammas, grid)
-    chi_sym, imag_max = physical_symmetric_susceptibility(chi_raw)
-    chi_gg_sym, _ = physical_symmetric_susceptibility(chi_gg)
+    chi_raw = _susceptibility_rect_q0(G, Kleft, gammas, grid)
 
-    Tmat = pseudospin_harmonic_transform(len(canonical))
-    harm_labels = pseudospin_harmonic_labels(canonical)
-    chi_harm = Tmat @ chi_sym @ Tmat.T
-    chi_gg_harm = Tmat @ chi_gg_sym @ Tmat.T
-
-    print(f"max discarded Im(chi)={imag_max:.3e}")
-    harmonics = ["q0", "Qc", "Qs"] if args.harmonic == "all" else [args.harmonic]
-    blocks = {}
-    for harm in harmonics:
-        idx = harmonic_block_indices(len(canonical), harm)
-        block = chi_harm[np.ix_(idx, idx)]
-        blocks[harm] = block
-        print(f"\nchi_{harm} basis [{', '.join(canonical)}]:")
-        print(_format_matrix(block))
+    square_same_basis = left_canonical == right_canonical
+    if square_same_basis:
+        chi_sym, imag_max = physical_symmetric_susceptibility(chi_raw)
+        chi_gg_sym, gg_imag_max = physical_symmetric_susceptibility(chi_gg)
+        print("\nchi_GG(q=0), symmetric static matrix:")
+        print(_format_real_matrix(chi_gg_sym))
+        print(f"\nchi_{args.stage}(q=0), symmetric static matrix:")
+        print(_format_real_matrix(chi_sym))
+        print(
+            f"discarded imaginary scales: GG={gg_imag_max:.3e}, "
+            f"{args.stage}={imag_max:.3e}"
+        )
+    else:
+        chi_sym = None
+        chi_gg_sym = None
+        imag_max = float(np.max(np.abs(chi_raw.imag)))
+        gg_imag_max = float(np.max(np.abs(chi_gg.imag)))
 
     if requested_pair is not None:
-        il = canonical.index(requested_pair[0])
-        ir = canonical.index(requested_pair[1])
-        for harm in harmonics:
-            idx = harmonic_block_indices(len(canonical), harm)
-            val = chi_harm[idx[il], idx[ir]]
-            print(
-                f"\nrequested chi[{requested_pair[0]},{requested_pair[1]}]_{harm} "
-                f"= {val:+.12e}"
-            )
+        val_gg = complex(chi_gg[0, 0])
+        val = complex(chi_raw[0, 0])
+        print(
+            f"\nrequested chi[{requested_pair[0]},{requested_pair[1]}]_q0"
+        )
+        print(f"  GG   = {val_gg.real:+.12e} {val_gg.imag:+.12e}j")
+        print(f"  {args.stage:<4s} = {val.real:+.12e} {val.imag:+.12e}j")
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "V": float(args.V),
         "primitive_filling": float(args.primitive_filling),
+        "harmonic": np.asarray("q0"),
         "stage": np.asarray(args.stage),
-        "channels": np.asarray(canonical),
-        "local_labels": np.asarray(local_labels),
-        "harmonic_labels": np.asarray(harm_labels),
+        "left_channels": np.asarray(left_canonical),
+        "right_channels": np.asarray(right_canonical),
+        "left_vertex_labels": np.asarray(left_labels),
+        "right_vertex_labels": np.asarray(right_labels),
         "chi_raw": np.asarray(chi_raw),
-        "chi_symmetric": np.asarray(chi_sym),
-        "chi_harmonic": np.asarray(chi_harm),
-        "chi_gg_harmonic": np.asarray(chi_gg_harm),
+        "chi_gg_raw": np.asarray(chi_gg),
         "density": np.asarray(density),
         "scgw_residual": float(sc_res),
         "chi_imag_max": float(imag_max),
+        "chi_gg_imag_max": float(gg_imag_max),
         "z_is_pauli_normalized": np.asarray(True),
+        "direct_harmonic_vertex": np.asarray(True),
+        "finite_field_used": np.asarray(False),
     }
-    for harm, block in blocks.items():
-        payload[f"chi_{harm}"] = np.asarray(block)
+    if chi_sym is not None:
+        payload["chi_symmetric"] = np.asarray(chi_sym)
+        payload["chi_gg_symmetric"] = np.asarray(chi_gg_sym)
     if vertex_results:
         payload["vertex_iterations"] = np.asarray([r.iterations for r in vertex_results])
         payload["vertex_residuals"] = np.asarray([r.final_error for r in vertex_results])
