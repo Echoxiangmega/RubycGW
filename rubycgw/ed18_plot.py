@@ -6,7 +6,7 @@ plots that distinguish:
 
 * the leading structure-factor eigenvalue S_max(q);
 * the individual diagonal channel correlations S_{mu,mu}(q);
-* the leading eigenmode composition |v_mu(q)|^2;
+* the basis-invariant leading-eigenspace channel composition;
 * the first few structure-factor eigenvalues, which reveal near-degeneracies;
 * the low-energy many-body spectrum and ground-manifold changes.
 
@@ -112,19 +112,67 @@ def _validate(data: dict[str, np.ndarray]) -> None:
         raise KeyError("ED18 scan file is missing required arrays: " + ", ".join(missing))
 
 
+def leading_subspace_weights(
+    eigenvalues: np.ndarray,
+    eigenvectors: np.ndarray,
+    *,
+    degeneracy_tol: float = 1e-8,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return basis-invariant channel weights of the leading eigenspace.
+
+    If the largest structure eigenvalue is d-fold degenerate, the individual
+    eigenvectors inside that subspace are arbitrary.  The invariant quantity is
+    the diagonal of the projector onto the whole leading subspace.  We report
+
+        w_mu = (1/d) sum_{a=1}^d |v_{mu,a}|^2,
+
+    normalized so sum_mu w_mu=1.  For d=1 this reduces to |v_mu|^2.
+    """
+    evals = np.asarray(eigenvalues, dtype=float)
+    evecs = np.asarray(eigenvectors, dtype=complex)
+    if evecs.shape[:-2] != evals.shape[:-1] or evecs.shape[-2:] != (
+        evals.shape[-1],
+        evals.shape[-1],
+    ):
+        raise ValueError("structure eigenvalue/eigenvector shapes are inconsistent")
+
+    weights = np.zeros(evals.shape, dtype=float)
+    dims = np.ones(evals.shape[:-1], dtype=int)
+    for idx in np.ndindex(evals.shape[:-1]):
+        vals = evals[idx]
+        scale = max(1.0, abs(float(vals[0])))
+        d = int(np.count_nonzero(np.abs(vals - vals[0]) <= degeneracy_tol * scale))
+        d = max(d, 1)
+        block = evecs[idx][:, :d]
+        w = np.sum(np.abs(block) ** 2, axis=1) / float(d)
+        w /= max(float(np.sum(w)), 1e-300)
+        weights[idx] = w
+        dims[idx] = d
+    return weights, dims
+
+
 def derived_mode_data(data: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     """Return convenient channel-resolved arrays derived from the saved matrices."""
     _validate(data)
     S = np.asarray(data["structure_matrix"], dtype=complex)
+    evals = np.asarray(data["structure_eigenvalues"], dtype=float)
     evecs = np.asarray(data["structure_eigenvectors"], dtype=complex)
     diag = np.real(np.diagonal(S, axis1=-2, axis2=-1))
+
+    # Raw first-eigenvector weights are useful only when the leading eigenvalue
+    # is nondegenerate.
     leading_weights = np.abs(evecs[..., 0]) ** 2
     leading_weights /= np.maximum(
         np.sum(leading_weights, axis=-1, keepdims=True), 1e-300
     )
+
+    # Use this invariant projector weight for physical plots and comparisons.
+    subspace_weights, subspace_dim = leading_subspace_weights(evals, evecs)
     return {
         "structure_diagonal": np.asarray(diag, dtype=float),
         "leading_mode_weights": np.asarray(leading_weights, dtype=float),
+        "leading_subspace_weights": np.asarray(subspace_weights, dtype=float),
+        "leading_subspace_dimension": np.asarray(subspace_dim, dtype=int),
     }
 
 
@@ -143,7 +191,7 @@ def save_ed18_plots(
     gap/multiplicity, interaction expectation, and S_max(Gamma/Q).
 
     ``modes_path`` resolves the structure factor into the six pseudospin
-    channels and shows the leading eigenvector weights.
+    channels and shows basis-invariant leading-eigenspace channel weights.
     """
     if isinstance(data_or_path, (str, Path)):
         data = load_ed18_scan(data_or_path)
@@ -162,7 +210,8 @@ def save_ed18_plots(
     Sevals = np.asarray(data["structure_eigenvalues"], dtype=float)
     derived = derived_mode_data(data)
     Sdiag = derived["structure_diagonal"]
-    weights = derived["leading_mode_weights"]
+    weights = derived["leading_subspace_weights"]
+    subspace_dim = derived["leading_subspace_dimension"]
     mids = transition_midpoints(data)
 
     summary_path = Path(summary_path)
@@ -273,13 +322,18 @@ def save_ed18_plots(
         axes[1, col].set_ylabel(r"diagonal $S_{\mu\mu}$")
         axes[1, col].legend(ncol=2, fontsize=8)
 
-        # Bottom: composition of the leading collective eigenmode.
+        # Bottom: basis-invariant composition of the leading eigenspace.
         for ic, label in enumerate(labels):
             axes[2, col].plot(V, weights[:, iq, ic], label=label)
-        axes[2, col].set_ylabel(r"leading weight $|v_\mu|^2$")
+        axes[2, col].set_ylabel(r"leading-eigenspace channel weight")
         axes[2, col].set_xlabel(r"$V$")
         axes[2, col].set_ylim(-0.03, 1.03)
         axes[2, col].legend(ncol=2, fontsize=8)
+        dvals = sorted(set(int(x) for x in subspace_dim[:, iq]))
+        axes[2, col].set_title(
+            "leading eigenspace dimension d=" + ",".join(str(x) for x in dvals),
+            fontsize=9,
+        )
 
         for row in range(3):
             _add_transition_lines(axes[row, col], mids)
