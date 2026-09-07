@@ -8,6 +8,7 @@
 - [model_and_conventions.md](model_and_conventions.md)：Ruby lattice 的六子晶格编号、12 条 hopping bond、Fourier convention、`eta_A/B` 与 same/opposite 标签。
 - [gw_theory.md](gw_theory.md)：self-consistent GW 的方程、每个数组的含义以及代码中的对应实现。
 - [cgw_theory.md](cgw_theory.md)：为什么对外源求导会得到 Hartree、Fock、MT、AL1、AL2，以及 q=(0,0) 版本在代码中的实现。
+- [pseudospin_susceptibility.md](pseudospin_susceptibility.md)：统一的 chirality-pseudospin 响应：TR-even `tau_x/tau_y` intra-triangle charge/orbital order、TR-odd `tau_z` loop chirality、A/B even/odd channels，以及 `chi_xx/chi_yy/chi_zz` 的 cGW 计算脚本。
 - [orbital_moment.md](orbital_moment.md)：从 checkpoint 重建 `G`，计算 bond current 与局域 plaquette orbital moment。
 - [electromagnetic_response.md](electromagnetic_response.md)：Peierls-flux electromagnetic covariant response、固定 filling 的 `dmu/dphi` 以及与 `+/-delta_phi` 完整 GW 有限差分的验证。
 - [bulk_orbital_magnetization.md](bulk_orbital_magnetization.md)：Nourafkan bulk orbital magnetization、带 orbital embedding 的物理 `k` 导数，以及非局域 GW 中 `dSigma^(B)/dB` 第二项的处理。
