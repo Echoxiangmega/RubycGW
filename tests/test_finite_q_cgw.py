@@ -10,7 +10,11 @@ from rubycgw.finite_q_cgw import (
     susceptibility_matrix_finite_q,
     vertex_corrections_finite_q,
 )
-from rubycgw.gw import build_g0_inverse
+from rubycgw.gw import (
+    build_g0_inverse,
+    compute_polarization,
+    compute_screened_interaction,
+)
 from rubycgw.pseudospin import primitive_pseudospin_vertex
 
 
@@ -149,3 +153,40 @@ def test_noninteracting_diagonal_susceptibility_obeys_q_minus_q_relation():
         G0, K[None, ...], [Kfield], pm, grid
     )[0, 0]
     assert abs(chip - np.conj(chim)) < 2e-11
+
+
+def test_full_interacting_kernel_obeys_q_minus_q_for_diagonal_channel():
+    """Integration-level check of finite-q AL routing on a physical G,W pair."""
+    params = RubyParameters(V=0.04, ti=0.4, t1=0.2, t2=0.2)
+    grid = MatsubaraGrid(nk1=3, nk2=3, nw=4, nOmega=1, T=0.12)
+    h0 = build_h0(grid.kmesh(), params)
+    G0 = np.linalg.inv(build_g0_inverse(h0, grid, mu=0.05))
+    Vq = build_interaction(grid.qmesh(), params)
+    P = compute_polarization(G0, grid, backend="fft")
+    W = compute_screened_interaction(P, Vq, grid)
+    K = primitive_pseudospin_vertex("x_even")
+    p = (1, 0)
+    pm = negative_q_index(p, grid)
+    opts = VertexOptions(
+        max_iter=60,
+        tol=2e-10,
+        solver="gmres",
+        gmres_restart=10,
+        include_hartree=True,
+        include_fock=True,
+        include_mt=True,
+        include_al=True,
+        verbose=False,
+        momentum_backend="fft",
+    )
+    vp = solve_vertex_finite_q(G0, W, Vq, K, p, grid, opts)
+    vm = solve_vertex_finite_q(G0, W, Vq, K, pm, grid, opts)
+    assert vp.converged
+    assert vm.converged
+    chip = susceptibility_matrix_finite_q(
+        G0, K[None, ...], [vp.Gamma], p, grid
+    )[0, 0]
+    chim = susceptibility_matrix_finite_q(
+        G0, K[None, ...], [vm.Gamma], pm, grid
+    )[0, 0]
+    assert abs(chip - np.conj(chim)) < 5e-8
