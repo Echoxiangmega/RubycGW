@@ -5,7 +5,10 @@ from rubycgw.pseudospin import (
     primitive_triangle_pseudospin_vertices,
     primitive_cell_pseudospin_channels,
     pseudospin_harmonic_transform,
+    supercell_pseudospin_harmonic_vertex,
+    supercell_pseudospin_vertices,
 )
+from rubycgw.supercell_cgw import sector_harmonic_matrix
 
 
 def _chiral_vectors():
@@ -64,3 +67,24 @@ def test_harmonic_transform_is_orthogonal_blockwise():
     T = pseudospin_harmonic_transform(4)
     assert T.shape == (12, 12)
     assert np.allclose(T @ T.T, np.eye(12), atol=1e-12)
+
+
+def test_direct_q0_vertex_equals_transformed_sector_local_vertices():
+    local, labels, canonical = supercell_pseudospin_vertices(["x_even"])
+    assert labels == ["x_even_s0", "x_even_s1", "x_even_s2"]
+    assert canonical == ["x_even"]
+    direct, label, ch = supercell_pseudospin_harmonic_vertex("x_even", "q0")
+    expected = np.tensordot(sector_harmonic_matrix()[0], local, axes=(0, 0))
+    assert label == "x_even_q0"
+    assert ch == "x_even"
+    assert np.allclose(direct, expected, atol=1e-12)
+
+
+def test_direct_harmonic_vertices_match_all_transform_rows():
+    local, _, _ = supercell_pseudospin_vertices(["z_same"])
+    for i, harmonic in enumerate(("q0", "Qc", "Qs")):
+        direct, label, ch = supercell_pseudospin_harmonic_vertex("z_same", harmonic)
+        expected = np.tensordot(sector_harmonic_matrix()[i], local, axes=(0, 0))
+        assert label == f"z_same_{harmonic}"
+        assert ch == "z_same"
+        assert np.allclose(direct, expected, atol=1e-12)
