@@ -16,6 +16,18 @@ from .cgw import (
     susceptibility_matrix_q0,
     physical_symmetric_susceptibility,
 )
+from .finite_q_cgw import (
+    FiniteQVertexOptions,
+    FiniteQVertexResult,
+    normalize_q_index,
+    q_index_from_reduced,
+    q_reduced_from_index,
+    negative_q_index,
+    vertex_corrections_finite_q,
+    solve_vertex_finite_q,
+    susceptibility_matrix_finite_q,
+    hermitianize_q_pair,
+)
 from .susceptibility import chi_eta, channel_summary
 from .supercell import (
     NSUP,
@@ -74,6 +86,11 @@ __all__ = [
     "rebuild_primitive_fixed_point", "solve_vertex_q0", "chi_eta",
     "channel_summary", "susceptibility_matrix_q0",
     "physical_symmetric_susceptibility",
+    "FiniteQVertexOptions", "FiniteQVertexResult",
+    "normalize_q_index", "q_index_from_reduced", "q_reduced_from_index",
+    "negative_q_index", "vertex_corrections_finite_q",
+    "solve_vertex_finite_q", "susceptibility_matrix_finite_q",
+    "hermitianize_q_pair",
     "available_pseudospin_channels", "canonical_channel_name",
     "primitive_cell_pseudospin_channels", "primitive_pseudospin_vertex",
     "primitive_triangle_pseudospin_vertices",
