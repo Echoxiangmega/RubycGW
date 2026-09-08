@@ -17,8 +17,9 @@ while bare SOX over-corrects them:
 - `z_same`: ED `4.032216`, cGW `11.419454`, cGW+SOX `2.309702`;
 - `z_opposite`: ED `4.033763`, cGW `10.679889`, cGW+SOX `2.560204`.
 
-This is exactly the regime in which it is useful to separate a missing exchange
-topology from an inaccurate screened-interaction/background feedback.
+This is the regime in which it is useful to ask whether improving the screened
+interaction and the resulting one-particle background can move the response
+back toward ED.
 
 ## Which chi belongs in post-GW?
 
@@ -55,7 +56,7 @@ we use
 
 This is a `norb x norb` matrix for every bosonic transfer.  It is **not**
 `chi_z_same`, `chi_z_opposite`, `chi_x_even`, and it is not an irreducible
-polarization to be fed back into another RPA resummation.
+polarization to be fed into another RPA resummation.
 
 ## Sign convention and W_post
 
@@ -101,16 +102,15 @@ dW(Q_i-Q_e,Q_i)
 \]
 
 When `Q_i-Q_e` lies outside the stored bosonic box, the required diagonal
-background `W` is evaluated from the same `G` and `V` on demand.  It is not set
-to zero.
+background `W` is evaluated from the same `G` and `V` on demand rather than
+zero-padded.
 
 The transfer implementation is regression-tested to reduce to the established
 production kernel at `q=0,m_ext=0`.
 
 ## Including or excluding SOX
 
-The post engine itself does not know which one-particle approximation generated
-the background.  It accepts a matching covariant response provider.
+The post engine is common to both one-particle backgrounds.
 
 ### GW background
 
@@ -128,20 +128,24 @@ Use
 \chi^{nn}_{\rm cov}[G_{GW+SOX},W_{GW+SOX};\,H/F/MT/AL/SOX].
 \]
 
-The latter must include the functional derivative of the SOX skeleton.  It is
-not consistent to use the ordinary cGW density vertex on a GW+SOX background
-and call the result post-(GW+SOX).
+The latter includes the functional derivative of the SOX skeleton, implemented
+for a general external momentum/frequency in `rubycgw.sox_transfer`.  At
+`Q=0` it reduces to the existing static SOX vertex.
 
-`rubycgw.sox_transfer` implements the SOX derivative for a general external
-momentum/frequency, including the endpoint phases of all three differentiated
-Green lines and an analytic high-frequency transfer tail.  At `Q=0` it reduces
-to the existing static SOX vertex.
+## One-shot post update
 
-## One-shot post Dyson step
+The post construction proceeds in the following order:
 
-The canonical post construction evaluates the new self-energy with the
-**background** Green function and then solves Dyson once.  In the split RubycGW
-notation,
+1. compute the covariant density response on the chosen background;
+2. construct
+   \[
+   W_{post}=V-V\chi^{nn}_{cov}V;
+   \]
+3. evaluate the post self-energy with the background Green function;
+4. solve Dyson once to obtain `G_post`, including a new fixed-filling chemical
+   potential when requested.
+
+In the split RubycGW notation,
 
 \[
 \Sigma_{\rm post}
@@ -153,101 +157,77 @@ notation,
 
 where `Sigma_extra=0` for GW and `Sigma_extra=Sigma_SOX` for GW+SOX.
 
-The Hartree potential is kept at its background value and the chemical
-potential is re-solved for the requested filling.
+## Benchmark policy
 
-An important interpretation point is that canonical post-GW does **not**
-directly recompute a smaller Fock self-energy from `G_post`: the Fock piece is
-still evaluated on `G_bg`.  Therefore post-GW can compensate an overly strong
-Fock-driven tendency through improved dynamic screening/correlation and the
-resulting `G_post`, but it is not an empirical rescaling of Fock.
-
-## Benchmark policy: separate G, bubble chi, and W/vertex effects
-
-The earlier ED decomposition already showed that replacing the GW Green
-function by the exact ED Green function changes the bubble susceptibility much
-less than the full cGW-versus-ED discrepancy.  Therefore a post benchmark that
-only reports `||G_post-G_ED||` is not sufficient.
-
-`benchmark_ed_gw_cgw_sox.py` now records three logically separate diagnostics.
-
-### 1. Production response
-
-The original comparison is kept uncluttered:
+The original production comparison remains
 
 - ED,
-- `GG[GW]`,
+- GG,
 - cGW,
 - cGW+SOX.
 
-The script also stores `GG[GW+SOX]` for background decomposition.
-
-### 2. Bubble on the post Green function
-
-For every selected post path the script computes
+For a selected post method, however, the benchmark does **not** analyze a
+`GG[post]` curve and does **not** keep `G` fixed while replacing only `W`.
+The post state is treated as the updated pair
 
 \[
-\chi^{GG}[G_{post}]
-=-\frac{T}{N_k}\sum_{kn}
-\mathrm{Tr}[K G_{post} K G_{post}],
+\boxed{(G_{post},W_{post})}.
 \]
 
-with the same analytic observable tail completion as the other benchmark
-bubbles.  This directly answers whether the new one-particle background changes
-`x_even`, `z_same`, and `z_opposite` substantially.
+The three physical pseudospin channels are then recomputed on that updated
+state with the same q=0 covariant response machinery:
 
-The bubble plot contains, as available,
-
-- `GG[GW]`,
-- `GG[GW+SOX]`,
-- `GG[post-GW]`,
-- `GG[post-(GW+SOX)]`.
-
-ED full susceptibility is shown only as a reference; it is not labelled as an
-ED bubble.
-
-### 3. Response diagnostics using W_post
-
-Because the dominant response error need not come from `G`, the benchmark also
-asks directly what the new screened interaction does to the q=0 covariant
-response.
-
-For ordinary post-GW it saves
+### ordinary post-GW
 
 \[
-\chi_{\rm diag}^{(W)}
-=\mathrm{cGW}[G_{GW},W_{post}],
+\chi_{post-GW}^{\mu\nu}
+\equiv
+\chi_{cGW}^{\mu\nu}[G_{post},W_{post}],
 \]
 
-which isolates the screening change, and
+for `x_even`, `z_same`, and `z_opposite`.
+
+The relevant comparison is therefore
 
 \[
-\chi_{\rm diag}^{(G,W)}
-=\mathrm{cGW}[G_{post},W_{post}],
+\boxed{ED\quad vs\quad cGW\quad vs\quad post-GW\;\chi.}
 \]
 
-which includes both the changed Green function and the changed screened
-interaction.
+### post-(GW+SOX)
 
-The corresponding SOX-selected path analogously uses the cGW+SOX vertex
-functional.
-
-These curves are deliberately named **diagnostics**, not strict post-GW
-susceptibilities.  A strict derivative of the complete one-shot post map would
-also differentiate the covariant density response inside
+When the SOX-post path is selected, the final response uses the updated
+`(G_post,W_post)` together with the SOX vertex contribution:
 
 \[
-W_{post}=V-V\chi^{nn}_{cov}V,
+\chi_{post-(GW+SOX)}^{\mu\nu}
+\equiv
+\chi_{cGW+SOX}^{\mu\nu}[G_{post},W_{post}].
 \]
 
-and therefore requires an additional higher-order response construction.  The
-present diagnostics are nevertheless the useful quantities for answering the
-ED question: is the current-channel error mainly changed by the improved `W`,
-by the new `G`, or by neither?
+The corresponding comparison is
+
+\[
+\boxed{ED\quad vs\quad cGW+SOX\quad vs\quad post-(GW+SOX)\;\chi.}
+\]
+
+Green-function information is still useful and is saved separately as
+
+\[
+\frac{\|G-G_{ED}\|_F}{\|G_{ED}\|_F}
+\]
+
+for the full represented Matsubara box and for the lowest-frequency subset.
+The Green plots are therefore complementary to, not substitutes for, the
+susceptibility plots.
+
+Strictly, the q=0 response computed on the updated post background is not a
+second functional derivative of the entire one-shot post construction, because
+that would additionally differentiate the covariant density response entering
+`W_post`.  The benchmark quantity is the covariant response of the updated
+post state, which is the intended comparison for deciding whether the post
+update improves the current-channel susceptibility.
 
 ## Independent post switches
-
-The two expensive post paths are independently selectable.
 
 Run only ordinary post-GW on the GW background:
 
@@ -278,9 +258,8 @@ but this is explicitly a **windowed diagnostic**, not the full post-GW method;
 outside the selected frequency window it retains the background `W`.
 
 The ordinary `--post-gw` option does **not** invoke the much more expensive
-finite-transfer SOX response.  This is the recommended first benchmark when the
-goal is to isolate the effect of post-GW screening before studying its
-combination with SOX.
+finite-transfer SOX response.  This is the recommended first run when the goal
+is to isolate plain post-GW before combining it with SOX.
 
 ## Plotting saved results
 
@@ -291,11 +270,13 @@ can also be plotted without rerunning the many-body calculation:
 python plot_ed_gw_cgw_sox_benchmark.py path/to/benchmark.npz
 ```
 
-The plotting layer keeps the different questions separate:
+The main outputs are
 
-- `benchmark_response_summary.png`: production ED/GG/cGW/cGW+SOX response;
-- `benchmark_bubble_summary.png`: one-particle-background effect on chi;
-- `benchmark_post_gw_response_*.png`: ordinary post-GW W-only and G+W response diagnostics;
-- `benchmark_post_gw_sox_response_*.png`: independently selected SOX-post diagnostics;
+- `benchmark_response_summary.png`: original ED/GG/cGW/cGW+SOX benchmark;
+- `benchmark_post_gw_chi_*.png`: ED vs cGW vs post-GW susceptibility using
+  `(G_post,W_post)`;
+- `benchmark_post_gw_chi_relative_error.png`: cGW and post-GW susceptibility
+  errors relative to ED;
+- `benchmark_post_gw_sox_chi_*.png`: independently selected SOX-post response;
 - `benchmark_green_relative_error.png`: full Matsubara Green-function error;
 - `benchmark_green_lowfreq_error.png`: low-frequency Green-function error.
