@@ -102,12 +102,14 @@ def _thermal_structure_diag(exact, operators, mu, T):
             continue
         U = np.asarray(sec.eigenvectors, dtype=complex)
         for ic, K in enumerate(operators):
+            # Columns are O|n>.  We only need the diagonal expectation value
+            # <n|O|n> and ||O|n>||^2=<n|O^2|n>, so there is no reason to form
+            # the full dense U^dagger O U matrix.
             Opsi = exact._apply_onebody_batch(N, K, U)
-            M = U.conj().T @ Opsi
-            diag = np.diag(M)
+            diag = np.sum(U.conj() * Opsi, axis=0)
+            second_state = np.sum(np.abs(Opsi) ** 2, axis=0)
             means[ic] += np.dot(p, diag)
-            # For eigenstate |n>, <n|O^2|n> = sum_m |<m|O|n>|^2.
-            second[ic] += float(np.dot(p, np.sum(np.abs(M) ** 2, axis=0)).real)
+            second[ic] += float(np.dot(p, second_state).real)
 
     connected = second - np.abs(means) ** 2
     connected = np.maximum(np.real(connected), 0.0)
