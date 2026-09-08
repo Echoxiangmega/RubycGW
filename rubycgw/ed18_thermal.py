@@ -7,15 +7,19 @@ propagation (``scipy.sparse.linalg.expm_multiply``).
 
 For operators O_mu(q) normalized exactly as in :mod:`rubycgw.ed18`, we compute
 
-    S_mu,nu(q,T)
-      = <O_mu^dagger(q) O_nu(q)>_T
-        - <O_mu^dagger(q)>_T <O_nu(q)>_T,
+    C_mu,nu(q,tau)
+      = <O_mu^dagger(q,tau) O_nu(q,0)>_T,c,
+
+    S_mu,nu(q,T) = C_mu,nu(q,tau=0),
 
 and the connected static Kubo susceptibility
 
     chi_mu,nu(q,T)
-      = integral_0^beta d tau
-          <O_mu^dagger(q,tau) O_nu(q,0)>_T,c .
+      = integral_0^beta d tau C_mu,nu(q,tau).
+
+The full imaginary-time matrix ``C(q,tau)`` is returned in addition to the
+integrated static susceptibility.  This is useful for a Hui-Li-style benchmark:
+one can compare the whole tau dependence before integrating to chi(iOmega=0).
 
 The thermal trace estimator is unbiased in the number of random phase vectors;
 the imaginary-time integral is evaluated with composite Simpson quadrature.
@@ -48,6 +52,8 @@ class ED18ThermalResponse:
     energy_shift: float
     shifted_partition_estimate: float
     means: np.ndarray
+    tau_grid: np.ndarray
+    correlation_tau_matrix: np.ndarray
     structure_matrix: np.ndarray
     structure_eigenvalues: np.ndarray
     structure_eigenvectors: np.ndarray
@@ -116,7 +122,7 @@ def thermal_response(
     tau_points: int = 17,
     energy_shift: float | None = None,
 ) -> ED18ThermalResponse:
-    """Estimate finite-T S(q) and static chi(q) in the fixed-N Hilbert space.
+    """Estimate finite-T C(q,tau), S(q), and static chi(q) at fixed N.
 
     Parameters
     ----------
@@ -138,7 +144,7 @@ def thermal_response(
         unit weights.
     tau_points:
         Odd number of equally spaced imaginary-time points used by composite
-        Simpson quadrature.
+        Simpson quadrature.  The returned ``tau_grid`` contains these points.
     energy_shift:
         Optional scalar E_ref.  The code propagates H-E_ref I for numerical
         stability.  The scalar Boltzmann factor cancels in normalized results.
@@ -149,6 +155,7 @@ def thermal_response(
     beta = 1.0 / T
     tau_points = int(tau_points)
     quad_w = _simpson_weights(beta, tau_points)
+    tau_grid = np.linspace(0.0, beta, tau_points, dtype=float)
 
     q = np.asarray(q, dtype=float).reshape(2)
     channels = tuple(str(x) for x in channels)
@@ -193,7 +200,7 @@ def thermal_response(
     z_sum = 0.0
     mean_num = np.zeros(nops, dtype=complex)
     structure_num = np.zeros((nops, nops), dtype=complex)
-    chi_num = np.zeros((nops, nops), dtype=complex)
+    corr_tau_num = np.zeros((tau_points, nops, nops), dtype=complex)
 
     mid = tau_points // 2
 
@@ -222,7 +229,10 @@ def thermal_response(
         mean_num += wr * np.asarray([np.vdot(w, ow[:, a]) for a in range(nops)])
         structure_num += wr * (ow.conj().T @ ow)
 
-        # Kubo integrand.  B_tau[j,b] = exp(-tau_j K) O_b |r>.
+        # Imaginary-time correlator.  B_tau[j,b] = exp(-tau_j K) O_b |r>.
+        # The trace estimator below is
+        #   Tr[e^{-(beta-tau)K} O_a^dag e^{-tau K} O_b],
+        # which equals Z <O_a^dag(tau) O_b(0)> by cyclicity.
         B0 = np.column_stack([op @ r for op in ops])
         B_tau = expm_multiply(
             A,
@@ -233,24 +243,27 @@ def thermal_response(
             endpoint=True,
             traceA=traceA,
         )
-        chi_r = np.zeros((nops, nops), dtype=complex)
         for j in range(tau_points):
-            # Because the grid is uniform, beta-tau_j is the reversed index.
             u = np.asarray(r_tau[tau_points - 1 - j], dtype=complex)
             ou = np.column_stack([op @ u for op in ops])
             v = np.asarray(B_tau[j], dtype=complex)
-            chi_r += quad_w[j] * (ou.conj().T @ v)
-        chi_num += wr * chi_r
+            corr_tau_num[j] += wr * (ou.conj().T @ v)
 
     if not np.isfinite(z_sum) or z_sum <= 0.0:
         raise RuntimeError(f"invalid shifted partition-function estimate {z_sum}")
 
     means = mean_num / z_sum
-    structure = structure_num / z_sum - np.outer(means.conj(), means)
-    chi = chi_num / z_sum - beta * np.outer(means.conj(), means)
+    mean_outer = np.outer(means.conj(), means)
+    structure = structure_num / z_sum - mean_outer
+    corr_tau = corr_tau_num / z_sum - mean_outer[None, :, :]
+
+    # Integrate exactly the returned connected C(tau), so the saved dynamic and
+    # static quantities obey the same Simpson discretization by construction.
+    chi = np.tensordot(quad_w, corr_tau, axes=(0, 0))
 
     # Stochastic noise and quadrature error can generate tiny anti-Hermitian
-    # pieces; the physical static matrices are Hermitian.
+    # pieces in the equal-time/static matrices; their physical versions are
+    # Hermitian.  C(tau) itself is not Hermitian at each individual tau.
     structure = 0.5 * (structure + structure.conj().T)
     chi = 0.5 * (chi + chi.conj().T)
     svals, svecs = _eigh_desc(structure)
@@ -265,6 +278,8 @@ def thermal_response(
         energy_shift=energy_shift,
         shifted_partition_estimate=float(z_sum),
         means=np.asarray(means, dtype=complex),
+        tau_grid=tau_grid,
+        correlation_tau_matrix=np.asarray(corr_tau, dtype=complex),
         structure_matrix=np.asarray(structure, dtype=complex),
         structure_eigenvalues=svals,
         structure_eigenvectors=svecs,
