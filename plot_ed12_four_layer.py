@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Plot an existing 12-site four-layer benchmark NPZ without rerunning ED/GW/cGW."""
+"""Plot an existing 12-site four-layer benchmark NPZ without rerunning ED/GW/cGW.
+
+The first merged ED12 diagnostic (PR #22) wrote keys such as ``tau_grid``,
+``q_label``, ``exact_correlation_tau`` and ``bubble_exact_tau``.  A later
+internal refactor used shorter aliases (``tau``, ``qlabel``, ``exact_C_tau``,
+...).  This plotter intentionally accepts both schemas so an expensive exact
+Lehmann calculation never has to be repeated just because the plotting code
+changed.
+"""
 
 from __future__ import annotations
 
@@ -28,17 +36,34 @@ def _args():
     return p.parse_args()
 
 
+def _first_key(d, *names):
+    for name in names:
+        if name in d.files:
+            return d[name]
+    raise KeyError(
+        "none of the compatible keys are present: "
+        + ", ".join(repr(x) for x in names)
+        + f"; archive keys are: {d.files}"
+    )
+
+
+def load_four_layer_npz(path: str | Path):
+    """Load either the original PR #22 schema or the newer alias schema."""
+    d = np.load(path, allow_pickle=False)
+    tau = np.asarray(_first_key(d, "tau", "tau_grid"), dtype=float)
+    beta = float(np.asarray(_first_key(d, "beta")).item())
+    channels = tuple(str(x) for x in np.asarray(_first_key(d, "channels")).tolist())
+    qlabel = str(np.asarray(_first_key(d, "qlabel", "q_label")).item())
+    exactC = np.asarray(_first_key(d, "exact_C_tau", "exact_correlation_tau"))
+    bubbleED = np.asarray(_first_key(d, "bubble_ed_C_tau", "bubble_exact_tau"))
+    bubbleGW = np.asarray(_first_key(d, "bubble_gw_C_tau", "bubble_gw_tau"))
+    fullC = np.asarray(_first_key(d, "full_cgw_C_tau", "full_cgw_tau"))
+    return tau, beta, channels, qlabel, exactC, bubbleED, bubbleGW, fullC
+
+
 def main():
     args = _args()
-    d = np.load(args.npz, allow_pickle=False)
-    tau = np.asarray(d["tau"], dtype=float)
-    beta = float(d["beta"])
-    channels = tuple(str(x) for x in np.asarray(d["channels"]).tolist())
-    qlabel = str(np.asarray(d["qlabel"]).item())
-    exactC = np.asarray(d["exact_C_tau"])
-    bubbleED = np.asarray(d["bubble_ed_C_tau"])
-    bubbleGW = np.asarray(d["bubble_gw_C_tau"])
-    fullC = np.asarray(d["full_cgw_C_tau"])
+    tau, beta, channels, qlabel, exactC, bubbleED, bubbleGW, fullC = load_four_layer_npz(args.npz)
 
     x = tau / beta
     nc = len(channels)
