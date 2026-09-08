@@ -9,6 +9,14 @@ from .gw import (
     solve_noninteracting,
 )
 from .primitive_gw import solve_gw, rebuild_primitive_fixed_point
+from .gw_sox import GWSOXResult, solve_matrix_gw_sox, solve_primitive_gw_sox
+from .sox_covariant import SOXOptions
+from .production_cgw_sox import (
+    GWSOXVertexResult,
+    solve_vertex_q0_tail_sox,
+    static_response_tail_completed,
+    static_gg_tail_completed,
+)
 from .cgw import (
     VertexOptions,
     VertexResult,
@@ -86,6 +94,10 @@ __all__ = [
     "rebuild_primitive_fixed_point", "solve_vertex_q0", "chi_eta",
     "channel_summary", "susceptibility_matrix_q0",
     "physical_symmetric_susceptibility",
+    "SOXOptions", "GWSOXResult", "GWSOXVertexResult",
+    "solve_matrix_gw_sox", "solve_primitive_gw_sox",
+    "solve_vertex_q0_tail_sox", "static_response_tail_completed",
+    "static_gg_tail_completed",
     "FiniteQVertexOptions", "FiniteQVertexResult",
     "normalize_q_index", "q_index_from_reduced", "q_reduced_from_index",
     "negative_q_index", "vertex_corrections_finite_q",
