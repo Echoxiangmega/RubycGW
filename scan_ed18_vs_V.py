@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """Scan the 18-site exact-diagonalization spectrum and correlations versus V.
 
-At primitive filling n=2 the calculation uses Nf=6 spinless fermions in the
-same three-cell periodic torus as ``rubycgw.supercell``.  The Hilbert-space
-dimension is C(18,6)=18564.
+The calculation uses the same three-cell periodic torus as ``rubycgw.supercell``.
+At primitive filling n the fixed particle number is Nf=3n, when this is an
+integer.  The 18-site cluster contains only primitive Gamma and
++/-Q=(1/3,1/3); it cannot represent the period-two M point.
 
-This cluster contains only primitive Gamma and +/-Q=(1/3,1/3).  It cannot
-represent the period-two M point, so the resulting phase diagram is an exact
-finite-size Gamma/Q benchmark, not a proof that an M phase is absent.
-
-Besides the compact summary figure, this driver now writes a second
-channel-resolved figure showing the full six-channel equal-time pseudospin
-structure matrix: diagonal S_{mu,mu}, the first few structure eigenvalues, and
-the composition |v_mu|^2 of the leading collective mode.
+By default the script computes the ground-state spectrum and equal-time
+six-channel pseudospin structure factor.  With ``--with-chi`` it additionally
+computes the exact fixed-N zero-temperature static susceptibility using
+correction-vector solves.  Exact ground-manifold zero modes are handled
+explicitly: the finite excited-state contribution chi^reg and the coefficient
+C^GS of any T->0 singular/Curie contribution are stored separately.
 """
 
 from __future__ import annotations
@@ -31,6 +30,8 @@ from rubycgw.ed18 import (
     phase_fix_vector,
     translation_phase_reduced,
 )
+from rubycgw.ed18_chi import zero_temperature_susceptibility
+from rubycgw.ed18_chi_plot import save_ed18_chi_plot
 from rubycgw.ed18_plot import (
     ground_sector_label,
     leading_subspace_weights,
@@ -55,30 +56,36 @@ def _args():
     p.add_argument("--maxiter", type=int, default=5000)
     p.add_argument("--out", default="ed18_n2_vscan.npz")
     p.add_argument("--csv", default=None)
-    p.add_argument(
-        "--plot",
-        default=None,
-        help="Summary PNG path. Default: same stem as --out.",
-    )
+    p.add_argument("--plot", default=None, help="Summary PNG path. Default: same stem as --out.")
     p.add_argument(
         "--modes-plot",
         default=None,
-        help="Channel-resolved modes PNG path. Default: <out_stem>_modes.png.",
+        help="Equal-time channel-resolved PNG. Default: <out_stem>_modes.png.",
     )
     p.add_argument("--print-modes", type=int, default=3)
-    p.add_argument(
-        "--top-spectrum",
-        type=int,
-        default=6,
-        help="Number of low-energy ED levels shown in the summary plot.",
-    )
-    p.add_argument(
-        "--top-structure",
-        type=int,
-        default=3,
-        help="Number of structure-factor eigenvalues shown at each q.",
-    )
+    p.add_argument("--top-spectrum", type=int, default=6)
+    p.add_argument("--top-structure", type=int, default=3)
     p.add_argument("--dpi", type=int, default=180)
+
+    p.add_argument(
+        "--with-chi",
+        action="store_true",
+        help="Also compute exact fixed-N T=0 static susceptibility at Gamma and Q.",
+    )
+    p.add_argument("--chi-tol", type=float, default=1e-10, help="Correction-vector CG relative tolerance.")
+    p.add_argument("--chi-maxiter", type=int, default=20000)
+    p.add_argument(
+        "--chi-singular-tol",
+        type=float,
+        default=1e-10,
+        help="Tolerance for detecting nontrivial operator covariance inside an exact GS manifold.",
+    )
+    p.add_argument(
+        "--chi-plot",
+        default=None,
+        help="T=0 susceptibility PNG. Default: <out_stem>_chi.png when --with-chi.",
+    )
+    p.add_argument("--chi-top-modes", type=int, default=3)
     return p.parse_args()
 
 
@@ -89,8 +96,7 @@ def _v_grid(args):
         raise ValueError("--dV must be positive")
     n = int(np.floor((args.Vmax - args.Vmin) / args.dV + 0.5))
     out = args.Vmin + args.dV * np.arange(n + 1, dtype=float)
-    out = out[out <= args.Vmax + 1e-12]
-    return out
+    return out[out <= args.Vmax + 1e-12]
 
 
 def _mode_text(channels, vec, threshold=0.08):
@@ -115,11 +121,16 @@ def main():
     solver = ED18Solver(params, primitive_filling=args.filling)
 
     print("=== 18-site Ruby ED ===")
-    print(f"sites={18}, particles={solver.n_particles}, dimension={solver.dimension}")
+    print(f"sites=18, particles={solver.n_particles}, dimension={solver.dimension}")
     print(f"primitive filling={solver.primitive_filling:g}")
     print(f"ti={args.ti:g}, t1={args.t1:g}, t2={args.t2:g}")
     print("allowed primitive momenta: Gamma and +/-Q=(1/3,1/3); M is NOT commensurate")
     print(f"V points={len(Vvals)} from {Vvals[0]:g} to {Vvals[-1]:g}")
+    if args.with_chi:
+        print(
+            "T=0 chi enabled: chi^reg excludes exact GS zero modes; "
+            "nonzero C^GS is reported as a singular susceptibility."
+        )
 
     nv = len(Vvals)
     nc = len(ED18_CHANNELS)
@@ -136,8 +147,21 @@ def main():
     leading_q = np.empty(nv, dtype="U8")
     ground_sector = np.empty(nv, dtype="U32")
 
+    if args.with_chi:
+        chi_reg = np.zeros((nv, 2, nc, nc), dtype=complex)
+        chi_revals = np.zeros((nv, 2, nc), dtype=float)
+        chi_revecs = np.zeros((nv, 2, nc, nc), dtype=complex)
+        chi_sing = np.zeros((nv, 2, nc, nc), dtype=complex)
+        chi_sevals = np.zeros((nv, 2, nc), dtype=float)
+        chi_sevecs = np.zeros((nv, 2, nc, nc), dtype=complex)
+        chi_is_singular = np.zeros((nv, 2), dtype=bool)
+        chi_residual_max = np.zeros((nv, 2), dtype=float)
+        chi_solver_info_max = np.zeros((nv, 2), dtype=int)
+
     previous = None
     rows = []
+    q_items = (("Gamma", Q_GAMMA), ("Q", Q_PERIOD3))
+
     for iv, V in enumerate(Vvals):
         spec = solver.solve(
             float(V),
@@ -194,6 +218,43 @@ def main():
                         + _mode_text(sf.channels, sf.eigenvectors[:, m])
                     )
 
+        chi_results = []
+        if args.with_chi:
+            for iq, (qname, qvec) in enumerate(q_items):
+                cres = zero_temperature_susceptibility(
+                    solver,
+                    spec,
+                    qvec,
+                    solve_tol=args.chi_tol,
+                    maxiter=args.chi_maxiter,
+                    singular_tol=args.chi_singular_tol,
+                )
+                chi_results.append(cres)
+                chi_reg[iv, iq] = cres.regular_matrix
+                chi_revals[iv, iq] = cres.regular_eigenvalues
+                chi_revecs[iv, iq] = cres.regular_eigenvectors
+                chi_sing[iv, iq] = cres.ground_singular_matrix
+                chi_sevals[iv, iq] = cres.ground_singular_eigenvalues
+                chi_sevecs[iv, iq] = cres.ground_singular_eigenvectors
+                chi_is_singular[iv, iq] = cres.is_singular
+                chi_residual_max[iv, iq] = float(np.max(cres.solver_residuals))
+                chi_solver_info_max[iv, iq] = int(np.max(np.abs(cres.solver_info)))
+
+            print(
+                "          T=0 chi: "
+                f"G reg={chi_results[0].regular_eigenvalues[0]:.6g} "
+                f"C_GS={chi_results[0].ground_singular_eigenvalues[0]:.3e} "
+                f"{'SINGULAR' if chi_results[0].is_singular else 'finite'}; "
+                f"Q reg={chi_results[1].regular_eigenvalues[0]:.6g} "
+                f"C_GS={chi_results[1].ground_singular_eigenvalues[0]:.3e} "
+                f"{'SINGULAR' if chi_results[1].is_singular else 'finite'}"
+            )
+            if max(chi_residual_max[iv]) > max(1e-8, 20.0 * args.chi_tol):
+                print(
+                    "          WARNING: large correction-vector residual: "
+                    f"{max(chi_residual_max[iv]):.3e}"
+                )
+
         row = {
             "V": float(V),
             "E0": float(spec.energies[0]),
@@ -211,29 +272,34 @@ def main():
         for qname, sf in (("Gamma", sfG), ("Q", sfQ)):
             for ic, ch in enumerate(sf.channels):
                 row[f"Sdiag_{qname}_{ch}"] = float(sf.matrix[ic, ic].real)
-                row[f"leading_weight_{qname}_{ch}"] = float(
-                    abs(sf.eigenvectors[ic, 0]) ** 2
-                )
+                row[f"leading_weight_{qname}_{ch}"] = float(abs(sf.eigenvectors[ic, 0]) ** 2)
             for m in range(min(3, nc)):
                 row[f"Seig{m+1}_{qname}"] = float(sf.eigenvalues[m])
+
+        if args.with_chi:
+            for iq, (qname, _) in enumerate(q_items):
+                cres = chi_results[iq]
+                row[f"chi_reg_max_{qname}"] = float(cres.regular_eigenvalues[0])
+                row[f"chi_GS_singular_coeff_max_{qname}"] = float(cres.ground_singular_eigenvalues[0])
+                row[f"chi_is_singular_{qname}"] = bool(cres.is_singular)
+                row[f"chi_residual_max_{qname}"] = float(chi_residual_max[iv, iq])
+                row[f"chi_leading_mode_{qname}"] = _mode_text(cres.channels, cres.regular_eigenvectors[:, 0])
+                row[f"chi_singular_mode_{qname}"] = _mode_text(cres.channels, cres.ground_singular_eigenvectors[:, 0])
+                for ic, ch in enumerate(cres.channels):
+                    row[f"chi_reg_diag_{qname}_{ch}"] = float(cres.regular_matrix[ic, ic].real)
         rows.append(row)
 
-    # Convenient derived arrays for downstream plotting/analysis.
     Sdiag = np.real(np.diagonal(S, axis1=-2, axis2=-1))
     leading_weights = np.abs(Sevecs[..., 0]) ** 2
-    leading_weights /= np.maximum(
-        np.sum(leading_weights, axis=-1, keepdims=True), 1e-300
-    )
-    leading_subspace_w, leading_subspace_dim = leading_subspace_weights(
-        Sevals, Sevecs
-    )
+    leading_weights /= np.maximum(np.sum(leading_weights, axis=-1, keepdims=True), 1e-300)
+    leading_subspace_w, leading_subspace_dim = leading_subspace_weights(Sevals, Sevecs)
 
     out = Path(args.out)
     if out.suffix.lower() != ".npz":
         out = out.with_suffix(".npz")
     out.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        out,
+
+    payload = dict(
         V=Vvals,
         filling=float(args.filling),
         ti=float(args.ti),
@@ -264,6 +330,23 @@ def main():
             "18-site index-3 torus contains Gamma and +/-Q only; M is not commensurate"
         ),
     )
+    if args.with_chi:
+        payload.update(
+            chi_temperature=np.asarray(0.0),
+            chi_definition=np.asarray(
+                "fixed-N thermodynamic/Kubo T=0 susceptibility; chi_regular excludes exact GS zero modes; nonzero C_GS means singular response"
+            ),
+            chi_regular_matrix=chi_reg,
+            chi_regular_eigenvalues=chi_revals,
+            chi_regular_eigenvectors=chi_revecs,
+            chi_ground_singular_matrix=chi_sing,
+            chi_ground_singular_eigenvalues=chi_sevals,
+            chi_ground_singular_eigenvectors=chi_sevecs,
+            chi_is_singular=chi_is_singular,
+            chi_solver_residual_max=chi_residual_max,
+            chi_solver_info_max=chi_solver_info_max,
+        )
+    np.savez_compressed(out, **payload)
     print("saved:", out)
 
     csv_path = Path(args.csv) if args.csv else out.with_suffix(".csv")
@@ -274,11 +357,7 @@ def main():
     print("saved:", csv_path)
 
     summary_path = Path(args.plot) if args.plot else out.with_suffix(".png")
-    modes_path = (
-        Path(args.modes_plot)
-        if args.modes_plot
-        else out.with_name(out.stem + "_modes.png")
-    )
+    modes_path = Path(args.modes_plot) if args.modes_plot else out.with_name(out.stem + "_modes.png")
     summary_path, modes_path = save_ed18_plots(
         out,
         summary_path=summary_path,
@@ -290,19 +369,25 @@ def main():
     print("saved:", summary_path)
     print("saved:", modes_path)
 
-    # Report intervals where the exact finite-size ground-state multiplet changes.
+    if args.with_chi:
+        chi_path = Path(args.chi_plot) if args.chi_plot else out.with_name(out.stem + "_chi.png")
+        chi_path = save_ed18_chi_plot(
+            out,
+            chi_path=chi_path,
+            top_modes=args.chi_top_modes,
+            dpi=args.dpi,
+        )
+        print("saved:", chi_path)
+
     changes = np.flatnonzero(
-        (ground_deg[1:] != ground_deg[:-1])
-        | (ground_sector[1:] != ground_sector[:-1])
+        (ground_deg[1:] != ground_deg[:-1]) | (ground_sector[1:] != ground_sector[:-1])
     )
     if len(changes):
         print("\n=== finite-size ground-sector changes ===")
         for i in changes:
             print(
-                f"between V={Vvals[i]:.8g} "
-                f"(deg={ground_deg[i]}, sector={ground_sector[i]}) and "
-                f"V={Vvals[i+1]:.8g} "
-                f"(deg={ground_deg[i+1]}, sector={ground_sector[i+1]})"
+                f"between V={Vvals[i]:.8g} (deg={ground_deg[i]}, sector={ground_sector[i]}) and "
+                f"V={Vvals[i+1]:.8g} (deg={ground_deg[i+1]}, sector={ground_sector[i+1]})"
             )
     print("\nReminder: this 18-site cluster cannot test the M-point period-two state.")
 
