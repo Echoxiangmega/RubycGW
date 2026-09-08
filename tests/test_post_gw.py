@@ -1,16 +1,27 @@
 import numpy as np
 
+from rubycgw.benchmark_plot import plot_benchmark_npz
 from rubycgw.grids import MatsubaraGrid
-from rubycgw.post_gw import build_post_screened_interaction
+from rubycgw.gw import GWOptions
+from rubycgw.gw_sox import solve_matrix_gw_sox
+from rubycgw.post_gw import build_post_screened_interaction, run_post_gw
 from rubycgw.production_cgw import solve_vertex_q0_tail
 from rubycgw.response_tail import build_tail_reference, reference_response_infinite
-from rubycgw.sox_covariant import SOXOptions, compute_sox_vertex_periodic
-from rubycgw.sox_transfer import compute_sox_vertex_transfer_periodic
+from rubycgw.sox_covariant import (
+    SOXOptions,
+    compute_sox_vertex_periodic,
+    sox_self_energy_full,
+)
+from rubycgw.sox_transfer import (
+    compute_sox_vertex_transfer_periodic,
+    sox_vertex_transfer_full,
+)
 from rubycgw.supercell_cgw import SupercellVertexOptions
 from rubycgw.supercell_gw import (
     compute_polarization_matrix,
     compute_screened_interaction_matrix,
 )
+from rubycgw.supercell_gw_fast import solve_matrix_gw_fast
 from rubycgw.transfer_cgw import (
     solve_vertex_transfer_tail,
     transfer_response_tail_completed,
@@ -118,6 +129,37 @@ def test_sox_transfer_q0_m0_reduces_to_static_sox_vertex():
     np.testing.assert_allclose(new, old, rtol=4e-9, atol=5e-10)
 
 
+def test_sox_transfer_endpoint_phases_match_finite_difference_of_skeleton():
+    rng = np.random.default_rng(7)
+    n = 4
+    Gp = rng.normal(size=(n, n)) + 1j * rng.normal(size=(n, n))
+    Gm = rng.normal(size=(n, n)) + 1j * rng.normal(size=(n, n))
+    Xp = rng.normal(size=(n, n)) + 1j * rng.normal(size=(n, n))
+    Xm = rng.normal(size=(n, n)) + 1j * rng.normal(size=(n, n))
+    v = rng.normal(size=(n, n))
+    v = 0.5 * (v + v.T)
+    np.fill_diagonal(v, 0.0)
+    d = np.exp(1j * np.array([0.0, .4, 1.1, 1.7]))
+    Omega = .83
+    tau = .37
+    analytic = sox_vertex_transfer_full(
+        Gp, Gm, Xp, Xm, v, d, Omega, tau, interaction_tol=0.0
+    )
+
+    eps = 2e-7
+    phase_t = np.exp(1j * Omega * tau)
+    def sigma(sign):
+        e = sign * eps
+        gp = Gp + e * d[:, None] * Xp
+        gm = Gm + e * phase_t * d[:, None] * Xm
+        return sox_self_energy_full(gp, gm, v, interaction_tol=0.0)
+
+    numeric_lab = (sigma(+1.0) - sigma(-1.0)) / (2.0 * eps)
+    # Remove the output source phase D_i to compare with the transfer field.
+    numeric = d.conj()[:, None] * numeric_lab
+    np.testing.assert_allclose(analytic, numeric, rtol=2e-7, atol=3e-7)
+
+
 def test_post_screening_uses_v_minus_v_chi_v_and_window_fallback():
     Vq = np.array([[[[0.0, .4], [.4, 0.0]]]], dtype=complex)
     chi = np.zeros((3, 1, 1, 2, 2), dtype=complex)
@@ -135,3 +177,73 @@ def test_post_screening_uses_v_minus_v_chi_v_and_window_fallback():
         np.testing.assert_allclose(Wpost[im, 0, 0], expected)
     np.testing.assert_allclose(Wpost[1, 0, 0], bg[1, 0, 0])
     assert fallback.tolist() == [[[False]], [[True]], [[False]]]
+
+
+def test_post_gw_zero_interaction_is_identity_for_gw_and_gw_sox():
+    grid = MatsubaraGrid(nk1=1, nk2=1, nw=5, nOmega=1, T=.21)
+    h = np.array([[.13, .16], [.16, -.09]], dtype=complex)
+    h0 = h[None, None]
+    Vq = np.zeros_like(h0)
+    opts = GWOptions(
+        mu=.017,
+        target_filling=None,
+        max_iter=4,
+        tol=1e-11,
+        verbose=False,
+        momentum_backend="direct",
+    )
+    vopts = SupercellVertexOptions(
+        max_iter=8,
+        tol=1e-11,
+        solver="gmres",
+        verbose=False,
+        momentum_backend="direct",
+    )
+    sopts = SOXOptions(n_quad=16, tail_edge_points=1)
+    gw = solve_matrix_gw_fast(h0, Vq, grid, opts=opts)
+    gwsox = solve_matrix_gw_sox(h0, Vq, grid, opts=opts, sox_opts=sopts)
+    post = run_post_gw(
+        gw, h0, Vq, grid, gw_opts=opts, vertex_opts=vopts,
+        include_sox=False, sox_opts=sopts, m_max=0
+    )
+    post_sox = run_post_gw(
+        gwsox, h0, Vq, grid, gw_opts=opts, vertex_opts=vopts,
+        include_sox=True, sox_opts=sopts, m_max=0
+    )
+    np.testing.assert_allclose(post.G, gw.G, rtol=2e-12, atol=2e-12)
+    np.testing.assert_allclose(post_sox.G, gwsox.G, rtol=2e-12, atol=2e-12)
+    np.testing.assert_allclose(post.W_post, 0.0, atol=1e-14)
+    np.testing.assert_allclose(post_sox.W_post, 0.0, atol=1e-14)
+
+
+def test_benchmark_plotter_writes_response_figures(tmp_path):
+    V = np.array([.1, .2])
+    channels = np.array(["x_even", "z_same"])
+    shape = (2, 2, 2)
+    ed = np.zeros(shape)
+    gg = np.zeros(shape, dtype=complex)
+    cgw = np.zeros(shape, dtype=complex)
+    sox = np.zeros(shape, dtype=complex)
+    for iv in range(2):
+        for ic in range(2):
+            ed[iv, ic, ic] = 1.0 + iv + .1 * ic
+            gg[iv, ic, ic] = .9 * ed[iv, ic, ic]
+            cgw[iv, ic, ic] = 1.05 * ed[iv, ic, ic]
+            sox[iv, ic, ic] = 1.01 * ed[iv, ic, ic]
+    path = tmp_path / "benchmark.npz"
+    np.savez_compressed(
+        path,
+        V=V,
+        channels=channels,
+        ed=ed,
+        gg_completed=gg,
+        cgw_completed=cgw,
+        cgw_sox_completed=sox,
+    )
+    made = plot_benchmark_npz(path)
+    names = {p.name for p in made}
+    assert "benchmark_x_even.png" in names
+    assert "benchmark_z_same.png" in names
+    assert "benchmark_response_summary.png" in names
+    assert "benchmark_response_relative_error.png" in names
+    assert all(p.exists() for p in made)
