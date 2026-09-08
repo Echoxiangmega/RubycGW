@@ -1,27 +1,43 @@
 #!/usr/bin/env python3
-"""Same-torus ED / GG / cGW / cGW+SOX benchmark, with optional post-GW.
+"""Same-torus ED / GG / cGW / cGW+SOX benchmark with optional post corrections.
 
 The finite Ruby torus is represented in two exactly matching ways:
 
 * ED uses the full many-body Hilbert space of ``ExactSmallRubyThermal``;
 * GW and GW+SOX treat every physical torus site as an orbital and use nk=1.
 
-The static-response benchmark remains ED / GG / cGW / cGW+SOX.  Both raw
-finite-box and analytic-tail-completed diagrammatic responses are saved; ED is
-intrinsically a full static thermodynamic response and should be compared to
-the completed values.
+The production static-response benchmark remains
 
-With ``--post-gw`` the script additionally computes the full covariant orbital
-density response chi_nn(Q), builds
+    ED / GG[GW] / cGW[GW] / cGW+SOX[GW+SOX].
 
-    W_post = V - V chi_nn,cov V,
+Both raw finite-box and analytic-tail-completed diagrammatic responses are
+saved; ED is intrinsically a full static thermodynamic response and should be
+compared to the completed values.
 
-and performs the canonical one-shot post Dyson update on both the ordinary GW
-and GW+SOX backgrounds.  Post-GW is a one-particle correction, so these methods
-are compared directly with the exact ED Matsubara Green function rather than
-being mislabeled as a new covariant static susceptibility.  A limited
-``--post-mmax`` is available only as an explicitly windowed diagnostic; omit it
-for the full post-GW construction.
+Post corrections are independently selectable:
+
+* ``--post-gw`` applies post-GW to the ordinary GW background only;
+* ``--post-gw-sox`` applies post-GW to the GW+SOX background only.
+
+For either selected post path the script records three complementary objects:
+
+1. the exact-ED Green-function error of the post Green function;
+2. ``GG[post]``, the bubble built from the post Green function, which isolates
+   the one-particle-background effect on the pseudospin susceptibility;
+3. a q=0 covariant-response diagnostic on the post screened interaction.
+
+For the latter we save both
+
+    cGW[G_bg, W_post]
+
+(which isolates the W feedback while leaving G fixed) and
+
+    cGW[G_post, W_post]
+
+(which includes both G and W changes).  These are deliberately labelled
+*diagnostics*: canonical one-shot post-GW does not define their strict
+functional derivative.  A strict post-GW susceptibility would also require the
+variation of the covariant density response inside W_post.
 
 Plots are generated automatically next to ``benchmark.npz`` unless
 ``--no-plots`` is supplied.
@@ -80,10 +96,22 @@ def _args():
     p.add_argument("--tail-edge-points", type=int, default=2)
     p.add_argument("--backend", choices=["fft", "direct"], default="direct")
     p.add_argument("--allow-unconverged", action="store_true")
-    p.add_argument("--post-gw", action="store_true",
-                   help="compute full post-GW and post-(GW+SOX) one-particle benchmarks")
-    p.add_argument("--post-mmax", type=int, default=None,
-                   help="diagnostic only: post-correct |m|<=M and keep background W outside")
+    p.add_argument(
+        "--post-gw",
+        action="store_true",
+        help="post-correct the ordinary GW background only",
+    )
+    p.add_argument(
+        "--post-gw-sox",
+        action="store_true",
+        help="post-correct the self-consistent GW+SOX background only",
+    )
+    p.add_argument(
+        "--post-mmax",
+        type=int,
+        default=None,
+        help="diagnostic only: post-correct |m|<=M and keep background W outside",
+    )
     p.add_argument("--no-plots", action="store_true")
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--out", type=Path, default=Path("results/ed_gw_cgw_sox_benchmark"))
@@ -116,12 +144,71 @@ def _lowfreq_green_error(G_approx, G_exact, grid, count=4):
     return float(np.linalg.norm((arr[idx] - exact[idx]).ravel()) / max(denom, 1e-300))
 
 
+def _solve_static_response(
+    G,
+    W,
+    Vq,
+    operators,
+    channels,
+    grid,
+    reference,
+    h_static,
+    mu,
+    vertex_opts,
+    sox_opts,
+    tail_edge_points,
+    *,
+    include_sox,
+    allow_unconverged,
+    label,
+):
+    results = []
+    converged = np.zeros(len(channels), dtype=bool)
+    for ic, (ch, K) in enumerate(zip(channels, operators)):
+        print(f"  {label} vertex: {ch}")
+        if include_sox:
+            vr = solve_vertex_q0_tail_sox(
+                G,
+                W,
+                Vq,
+                K,
+                grid,
+                reference,
+                h_static,
+                mu,
+                vertex_opts=vertex_opts,
+                sox_opts=sox_opts,
+            )
+        else:
+            vr = solve_vertex_q0_tail(
+                G, W, Vq, K, grid, reference, opts=vertex_opts
+            )
+        results.append(vr)
+        converged[ic] = vr.converged
+        _require(
+            vr.converged,
+            f"{label} vertex {ch} did not converge: {vr.final_error:.3e}",
+            allow_unconverged,
+        )
+    resp = static_response_tail_completed(
+        G,
+        operators,
+        [x.Gamma for x in results],
+        grid,
+        h_static,
+        mu,
+        edge_points=tail_edge_points,
+    )
+    return resp, converged
+
+
 def main():
     args = _args()
     if 6 * args.L1 * args.L2 > 16:
         raise ValueError("ExactSmallRubyThermal requires at most 16 sites")
-    if args.post_mmax is not None and not args.post_gw:
-        raise ValueError("--post-mmax requires --post-gw")
+    any_post = bool(args.post_gw or args.post_gw_sox)
+    if args.post_mmax is not None and not any_post:
+        raise ValueError("--post-mmax requires --post-gw and/or --post-gw-sox")
     if args.post_mmax is not None and args.post_mmax < 0:
         raise ValueError("--post-mmax must be non-negative")
 
@@ -159,11 +246,14 @@ def main():
     ed_chi = np.full(shape, np.nan)
     chi_gg_raw = np.full(shape, np.nan + 0j)
     chi_gg_completed = np.full(shape, np.nan + 0j)
+    chi_gg_sox_raw = np.full(shape, np.nan + 0j)
+    chi_gg_sox_completed = np.full(shape, np.nan + 0j)
     chi_cgw_raw = np.full(shape, np.nan + 0j)
     chi_cgw_completed = np.full(shape, np.nan + 0j)
     chi_sox_raw = np.full(shape, np.nan + 0j)
     chi_sox_completed = np.full(shape, np.nan + 0j)
     tail_gg = np.full(shape, np.nan + 0j)
+    tail_gg_sox = np.full(shape, np.nan + 0j)
     tail_cgw = np.full(shape, np.nan + 0j)
     tail_sox = np.full(shape, np.nan + 0j)
     mu_ed = np.full(nV, np.nan)
@@ -175,20 +265,38 @@ def main():
     cgw_sox_converged = np.zeros((nV, nc), dtype=bool)
     max_sigma_sox = np.full(nV, np.nan)
 
-    # Optional one-particle post-GW benchmark arrays.
+    # Ordinary post-GW diagnostic arrays.
+    chi_gg_post_gw_raw = np.full(shape, np.nan + 0j)
+    chi_gg_post_gw_completed = np.full(shape, np.nan + 0j)
+    chi_cgw_wpost_raw = np.full(shape, np.nan + 0j)
+    chi_cgw_wpost_completed = np.full(shape, np.nan + 0j)
+    chi_cgw_post_raw = np.full(shape, np.nan + 0j)
+    chi_cgw_post_completed = np.full(shape, np.nan + 0j)
+    cgw_wpost_converged = np.zeros((nV, nc), dtype=bool)
+    cgw_post_converged = np.zeros((nV, nc), dtype=bool)
     mu_post_gw = np.full(nV, np.nan)
-    mu_post_gw_sox = np.full(nV, np.nan)
     g_relerr_gw = np.full(nV, np.nan)
-    g_relerr_gw_sox = np.full(nV, np.nan)
     g_relerr_post_gw = np.full(nV, np.nan)
-    g_relerr_post_gw_sox = np.full(nV, np.nan)
     g_lowfreq_relerr_gw = np.full(nV, np.nan)
-    g_lowfreq_relerr_gw_sox = np.full(nV, np.nan)
     g_lowfreq_relerr_post_gw = np.full(nV, np.nan)
-    g_lowfreq_relerr_post_gw_sox = np.full(nV, np.nan)
     max_delta_w_post_gw = np.full(nV, np.nan)
-    max_delta_w_post_gw_sox = np.full(nV, np.nan)
     post_fallback_fraction_gw = np.full(nV, np.nan)
+
+    # Post-(GW+SOX) diagnostic arrays.
+    chi_gg_post_gw_sox_raw = np.full(shape, np.nan + 0j)
+    chi_gg_post_gw_sox_completed = np.full(shape, np.nan + 0j)
+    chi_cgw_sox_wpost_raw = np.full(shape, np.nan + 0j)
+    chi_cgw_sox_wpost_completed = np.full(shape, np.nan + 0j)
+    chi_cgw_sox_post_raw = np.full(shape, np.nan + 0j)
+    chi_cgw_sox_post_completed = np.full(shape, np.nan + 0j)
+    cgw_sox_wpost_converged = np.zeros((nV, nc), dtype=bool)
+    cgw_sox_post_converged = np.zeros((nV, nc), dtype=bool)
+    mu_post_gw_sox = np.full(nV, np.nan)
+    g_relerr_gw_sox = np.full(nV, np.nan)
+    g_relerr_post_gw_sox = np.full(nV, np.nan)
+    g_lowfreq_relerr_gw_sox = np.full(nV, np.nan)
+    g_lowfreq_relerr_post_gw_sox = np.full(nV, np.nan)
+    max_delta_w_post_gw_sox = np.full(nV, np.nan)
     post_fallback_fraction_gw_sox = np.full(nV, np.nan)
 
     gw_initial = None
@@ -209,6 +317,8 @@ def main():
 
         h0 = np.asarray(exact.h0, dtype=complex)[None, None]
         Vq = (float(V) * np.asarray(exact.Vunit, dtype=complex))[None, None]
+
+        # ---------------- ordinary GW / cGW ----------------
         gw = solve_matrix_gw_fast(h0, Vq, grid, opts=gw_opts, initial=gw_initial)
         gw_initial = gw
         gw_converged[iv] = gw.converged
@@ -236,32 +346,29 @@ def main():
         chi_gg_completed[iv] = gg["completed"]
         tail_gg[iv] = gg["tail_correction"]
 
-        cgw_results = []
-        for ic, (ch, K) in enumerate(zip(channels, operators)):
-            print(f"  cGW vertex: {ch}")
-            vr = solve_vertex_q0_tail(
-                gw.G, gw.W, Vq, K, grid, reference_gw, opts=vertex_opts
-            )
-            cgw_results.append(vr)
-            cgw_converged[iv, ic] = vr.converged
-            _require(
-                vr.converged,
-                f"cGW vertex {ch} did not converge at V={V:g}: {vr.final_error:.3e}",
-                args.allow_unconverged,
-            )
-        resp = static_response_tail_completed(
+        resp, conv = _solve_static_response(
             gw.G,
+            gw.W,
+            Vq,
             operators,
-            [x.Gamma for x in cgw_results],
+            channels,
             grid,
+            reference_gw,
             h_static_gw,
             gw.mu,
-            edge_points=args.tail_edge_points,
+            vertex_opts,
+            sox_opts,
+            args.tail_edge_points,
+            include_sox=False,
+            allow_unconverged=args.allow_unconverged,
+            label="cGW",
         )
         chi_cgw_raw[iv] = resp["raw"]
         chi_cgw_completed[iv] = resp["completed"]
         tail_cgw[iv] = resp["tail_correction"]
+        cgw_converged[iv] = conv
 
+        # ---------------- GW+SOX / cGW+SOX ----------------
         print("  solving self-consistent GW+SOX")
         gwsox = solve_matrix_gw_sox(
             h0,
@@ -282,52 +389,65 @@ def main():
         )
         reference_sox = build_tail_reference(h0, gwsox.mu, gwsox.Sigma_H, grid)
         h_static_sox = h0 + gwsox.Sigma_H[None, None] + gwsox.Sigma_F
-        sox_results = []
-        for ic, (ch, K) in enumerate(zip(channels, operators)):
-            print(f"  cGW+SOX vertex: {ch}")
-            vr = solve_vertex_q0_tail_sox(
-                gwsox.G,
-                gwsox.W,
-                Vq,
-                K,
-                grid,
-                reference_sox,
-                h_static_sox,
-                gwsox.mu,
-                vertex_opts=vertex_opts,
-                sox_opts=sox_opts,
-            )
-            sox_results.append(vr)
-            cgw_sox_converged[iv, ic] = vr.converged
-            _require(
-                vr.converged,
-                f"cGW+SOX vertex {ch} did not converge at V={V:g}: {vr.final_error:.3e}",
-                args.allow_unconverged,
-            )
-        resp_sox = static_response_tail_completed(
+
+        gg_sox = static_gg_tail_completed(
             gwsox.G,
             operators,
-            [x.Gamma for x in sox_results],
             grid,
             h_static_sox,
             gwsox.mu,
             edge_points=args.tail_edge_points,
         )
+        chi_gg_sox_raw[iv] = gg_sox["raw"]
+        chi_gg_sox_completed[iv] = gg_sox["completed"]
+        tail_gg_sox[iv] = gg_sox["tail_correction"]
+
+        resp_sox, conv = _solve_static_response(
+            gwsox.G,
+            gwsox.W,
+            Vq,
+            operators,
+            channels,
+            grid,
+            reference_sox,
+            h_static_sox,
+            gwsox.mu,
+            vertex_opts,
+            sox_opts,
+            args.tail_edge_points,
+            include_sox=True,
+            allow_unconverged=args.allow_unconverged,
+            label="cGW+SOX",
+        )
         chi_sox_raw[iv] = resp_sox["raw"]
         chi_sox_completed[iv] = resp_sox["completed"]
         tail_sox[iv] = resp_sox["tail_correction"]
+        cgw_sox_converged[iv] = conv
 
         print("  diagonal static susceptibilities (completed where applicable)")
         for ic, ch in enumerate(channels):
             print(
                 f"    {ch:12s} ED={ed_chi[iv,ic,ic]:+.8f} "
-                f"GG={chi_gg_completed[iv,ic,ic].real:+.8f} "
+                f"GG[GW]={chi_gg_completed[iv,ic,ic].real:+.8f} "
+                f"GG[GW+SOX]={chi_gg_sox_completed[iv,ic,ic].real:+.8f} "
                 f"cGW={chi_cgw_completed[iv,ic,ic].real:+.8f} "
                 f"cGW+SOX={chi_sox_completed[iv,ic,ic].real:+.8f}"
             )
 
+        G_ed = None
+        if any_post:
+            print("  exact ED Matsubara Green function")
+            G_ed, _ = exact.green_iomega(
+                1j * np.asarray(grid.omega), mu_ed[iv], args.T
+            )
+
+        # ---------------- ordinary post-GW only ----------------
         if args.post_gw:
-            window = "full dynamic" if args.post_mmax is None else f"|m|<={args.post_mmax} windowed"
+            window = (
+                "full dynamic"
+                if args.post_mmax is None
+                else f"|m|<={args.post_mmax} windowed"
+            )
             print(f"  post-GW density response on GW background ({window})")
             post = run_post_gw(
                 gw,
@@ -340,6 +460,94 @@ def main():
                 sox_opts=sox_opts,
                 m_max=args.post_mmax,
                 allow_unconverged=args.allow_unconverged,
+            )
+            mu_post_gw[iv] = post.mu
+            max_delta_w_post_gw[iv] = float(np.max(np.abs(post.W_post - gw.W)))
+            post_fallback_fraction_gw[iv] = float(np.mean(post.used_background_w_mask))
+
+            h_static_post = h0 + post.Sigma_H[None, None] + post.Sigma_F
+            reference_post = build_tail_reference(
+                h0, post.mu, post.Sigma_H, grid
+            )
+            gg_post = static_gg_tail_completed(
+                post.G,
+                operators,
+                grid,
+                h_static_post,
+                post.mu,
+                edge_points=args.tail_edge_points,
+            )
+            chi_gg_post_gw_raw[iv] = gg_post["raw"]
+            chi_gg_post_gw_completed[iv] = gg_post["completed"]
+
+            # Isolate only the W feedback: keep the converged GW Green function.
+            print("  cGW diagnostic with G_GW and W_post")
+            diag_wpost, conv = _solve_static_response(
+                gw.G,
+                post.W_post,
+                Vq,
+                operators,
+                channels,
+                grid,
+                reference_gw,
+                h_static_gw,
+                gw.mu,
+                vertex_opts,
+                sox_opts,
+                args.tail_edge_points,
+                include_sox=False,
+                allow_unconverged=args.allow_unconverged,
+                label="cGW[G_GW,W_post]",
+            )
+            chi_cgw_wpost_raw[iv] = diag_wpost["raw"]
+            chi_cgw_wpost_completed[iv] = diag_wpost["completed"]
+            cgw_wpost_converged[iv] = conv
+
+            # Combined G and W diagnostic on the post background.
+            print("  cGW diagnostic with G_post and W_post")
+            diag_post, conv = _solve_static_response(
+                post.G,
+                post.W_post,
+                Vq,
+                operators,
+                channels,
+                grid,
+                reference_post,
+                h_static_post,
+                post.mu,
+                vertex_opts,
+                sox_opts,
+                args.tail_edge_points,
+                include_sox=False,
+                allow_unconverged=args.allow_unconverged,
+                label="cGW[G_post,W_post]",
+            )
+            chi_cgw_post_raw[iv] = diag_post["raw"]
+            chi_cgw_post_completed[iv] = diag_post["completed"]
+            cgw_post_converged[iv] = conv
+
+            g_relerr_gw[iv] = _relative_green_error(gw.G, G_ed)
+            g_relerr_post_gw[iv] = _relative_green_error(post.G, G_ed)
+            g_lowfreq_relerr_gw[iv] = _lowfreq_green_error(gw.G, G_ed, grid)
+            g_lowfreq_relerr_post_gw[iv] = _lowfreq_green_error(post.G, G_ed, grid)
+            print(
+                "    full-G relerr: "
+                f"GW={g_relerr_gw[iv]:.4e} "
+                f"post-GW={g_relerr_post_gw[iv]:.4e}"
+            )
+            for ic, ch in enumerate(channels):
+                print(
+                    f"    {ch:12s} GG[post-GW]={chi_gg_post_gw_completed[iv,ic,ic].real:+.8f} "
+                    f"cGW[W_post]={chi_cgw_wpost_completed[iv,ic,ic].real:+.8f} "
+                    f"cGW[post]={chi_cgw_post_completed[iv,ic,ic].real:+.8f}"
+                )
+
+        # ---------------- post-(GW+SOX) only ----------------
+        if args.post_gw_sox:
+            window = (
+                "full dynamic"
+                if args.post_mmax is None
+                else f"|m|<={args.post_mmax} windowed"
             )
             print(f"  post-GW density response on GW+SOX background ({window})")
             post_sox = run_post_gw(
@@ -354,28 +562,86 @@ def main():
                 m_max=args.post_mmax,
                 allow_unconverged=args.allow_unconverged,
             )
-            mu_post_gw[iv] = post.mu
             mu_post_gw_sox[iv] = post_sox.mu
-            max_delta_w_post_gw[iv] = float(np.max(np.abs(post.W_post - gw.W)))
-            max_delta_w_post_gw_sox[iv] = float(np.max(np.abs(post_sox.W_post - gwsox.W)))
-            post_fallback_fraction_gw[iv] = float(np.mean(post.used_background_w_mask))
-            post_fallback_fraction_gw_sox[iv] = float(np.mean(post_sox.used_background_w_mask))
+            max_delta_w_post_gw_sox[iv] = float(
+                np.max(np.abs(post_sox.W_post - gwsox.W))
+            )
+            post_fallback_fraction_gw_sox[iv] = float(
+                np.mean(post_sox.used_background_w_mask)
+            )
 
-            print("  exact ED Matsubara Green function")
-            G_ed, _ = exact.green_iomega(1j * np.asarray(grid.omega), mu_ed[iv], args.T)
-            g_relerr_gw[iv] = _relative_green_error(gw.G, G_ed)
+            h_static_post_sox = (
+                h0 + post_sox.Sigma_H[None, None] + post_sox.Sigma_F
+            )
+            reference_post_sox = build_tail_reference(
+                h0, post_sox.mu, post_sox.Sigma_H, grid
+            )
+            gg_post_sox = static_gg_tail_completed(
+                post_sox.G,
+                operators,
+                grid,
+                h_static_post_sox,
+                post_sox.mu,
+                edge_points=args.tail_edge_points,
+            )
+            chi_gg_post_gw_sox_raw[iv] = gg_post_sox["raw"]
+            chi_gg_post_gw_sox_completed[iv] = gg_post_sox["completed"]
+
+            print("  cGW+SOX diagnostic with G_GW+SOX and W_post")
+            diag_wpost_sox, conv = _solve_static_response(
+                gwsox.G,
+                post_sox.W_post,
+                Vq,
+                operators,
+                channels,
+                grid,
+                reference_sox,
+                h_static_sox,
+                gwsox.mu,
+                vertex_opts,
+                sox_opts,
+                args.tail_edge_points,
+                include_sox=True,
+                allow_unconverged=args.allow_unconverged,
+                label="cGW+SOX[G_bg,W_post]",
+            )
+            chi_cgw_sox_wpost_raw[iv] = diag_wpost_sox["raw"]
+            chi_cgw_sox_wpost_completed[iv] = diag_wpost_sox["completed"]
+            cgw_sox_wpost_converged[iv] = conv
+
+            print("  cGW+SOX diagnostic with G_post and W_post")
+            diag_post_sox, conv = _solve_static_response(
+                post_sox.G,
+                post_sox.W_post,
+                Vq,
+                operators,
+                channels,
+                grid,
+                reference_post_sox,
+                h_static_post_sox,
+                post_sox.mu,
+                vertex_opts,
+                sox_opts,
+                args.tail_edge_points,
+                include_sox=True,
+                allow_unconverged=args.allow_unconverged,
+                label="cGW+SOX[G_post,W_post]",
+            )
+            chi_cgw_sox_post_raw[iv] = diag_post_sox["raw"]
+            chi_cgw_sox_post_completed[iv] = diag_post_sox["completed"]
+            cgw_sox_post_converged[iv] = conv
+
             g_relerr_gw_sox[iv] = _relative_green_error(gwsox.G, G_ed)
-            g_relerr_post_gw[iv] = _relative_green_error(post.G, G_ed)
             g_relerr_post_gw_sox[iv] = _relative_green_error(post_sox.G, G_ed)
-            g_lowfreq_relerr_gw[iv] = _lowfreq_green_error(gw.G, G_ed, grid)
-            g_lowfreq_relerr_gw_sox[iv] = _lowfreq_green_error(gwsox.G, G_ed, grid)
-            g_lowfreq_relerr_post_gw[iv] = _lowfreq_green_error(post.G, G_ed, grid)
-            g_lowfreq_relerr_post_gw_sox[iv] = _lowfreq_green_error(post_sox.G, G_ed, grid)
+            g_lowfreq_relerr_gw_sox[iv] = _lowfreq_green_error(
+                gwsox.G, G_ed, grid
+            )
+            g_lowfreq_relerr_post_gw_sox[iv] = _lowfreq_green_error(
+                post_sox.G, G_ed, grid
+            )
             print(
                 "    full-G relerr: "
-                f"GW={g_relerr_gw[iv]:.4e} "
                 f"GW+SOX={g_relerr_gw_sox[iv]:.4e} "
-                f"post-GW={g_relerr_post_gw[iv]:.4e} "
                 f"post-(GW+SOX)={g_relerr_post_gw_sox[iv]:.4e}"
             )
 
@@ -386,11 +652,14 @@ def main():
         ed=ed_chi,
         gg_raw=chi_gg_raw,
         gg_completed=chi_gg_completed,
+        gg_gw_sox_raw=chi_gg_sox_raw,
+        gg_gw_sox_completed=chi_gg_sox_completed,
         cgw_raw=chi_cgw_raw,
         cgw_completed=chi_cgw_completed,
         cgw_sox_raw=chi_sox_raw,
         cgw_sox_completed=chi_sox_completed,
         tail_gg=tail_gg,
+        tail_gg_gw_sox=tail_gg_sox,
         tail_cgw=tail_cgw,
         tail_cgw_sox=tail_sox,
         mu_ed=mu_ed,
@@ -405,35 +674,59 @@ def main():
     if args.post_gw:
         save.update(
             mu_post_gw=mu_post_gw,
-            mu_post_gw_sox=mu_post_gw_sox,
+            gg_post_gw_raw=chi_gg_post_gw_raw,
+            gg_post_gw_completed=chi_gg_post_gw_completed,
+            cgw_wpost_raw=chi_cgw_wpost_raw,
+            cgw_wpost_completed=chi_cgw_wpost_completed,
+            cgw_post_gw_raw=chi_cgw_post_raw,
+            cgw_post_gw_completed=chi_cgw_post_completed,
+            cgw_wpost_converged=cgw_wpost_converged,
+            cgw_post_gw_converged=cgw_post_converged,
             g_relerr_gw=g_relerr_gw,
-            g_relerr_gw_sox=g_relerr_gw_sox,
             g_relerr_post_gw=g_relerr_post_gw,
-            g_relerr_post_gw_sox=g_relerr_post_gw_sox,
             g_lowfreq_relerr_gw=g_lowfreq_relerr_gw,
-            g_lowfreq_relerr_gw_sox=g_lowfreq_relerr_gw_sox,
             g_lowfreq_relerr_post_gw=g_lowfreq_relerr_post_gw,
-            g_lowfreq_relerr_post_gw_sox=g_lowfreq_relerr_post_gw_sox,
             max_delta_w_post_gw=max_delta_w_post_gw,
-            max_delta_w_post_gw_sox=max_delta_w_post_gw_sox,
             post_fallback_fraction_gw=post_fallback_fraction_gw,
+        )
+    if args.post_gw_sox:
+        save.update(
+            mu_post_gw_sox=mu_post_gw_sox,
+            gg_post_gw_sox_raw=chi_gg_post_gw_sox_raw,
+            gg_post_gw_sox_completed=chi_gg_post_gw_sox_completed,
+            cgw_sox_wpost_raw=chi_cgw_sox_wpost_raw,
+            cgw_sox_wpost_completed=chi_cgw_sox_wpost_completed,
+            cgw_sox_post_raw=chi_cgw_sox_post_raw,
+            cgw_sox_post_completed=chi_cgw_sox_post_completed,
+            cgw_sox_wpost_converged=cgw_sox_wpost_converged,
+            cgw_sox_post_converged=cgw_sox_post_converged,
+            g_relerr_gw_sox=g_relerr_gw_sox,
+            g_relerr_post_gw_sox=g_relerr_post_gw_sox,
+            g_lowfreq_relerr_gw_sox=g_lowfreq_relerr_gw_sox,
+            g_lowfreq_relerr_post_gw_sox=g_lowfreq_relerr_post_gw_sox,
+            max_delta_w_post_gw_sox=max_delta_w_post_gw_sox,
             post_fallback_fraction_gw_sox=post_fallback_fraction_gw_sox,
         )
     npz_path = args.out / "benchmark.npz"
     np.savez_compressed(npz_path, **save)
 
+    post_methods = []
+    if args.post_gw:
+        post_methods.append("post-GW")
+    if args.post_gw_sox:
+        post_methods.append("post-(GW+SOX)")
     config = {
         "geometry": {"L1": args.L1, "L2": args.L2, "n_sites": 6*ncell},
-        "response_methods": ["ED", "GG", "cGW", "cGW+SOX"],
-        "post_one_particle_methods": (
-            ["GW", "GW+SOX", "post-GW", "post-(GW+SOX)"] if args.post_gw else []
-        ),
+        "response_methods": ["ED", "GG[GW]", "cGW", "GG[GW+SOX]", "cGW+SOX"],
+        "post_methods": post_methods,
         "comparison_rule": "Compare ED static response to *_completed, not raw finite-box values.",
-        "post_rule": (
-            "Post-GW is benchmarked against exact ED G(iw); no off-shell cGW-on-post curve is labeled as a physical post susceptibility."
-        ),
         "post_screening_identity": "W_post = V - V chi_nn,cov V in the RubycGW sign convention.",
         "post_response": "Full orbital reducible density-density chi_nn(q,iOmega), not projected pseudospin chi.",
+        "post_diagnostic_rule": (
+            "GG[post] isolates the new G. cGW[G_bg,W_post] isolates the new W. "
+            "cGW[G_post,W_post] combines both. The latter two are response diagnostics "
+            "on a post background, not the strict derivative of the complete one-shot post map."
+        ),
         "parameters": vars(args).copy(),
     }
     config["parameters"]["out"] = str(args.out)
