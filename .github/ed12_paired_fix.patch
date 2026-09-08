@@ -1,0 +1,305 @@
+diff --git a/diagnose_ed12_four_layer.py b/diagnose_ed12_four_layer.py
+index b998875..e71f180 100644
+--- a/diagnose_ed12_four_layer.py
++++ b/diagnose_ed12_four_layer.py
+@@ -120,7 +120,7 @@ def _h0_cluster_field(exact: ExactSmallRubyThermal):
+ 
+ 
+ def _cluster_vertex(exact: ExactSmallRubyThermal, channel: str, q: np.ndarray):
+-    return np.asarray(exact.operator_matrix(channel, q), dtype=complex)
++    return np.asarray(exact.pseudospin_operator(channel, q), dtype=complex)
+ 
+ 
+ def _gw_continuation(exact, params, grid, target_N, args):
+@@ -292,21 +292,22 @@ def main():
+     print("=" * 88)
+ 
+     t0 = time.perf_counter()
+-    exact.diagonalize_all()
++    exact.diagonalize(args.V)
+     print(f"full sector ED diagonalization: {time.perf_counter()-t0:.2f} s")
+-    mu_ed = exact.solve_mu_for_mean_number(target_N, float(args.T))
+-    weights = exact.thermal_weights(mu_ed, float(args.T), tol=float(args.thermal_weight_tol))
++    mu_ed = exact.solve_mu(target_N, float(args.T))
++    weights = exact.thermal_selection(mu_ed, float(args.T), discard_weight_tol=float(args.thermal_weight_tol))
+     print(
+-        f"exact GC: mu={mu_ed:.10f}, <N>={weights.mean_number:.10f}, "
+-        f"Var(N)={weights.var_number:.6e}, discarded thermal weight={weights.discarded_weight:.3e}"
++        f"exact GC: mu={mu_ed:.10f}, <N>={weights.average_particles:.10f}, "
++        f"Var(N)={weights.variance_particles:.6e}, discarded thermal weight={weights.discarded_weight:.3e}"
+     )
+     print("exact particle-sector weights:")
+-    for N, pN in weights.sector_probabilities.items():
++    for N, pN in enumerate(weights.sector_probabilities):
+         if pN > 1e-8:
+             print(f"  N={N:2d}: p={pN:.8e}")
+ 
+     t0 = time.perf_counter()
+-    G_ed = exact.green_iomega(mu_ed, float(args.T), grid.omega, weights)
++    G_ed, weights = exact.green_iomega(1j * grid.omega, mu_ed, float(args.T), discard_weight_tol=float(args.thermal_weight_tol))
++    G_ed = G_ed[:, None, None, :, :]
+     print(
+         f"exact Lehmann G(iw): {time.perf_counter()-t0:.2f} s, "
+         f"discarded weight={weights.discarded_weight:.3e}"
+@@ -317,11 +318,9 @@ def main():
+     means = np.zeros(len(channels), dtype=complex)
+     for ic, ch in enumerate(channels):
+         t0 = time.perf_counter()
+-        exactC[:, ic], means[ic] = exact.correlation_tau(
+-            ch, q, mu_ed, float(args.T), tau, weights
+-        )
+-        chi_exact[ic], _ = exact.static_susceptibility(
+-            ch, q, mu_ed, float(args.T), weights
++        exactC[:, ic], chi_exact[ic], means[ic], _ = exact.correlation_tau(
++            exact.pseudospin_operator(ch, q), tau, mu_ed, float(args.T),
++            discard_weight_tol=float(args.thermal_weight_tol),
+         )
+         print(
+             f"exact C {ch:12s}: chi0={chi_exact[ic].real:+.8e}, "
+@@ -377,6 +376,7 @@ def main():
+         L1=int(args.L1),
+         L2=int(args.L2),
+         V=float(args.V),
++        ti=float(args.ti), t1=float(args.t1), t2=float(args.t2),
+         filling=float(args.filling),
+         target_N=float(target_N),
+         T=float(args.T),
+@@ -390,16 +390,17 @@ def main():
+         m_values=np.asarray(grid.m_values),
+         mu_ed=float(mu_ed),
+         mu_gw=float(gw.mu),
+-        exact_sector_N=np.asarray(sorted(weights.sector_probabilities), dtype=int),
+-        exact_sector_p=np.asarray([weights.sector_probabilities[n] for n in sorted(weights.sector_probabilities)]),
+-        exact_mean_N=float(weights.mean_number),
+-        exact_var_N=float(weights.var_number),
++        exact_sector_N=np.arange(exact.n_sites + 1, dtype=int),
++        exact_sector_p=np.asarray(weights.sector_probabilities),
++        exact_mean_N=float(weights.average_particles),
++        exact_var_N=float(weights.variance_particles),
+         discarded_thermal_weight=float(weights.discarded_weight),
+         G_ed=G_ed,
+         G_gw=gw.G,
+         G_rel_error=float(Gerr_full),
+         G_lowfreq_rel_error=float(Gerr_low),
+         exact_C_tau=exactC,
++        exact_correlation_method=np.asarray("paired-lower-state-lehmann"),
+         bubble_ed_iomega=chi_bubble_ed,
+         bubble_gw_iomega=chi_bubble_gw,
+         full_cgw_iomega=full_iomega,
+diff --git a/refresh_ed12_exact_correlations.py b/refresh_ed12_exact_correlations.py
+new file mode 100644
+index 0000000..2e77191
+--- /dev/null
++++ b/refresh_ed12_exact_correlations.py
+@@ -0,0 +1,40 @@
++#!/usr/bin/env python3
++"""Refresh paired-transition ED correlations while reusing saved Green functions.
++
++For archives written by diagnose_ed12_four_layer.py (short-key schema).
++No GW, cGW, or exact one-particle Lehmann calculation is repeated.
++"""
++import argparse
++from pathlib import Path
++import numpy as np
++from rubycgw.model import RubyParameters
++from rubycgw.small_cluster_exact import ExactSmallRubyThermal
++
++
++def main():
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument('benchmark',type=Path)
++    p.add_argument('--out',type=Path,default=Path('results/ed12_four_layer_paired.npz'))
++    args=p.parse_args()
++    with np.load(args.benchmark,allow_pickle=False) as d:
++        payload={k:d[k] for k in d.files}
++    d=payload
++    params=RubyParameters(V=float(d['V']),**{k:float(d[k]) if k in d else v
++                           for k,v in [('ti',.4),('t1',.2),('t2',.2)]})
++    ex=ExactSmallRubyThermal(int(d['L1']),int(d['L2']),params)
++    ex.diagonalize(params.V)
++    C=[];chi=[];means=[]
++    for ic,ch in enumerate(d['channels']):
++        c,x,mean,_=ex.correlation_tau(ex.pseudospin_operator(str(ch),d['q']),d['tau'],
++                                    float(d['mu_ed']),float(d['T']))
++        C.append(c);chi.append(x);means.append(mean)
++        print(f'{ch}: chi {d["exact_chi0"][ic].real:.10f} -> {x:.10f}; '
++              f'midpoint delta={(c[len(c)//2]-d["exact_C_tau"][len(c)//2,ic]).real:.3e}; '
++              f'KMS error={np.max(abs(c-c[::-1])):.3e}',flush=True)
++    payload.update(exact_C_tau=np.array(C).T,exact_chi0=np.array(chi),exact_means=np.array(means),
++                   exact_correlation_method=np.array('paired-lower-state-lehmann'),
++                   correlation_refresh_source=np.array(str(args.benchmark)))
++    args.out.parent.mkdir(parents=True,exist_ok=True)
++    np.savez_compressed(args.out,**payload)
++
++if __name__=='__main__':main()
+diff --git a/rubycgw/small_cluster_exact.py b/rubycgw/small_cluster_exact.py
+index 87da5fe..6a32a0c 100644
+--- a/rubycgw/small_cluster_exact.py
++++ b/rubycgw/small_cluster_exact.py
+@@ -479,6 +479,51 @@ class ExactSmallRubyThermal:
+             K[sl, sl] = phase * k6
+         return K
+ 
++    def static_susceptibility_matrix(
++        self, operators: np.ndarray, mu: float, T: float,
++    ) -> tuple[np.ndarray, np.ndarray]:
++        """Full grand-canonical static connected response for Hermitian sources.
++
++        Includes every eigenstate, with no thermal-state truncation. Uses the
++        stable divided difference (p_m-p_n)/(E_n-E_m), including beta*p in
++        degenerate subspaces. Returned matrix is real symmetric. This method
++        avoids reconstructing off-diagonal entries from many separate sums.
++        """
++        ops = np.asarray(operators, dtype=complex)
++        if ops.ndim != 3 or ops.shape[1:] != (self.n_sites, self.n_sites):
++            raise ValueError("operators must have shape (count,n_sites,n_sites)")
++        if not np.all(np.isfinite(ops)) or np.max(
++            np.abs(ops - ops.conj().swapaxes(-1, -2)), initial=0.
++        ) > 1e-10:
++            raise ValueError("static response requires finite Hermitian operators")
++        probs, _, _ = self._normalized_probabilities(mu, T)
++        beta = 1. / float(T)
++        count = len(ops)
++        chi = np.zeros((count, count), dtype=float)
++        means = np.zeros(count, dtype=complex)
++        for N, (sec, p) in enumerate(zip(self.sectors, probs)):
++            if np.max(p) == 0.:
++                continue
++            delta = sec.energies[:, None] - sec.energies[None, :]
++            numerator = p[None, :] - p[:, None]
++            near = np.abs(delta) < 1e-12
++            w = np.empty_like(delta)
++            np.divide(numerator, delta, out=w, where=~near)
++            w[near] = np.broadcast_to(beta * .5 * (p[:, None]+p[None, :]), w.shape)[near]
++            if np.min(w) < -1e-12:
++                raise RuntimeError("negative Lehmann static weight")
++            sqrtw = np.sqrt(np.maximum(w, 0.))
++            amplitudes = np.empty((count, len(p)*len(p)), dtype=complex)
++            for a, op in enumerate(ops):
++                transformed = sec.eigenvectors.conj().T @ self._apply_onebody_batch(
++                    N, op, sec.eigenvectors
++                )
++                means[a] += np.dot(p, np.diag(transformed))
++                amplitudes[a] = (sqrtw * transformed).ravel()
++            chi += (amplitudes.conj() @ amplitudes.T).real
++        chi -= beta * np.outer(means.conj(), means).real
++        return .5 * (chi + chi.T), means
++
+     def correlation_tau(
+         self,
+         operator: np.ndarray,
+@@ -488,7 +533,13 @@ class ExactSmallRubyThermal:
+         *,
+         discard_weight_tol: float = 1e-12,
+     ) -> tuple[np.ndarray, float, complex, ExactThermalStateSelection]:
+-        """Exact connected C(tau) and exact static integral for Hermitian O."""
++        """Connected C(tau) and static integral with paired Lehmann transitions.
++
++        Thermal selection retains lower initial states; both directions of
++        each retained lower-to-upper transition are included. Only transitions
++        with BOTH states outside the retained energy prefixes are discarded.
++        This preserves C(tau)=C(beta-tau), including the endpoints.
++        """
+         O = np.asarray(operator, dtype=complex)
+         if O.shape != (self.n_sites, self.n_sites):
+             raise ValueError("operator shape mismatch")
+@@ -514,26 +565,33 @@ class ExactSmallRubyThermal:
+             V = sec.eigenvectors[:, idx]
+             OV = self._apply_onebody_batch(N, O, V)
+             coeff = sec.eigenvectors.conj().T @ OV  # <n|O|m_kept>
++            # The retained states form an energy-ordered prefix in each sector.
++            # Pair each retained lower state with ALL higher states. Adding
++            # both thermal directions avoids p_high*exp(+beta*Delta), whose
++            # omission is not controlled by the discarded initial-state weight.
++            if not np.array_equal(idx, np.arange(len(idx))):
++                raise RuntimeError("thermal selection must retain an energy prefix")
+             for a, midx in enumerate(idx):
+                 amp = coeff[:, a]
+                 p = float(selection.probabilities[N][midx])
+-                delta = sec.energies - sec.energies[midx]
+-                spectral = np.abs(amp) ** 2
+-                C += p * np.einsum(
+-                    "t,n->t", np.ones(len(tau)), np.zeros(len(delta))
+-                )  # allocate correct dtype/shape without special casing below
+-                C -= p * np.einsum(
+-                    "tn,n->t", np.zeros((len(tau), len(delta))), spectral
+-                )
+-                C += p * (np.exp(-tau[:, None] * delta[None, :]) @ spectral)
++                diag_weight = p * abs(amp[midx]) ** 2
++                C += diag_weight
++                chi_unc += beta * diag_weight
+                 mean += p * amp[midx]
+-
++                upper = np.arange(midx + 1, len(sec.energies))
++                if not len(upper):
++                    continue
++                delta = sec.energies[upper] - sec.energies[midx]
++                spectral = np.abs(amp[upper]) ** 2
++                C += p * (
++                    (np.exp(-tau[:, None] * delta[None, :])
++                     + np.exp(-(beta-tau[:, None]) * delta[None, :])) @ spectral
++                )
+                 small = np.abs(delta) < 1e-12
+-                integ = np.empty_like(delta, dtype=float)
+-                integ[small] = beta
+-                if np.any(~small):
+-                    integ[~small] = -np.expm1(-beta * delta[~small]) / delta[~small]
+-                chi_unc += p * float(np.dot(integ, spectral).real)
++                integ = np.empty_like(delta)
++                integ[small] = 2. * beta * p
++                integ[~small] = 2. * p * (-np.expm1(-beta*delta[~small])) / delta[~small]
++                chi_unc += float(np.dot(integ, spectral).real)
+ 
+         connected = C - abs(mean) ** 2
+         chi = float(chi_unc - beta * abs(mean) ** 2)
+diff --git a/tests/test_small_cluster_exact.py b/tests/test_small_cluster_exact.py
+index c35075a..e95cd99 100644
+--- a/tests/test_small_cluster_exact.py
++++ b/tests/test_small_cluster_exact.py
+@@ -41,3 +41,46 @@ def test_interaction_matrix_contains_only_six_bonds_per_primitive_cell():
+     # the number of nonzero matrix entries is twice the number of bonds.
+     assert len(exact.interaction_pairs) == 12
+     assert np.count_nonzero(np.abs(exact.Vunit) > 1e-14) == 24
++
++
++def test_static_matrix_matches_scalar_lehmann_and_operator_linearity():
++    exact = ExactSmallRubyThermal(1, 1, RubyParameters(V=.3))
++    exact.diagonalize(.3)
++    T=.2;mu=exact.solve_mu(3.,T)
++    ops=np.array([exact.pseudospin_operator(ch) for ch in ('x_even','z_same','z_opposite')])
++    chi,means=exact.static_susceptibility_matrix(ops,mu,T)
++    for i,op in enumerate(ops):
++        _,scalar,mean,_=exact.correlation_tau(op,np.array([0.,1./T]),mu,T,discard_weight_tol=0.)
++        np.testing.assert_allclose(chi[i,i],scalar,atol=1e-10)
++        np.testing.assert_allclose(means[i],mean,atol=1e-12)
++    weights=np.array([.3,.7,-.4])
++    _,scalar,_,_=exact.correlation_tau(np.einsum('a,aij->ij',weights,ops),np.array([0.,1./T]),mu,T,discard_weight_tol=0.)
++    np.testing.assert_allclose(weights@chi@weights,scalar,atol=1e-10)
++    assert np.linalg.eigvalsh(chi).min() > -1e-10
++
++
++def test_static_matrix_free_fermions_and_degenerate_levels():
++    from rubycgw.response_tail import build_tail_reference,reference_response_infinite
++    from rubycgw.grids import MatsubaraGrid
++    exact=ExactSmallRubyThermal(1,1,RubyParameters(V=0.,ti=0.,t1=0.,t2=0.))
++    exact.diagonalize(0.)
++    grid=MatsubaraGrid(nk1=1,nk2=1,nw=4,nOmega=1,T=.2)
++    ops=np.array([np.eye(6),exact.pseudospin_operator('z_same')])
++    chi,_=exact.static_susceptibility_matrix(ops,0.,grid.T)
++    ref=build_tail_reference(exact.h0[None,None],0.,np.zeros((6,6)),grid)
++    expected=np.array([[-np.trace(left@reference_response_infinite(ref,right,grid)[0,0]).real for right in ops] for left in ops])
++    np.testing.assert_allclose(chi,expected,atol=1e-11)
++
++
++def test_paired_thermal_truncation_preserves_kms_and_static_response():
++    exact=ExactSmallRubyThermal(1,1,RubyParameters(V=.7))
++    exact.diagonalize(.7)
++    T=.06;mu=exact.solve_mu(3.,T)
++    K=exact.pseudospin_operator('x_even')
++    tau=np.linspace(0.,1./T,31)
++    truncated,chi,_,sel=exact.correlation_tau(K,tau,mu,T,discard_weight_tol=1e-8)
++    full,chi_full,_,_=exact.correlation_tau(K,tau,mu,T,discard_weight_tol=0.)
++    assert sum(map(len,sel.kept_indices)) < 2**exact.n_sites
++    np.testing.assert_allclose(truncated,truncated[::-1],atol=1e-12)
++    np.testing.assert_allclose(truncated,full,atol=1e-7)
++    np.testing.assert_allclose(chi,chi_full,atol=1e-6)
