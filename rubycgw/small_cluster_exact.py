@@ -479,6 +479,51 @@ class ExactSmallRubyThermal:
             K[sl, sl] = phase * k6
         return K
 
+    def static_susceptibility_matrix(
+        self, operators: np.ndarray, mu: float, T: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Full grand-canonical static connected response for Hermitian sources.
+
+        Includes every eigenstate, with no thermal-state truncation. Uses the
+        stable divided difference (p_m-p_n)/(E_n-E_m), including beta*p in
+        degenerate subspaces. Returned matrix is real symmetric. This method
+        avoids reconstructing off-diagonal entries from many separate sums.
+        """
+        ops = np.asarray(operators, dtype=complex)
+        if ops.ndim != 3 or ops.shape[1:] != (self.n_sites, self.n_sites):
+            raise ValueError("operators must have shape (count,n_sites,n_sites)")
+        if not np.all(np.isfinite(ops)) or np.max(
+            np.abs(ops - ops.conj().swapaxes(-1, -2)), initial=0.
+        ) > 1e-10:
+            raise ValueError("static response requires finite Hermitian operators")
+        probs, _, _ = self._normalized_probabilities(mu, T)
+        beta = 1. / float(T)
+        count = len(ops)
+        chi = np.zeros((count, count), dtype=float)
+        means = np.zeros(count, dtype=complex)
+        for N, (sec, p) in enumerate(zip(self.sectors, probs)):
+            if np.max(p) == 0.:
+                continue
+            delta = sec.energies[:, None] - sec.energies[None, :]
+            numerator = p[None, :] - p[:, None]
+            near = np.abs(delta) < 1e-12
+            w = np.empty_like(delta)
+            np.divide(numerator, delta, out=w, where=~near)
+            w[near] = np.broadcast_to(beta * .5 * (p[:, None]+p[None, :]), w.shape)[near]
+            if np.min(w) < -1e-12:
+                raise RuntimeError("negative Lehmann static weight")
+            sqrtw = np.sqrt(np.maximum(w, 0.))
+            amplitudes = np.empty((count, len(p)*len(p)), dtype=complex)
+            for a, op in enumerate(ops):
+                transformed = sec.eigenvectors.conj().T @ self._apply_onebody_batch(
+                    N, op, sec.eigenvectors
+                )
+                means[a] += np.dot(p, np.diag(transformed))
+                amplitudes[a] = (sqrtw * transformed).ravel()
+            chi += (amplitudes.conj() @ amplitudes.T).real
+        chi -= beta * np.outer(means.conj(), means).real
+        return .5 * (chi + chi.T), means
+
     def correlation_tau(
         self,
         operator: np.ndarray,
@@ -488,7 +533,13 @@ class ExactSmallRubyThermal:
         *,
         discard_weight_tol: float = 1e-12,
     ) -> tuple[np.ndarray, float, complex, ExactThermalStateSelection]:
-        """Exact connected C(tau) and exact static integral for Hermitian O."""
+        """Connected C(tau) and static integral with paired Lehmann transitions.
+
+        Thermal selection retains lower initial states; both directions of
+        each retained lower-to-upper transition are included. Only transitions
+        with BOTH states outside the retained energy prefixes are discarded.
+        This preserves C(tau)=C(beta-tau), including the endpoints.
+        """
         O = np.asarray(operator, dtype=complex)
         if O.shape != (self.n_sites, self.n_sites):
             raise ValueError("operator shape mismatch")
@@ -514,26 +565,33 @@ class ExactSmallRubyThermal:
             V = sec.eigenvectors[:, idx]
             OV = self._apply_onebody_batch(N, O, V)
             coeff = sec.eigenvectors.conj().T @ OV  # <n|O|m_kept>
+            # The retained states form an energy-ordered prefix in each sector.
+            # Pair each retained lower state with ALL higher states. Adding
+            # both thermal directions avoids p_high*exp(+beta*Delta), whose
+            # omission is not controlled by the discarded initial-state weight.
+            if not np.array_equal(idx, np.arange(len(idx))):
+                raise RuntimeError("thermal selection must retain an energy prefix")
             for a, midx in enumerate(idx):
                 amp = coeff[:, a]
                 p = float(selection.probabilities[N][midx])
-                delta = sec.energies - sec.energies[midx]
-                spectral = np.abs(amp) ** 2
-                C += p * np.einsum(
-                    "t,n->t", np.ones(len(tau)), np.zeros(len(delta))
-                )  # allocate correct dtype/shape without special casing below
-                C -= p * np.einsum(
-                    "tn,n->t", np.zeros((len(tau), len(delta))), spectral
-                )
-                C += p * (np.exp(-tau[:, None] * delta[None, :]) @ spectral)
+                diag_weight = p * abs(amp[midx]) ** 2
+                C += diag_weight
+                chi_unc += beta * diag_weight
                 mean += p * amp[midx]
-
+                upper = np.arange(midx + 1, len(sec.energies))
+                if not len(upper):
+                    continue
+                delta = sec.energies[upper] - sec.energies[midx]
+                spectral = np.abs(amp[upper]) ** 2
+                C += p * (
+                    (np.exp(-tau[:, None] * delta[None, :])
+                     + np.exp(-(beta-tau[:, None]) * delta[None, :])) @ spectral
+                )
                 small = np.abs(delta) < 1e-12
-                integ = np.empty_like(delta, dtype=float)
-                integ[small] = beta
-                if np.any(~small):
-                    integ[~small] = -np.expm1(-beta * delta[~small]) / delta[~small]
-                chi_unc += p * float(np.dot(integ, spectral).real)
+                integ = np.empty_like(delta)
+                integ[small] = 2. * beta * p
+                integ[~small] = 2. * p * (-np.expm1(-beta*delta[~small])) / delta[~small]
+                chi_unc += float(np.dot(integ, spectral).real)
 
         connected = C - abs(mean) ** 2
         chi = float(chi_unc - beta * abs(mean) ** 2)
