@@ -120,7 +120,7 @@ def _h0_cluster_field(exact: ExactSmallRubyThermal):
 
 
 def _cluster_vertex(exact: ExactSmallRubyThermal, channel: str, q: np.ndarray):
-    return np.asarray(exact.operator_matrix(channel, q), dtype=complex)
+    return np.asarray(exact.pseudospin_operator(channel, q), dtype=complex)
 
 
 def _gw_continuation(exact, params, grid, target_N, args):
@@ -292,21 +292,22 @@ def main():
     print("=" * 88)
 
     t0 = time.perf_counter()
-    exact.diagonalize_all()
+    exact.diagonalize(args.V)
     print(f"full sector ED diagonalization: {time.perf_counter()-t0:.2f} s")
-    mu_ed = exact.solve_mu_for_mean_number(target_N, float(args.T))
-    weights = exact.thermal_weights(mu_ed, float(args.T), tol=float(args.thermal_weight_tol))
+    mu_ed = exact.solve_mu(target_N, float(args.T))
+    weights = exact.thermal_selection(mu_ed, float(args.T), discard_weight_tol=float(args.thermal_weight_tol))
     print(
-        f"exact GC: mu={mu_ed:.10f}, <N>={weights.mean_number:.10f}, "
-        f"Var(N)={weights.var_number:.6e}, discarded thermal weight={weights.discarded_weight:.3e}"
+        f"exact GC: mu={mu_ed:.10f}, <N>={weights.average_particles:.10f}, "
+        f"Var(N)={weights.variance_particles:.6e}, discarded thermal weight={weights.discarded_weight:.3e}"
     )
     print("exact particle-sector weights:")
-    for N, pN in weights.sector_probabilities.items():
+    for N, pN in enumerate(weights.sector_probabilities):
         if pN > 1e-8:
             print(f"  N={N:2d}: p={pN:.8e}")
 
     t0 = time.perf_counter()
-    G_ed = exact.green_iomega(mu_ed, float(args.T), grid.omega, weights)
+    G_ed, weights = exact.green_iomega(1j * grid.omega, mu_ed, float(args.T), discard_weight_tol=float(args.thermal_weight_tol))
+    G_ed = G_ed[:, None, None, :, :]
     print(
         f"exact Lehmann G(iw): {time.perf_counter()-t0:.2f} s, "
         f"discarded weight={weights.discarded_weight:.3e}"
@@ -317,11 +318,9 @@ def main():
     means = np.zeros(len(channels), dtype=complex)
     for ic, ch in enumerate(channels):
         t0 = time.perf_counter()
-        exactC[:, ic], means[ic] = exact.correlation_tau(
-            ch, q, mu_ed, float(args.T), tau, weights
-        )
-        chi_exact[ic], _ = exact.static_susceptibility(
-            ch, q, mu_ed, float(args.T), weights
+        exactC[:, ic], chi_exact[ic], means[ic], _ = exact.correlation_tau(
+            exact.pseudospin_operator(ch, q), tau, mu_ed, float(args.T),
+            discard_weight_tol=float(args.thermal_weight_tol),
         )
         print(
             f"exact C {ch:12s}: chi0={chi_exact[ic].real:+.8e}, "
@@ -377,6 +376,7 @@ def main():
         L1=int(args.L1),
         L2=int(args.L2),
         V=float(args.V),
+        ti=float(args.ti), t1=float(args.t1), t2=float(args.t2),
         filling=float(args.filling),
         target_N=float(target_N),
         T=float(args.T),
@@ -390,16 +390,17 @@ def main():
         m_values=np.asarray(grid.m_values),
         mu_ed=float(mu_ed),
         mu_gw=float(gw.mu),
-        exact_sector_N=np.asarray(sorted(weights.sector_probabilities), dtype=int),
-        exact_sector_p=np.asarray([weights.sector_probabilities[n] for n in sorted(weights.sector_probabilities)]),
-        exact_mean_N=float(weights.mean_number),
-        exact_var_N=float(weights.var_number),
+        exact_sector_N=np.arange(exact.n_sites + 1, dtype=int),
+        exact_sector_p=np.asarray(weights.sector_probabilities),
+        exact_mean_N=float(weights.average_particles),
+        exact_var_N=float(weights.variance_particles),
         discarded_thermal_weight=float(weights.discarded_weight),
         G_ed=G_ed,
         G_gw=gw.G,
         G_rel_error=float(Gerr_full),
         G_lowfreq_rel_error=float(Gerr_low),
         exact_C_tau=exactC,
+        exact_correlation_method=np.asarray("paired-lower-state-lehmann"),
         bubble_ed_iomega=chi_bubble_ed,
         bubble_gw_iomega=chi_bubble_gw,
         full_cgw_iomega=full_iomega,
