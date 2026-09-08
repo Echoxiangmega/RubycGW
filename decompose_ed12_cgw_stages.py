@@ -264,7 +264,7 @@ def main():
     exact = ExactSmallRubyThermal(L1, L2, params)
     h0 = np.asarray(exact.h0, dtype=complex)[None, None]
     Vq = _interaction_matrix(exact, V)
-    vertices = [np.asarray(exact.operator_matrix(ch, q), dtype=complex) for ch in channels]
+    vertices = [np.asarray(exact.pseudospin_operator(ch, q), dtype=complex) for ch in channels]
 
     sigma_h, density, hit, herr = _recover_hartree(
         G, h0, Vq, grid, mu_gw, args.hartree_tol, args.hartree_max_iter
@@ -327,41 +327,38 @@ def main():
             line += f"  {val:+.8e}"
         print(line)
 
-    out = args.out
-    if out is None:
-        out = args.benchmark.with_name(args.benchmark.stem + "_stages.npz")
+    out = args.out if args.out is not None else args.benchmark.with_name(args.benchmark.stem + "_stages.npz")
+    out = Path(out)
     if out.suffix.lower() != ".npz":
         out = out.with_suffix(".npz")
-    png = out.with_suffix(".png")
     out.parent.mkdir(parents=True, exist_ok=True)
-
-    payload = dict(
-        benchmark=np.asarray(str(args.benchmark)),
-        V=V,
-        filling=filling,
-        T=T,
-        beta=beta,
-        L1=L1,
-        L2=L2,
-        q=q,
-        q_label=np.asarray(qlabel),
-        channels=np.asarray(channels),
-        tau=tau,
-        m_values=np.asarray(grid.m_values),
-        Omega=np.asarray(grid.Omega),
-        exact_C_tau=exactC,
-        bubble_ed_C_tau=bubbleED,
-        bubble_gw_C_tau=bubbleGW,
-        recovered_sigma_h=sigma_h,
-        recovered_density=density,
-        reconstructed_GG_relative_difference=gg_rel,
-    )
+    payload = {
+        "benchmark": np.asarray(str(args.benchmark)),
+        "channels": np.asarray(channels),
+        "q": np.asarray(q),
+        "q_label": np.asarray(qlabel),
+        "tau": np.asarray(tau),
+        "beta": float(beta),
+        "m_values": np.asarray(grid.m_values),
+        "Omega": np.asarray(grid.Omega),
+        "bubble_gw_tau": bubbleGW,
+        "bubble_gw_iomega": bubbleGW_iw,
+        "exact_vertex_tau": exactC - bubbleED,
+        "exact_vertex_static": exact_static - bubbleED_iw[izero],
+        "reconstructed_hartree": sigma_h,
+        "reconstructed_density": density,
+        "reconstructed_gg_relative_difference": float(gg_rel),
+    }
     for s in stages:
         payload[f"{s}_iomega"] = stage_iw[s]
-        payload[f"{s}_C_tau"] = stage_tau[s]
+        payload[f"{s}_tau"] = stage_tau[s]
+        payload[f"{s}_vertex_tau"] = stage_tau[s] - bubbleGW
+        payload[f"{s}_vertex_static"] = stage_iw[s][izero] - bubbleGW_iw[izero]
         payload[f"{s}_iterations"] = iterations[s]
         payload[f"{s}_residuals"] = residuals[s]
     np.savez_compressed(out, **payload)
+
+    png = out.with_suffix(".png")
     _plot(tau, beta, channels, exactC, bubbleED, bubbleGW, stage_tau, png, args.dpi, qlabel)
     print(f"saved: {out}")
     print(f"saved: {png}")
