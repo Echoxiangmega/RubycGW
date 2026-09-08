@@ -1,16 +1,30 @@
 #!/usr/bin/env python3
-"""Same-torus ED / GG / cGW / cGW+SOX static-response benchmark.
+"""Same-torus ED / GG / cGW / cGW+SOX benchmark, with optional post-GW.
 
 The finite Ruby torus is represented in two exactly matching ways:
 
 * ED uses the full many-body Hilbert space of ``ExactSmallRubyThermal``;
 * GW and GW+SOX treat every physical torus site as an orbital and use nk=1.
 
-Thus the comparison contains no lattice-size or momentum-grid mismatch.  The
-production method labels are ED, GG, cGW and cGW+SOX.  Both raw finite-box and
-analytic-tail-completed diagrammatic responses are saved; ED is intrinsically a
-full static thermodynamic response and should be compared to the completed
-values.
+The static-response benchmark remains ED / GG / cGW / cGW+SOX.  Both raw
+finite-box and analytic-tail-completed diagrammatic responses are saved; ED is
+intrinsically a full static thermodynamic response and should be compared to
+the completed values.
+
+With ``--post-gw`` the script additionally computes the full covariant orbital
+density response chi_nn(Q), builds
+
+    W_post = V - V chi_nn,cov V,
+
+and performs the canonical one-shot post Dyson update on both the ordinary GW
+and GW+SOX backgrounds.  Post-GW is a one-particle correction, so these methods
+are compared directly with the exact ED Matsubara Green function rather than
+being mislabeled as a new covariant static susceptibility.  A limited
+``--post-mmax`` is available only as an explicitly windowed diagnostic; omit it
+for the full post-GW construction.
+
+Plots are generated automatically next to ``benchmark.npz`` unless
+``--no-plots`` is supplied.
 """
 from __future__ import annotations
 
@@ -20,10 +34,12 @@ from pathlib import Path
 
 import numpy as np
 
+from rubycgw.benchmark_plot import plot_benchmark_npz
 from rubycgw.grids import MatsubaraGrid
 from rubycgw.gw import GWOptions
 from rubycgw.gw_sox import solve_matrix_gw_sox
 from rubycgw.model import RubyParameters
+from rubycgw.post_gw import run_post_gw
 from rubycgw.production_cgw import solve_vertex_q0_tail
 from rubycgw.production_cgw_sox import (
     solve_vertex_q0_tail_sox,
@@ -64,6 +80,11 @@ def _args():
     p.add_argument("--tail-edge-points", type=int, default=2)
     p.add_argument("--backend", choices=["fft", "direct"], default="direct")
     p.add_argument("--allow-unconverged", action="store_true")
+    p.add_argument("--post-gw", action="store_true",
+                   help="compute full post-GW and post-(GW+SOX) one-particle benchmarks")
+    p.add_argument("--post-mmax", type=int, default=None,
+                   help="diagnostic only: post-correct |m|<=M and keep background W outside")
+    p.add_argument("--no-plots", action="store_true")
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--out", type=Path, default=Path("results/ed_gw_cgw_sox_benchmark"))
     return p.parse_args()
@@ -76,10 +97,34 @@ def _require(ok, message, allow):
         print("WARNING:", message)
 
 
+def _relative_green_error(G_approx, G_exact):
+    arr = np.asarray(G_approx, dtype=complex)
+    if arr.ndim == 5:
+        arr = arr[:, 0, 0]
+    exact = np.asarray(G_exact, dtype=complex)
+    denom = float(np.linalg.norm(exact.ravel()))
+    return float(np.linalg.norm((arr - exact).ravel()) / max(denom, 1e-300))
+
+
+def _lowfreq_green_error(G_approx, G_exact, grid, count=4):
+    arr = np.asarray(G_approx, dtype=complex)
+    if arr.ndim == 5:
+        arr = arr[:, 0, 0]
+    exact = np.asarray(G_exact, dtype=complex)
+    idx = np.argsort(np.abs(np.asarray(grid.omega)))[: min(int(count), grid.nf)]
+    denom = float(np.linalg.norm(exact[idx].ravel()))
+    return float(np.linalg.norm((arr[idx] - exact[idx]).ravel()) / max(denom, 1e-300))
+
+
 def main():
     args = _args()
     if 6 * args.L1 * args.L2 > 16:
         raise ValueError("ExactSmallRubyThermal requires at most 16 sites")
+    if args.post_mmax is not None and not args.post_gw:
+        raise ValueError("--post-mmax requires --post-gw")
+    if args.post_mmax is not None and args.post_mmax < 0:
+        raise ValueError("--post-mmax must be non-negative")
+
     ncell = int(args.L1) * int(args.L2)
     target = float(args.filling) * ncell
     Vvalues = np.asarray(args.V, dtype=float)
@@ -130,6 +175,22 @@ def main():
     cgw_sox_converged = np.zeros((nV, nc), dtype=bool)
     max_sigma_sox = np.full(nV, np.nan)
 
+    # Optional one-particle post-GW benchmark arrays.
+    mu_post_gw = np.full(nV, np.nan)
+    mu_post_gw_sox = np.full(nV, np.nan)
+    g_relerr_gw = np.full(nV, np.nan)
+    g_relerr_gw_sox = np.full(nV, np.nan)
+    g_relerr_post_gw = np.full(nV, np.nan)
+    g_relerr_post_gw_sox = np.full(nV, np.nan)
+    g_lowfreq_relerr_gw = np.full(nV, np.nan)
+    g_lowfreq_relerr_gw_sox = np.full(nV, np.nan)
+    g_lowfreq_relerr_post_gw = np.full(nV, np.nan)
+    g_lowfreq_relerr_post_gw_sox = np.full(nV, np.nan)
+    max_delta_w_post_gw = np.full(nV, np.nan)
+    max_delta_w_post_gw_sox = np.full(nV, np.nan)
+    post_fallback_fraction_gw = np.full(nV, np.nan)
+    post_fallback_fraction_gw_sox = np.full(nV, np.nan)
+
     gw_initial = None
     sox_initial = None
     for iv, V in enumerate(Vvalues):
@@ -144,7 +205,7 @@ def main():
         ed_chi[iv], _ = exact.static_susceptibility_matrix(
             operators, mu_ed[iv], args.T
         )
-        print("  ED complete")
+        print("  ED static response complete")
 
         h0 = np.asarray(exact.h0, dtype=complex)[None, None]
         Vq = (float(V) * np.asarray(exact.Vunit, dtype=complex))[None, None]
@@ -265,9 +326,61 @@ def main():
                 f"cGW+SOX={chi_sox_completed[iv,ic,ic].real:+.8f}"
             )
 
+        if args.post_gw:
+            window = "full dynamic" if args.post_mmax is None else f"|m|<={args.post_mmax} windowed"
+            print(f"  post-GW density response on GW background ({window})")
+            post = run_post_gw(
+                gw,
+                h0,
+                Vq,
+                grid,
+                gw_opts=gw_opts,
+                vertex_opts=vertex_opts,
+                include_sox=False,
+                sox_opts=sox_opts,
+                m_max=args.post_mmax,
+                allow_unconverged=args.allow_unconverged,
+            )
+            print(f"  post-GW density response on GW+SOX background ({window})")
+            post_sox = run_post_gw(
+                gwsox,
+                h0,
+                Vq,
+                grid,
+                gw_opts=gw_opts,
+                vertex_opts=vertex_opts,
+                include_sox=True,
+                sox_opts=sox_opts,
+                m_max=args.post_mmax,
+                allow_unconverged=args.allow_unconverged,
+            )
+            mu_post_gw[iv] = post.mu
+            mu_post_gw_sox[iv] = post_sox.mu
+            max_delta_w_post_gw[iv] = float(np.max(np.abs(post.W_post - gw.W)))
+            max_delta_w_post_gw_sox[iv] = float(np.max(np.abs(post_sox.W_post - gwsox.W)))
+            post_fallback_fraction_gw[iv] = float(np.mean(post.used_background_w_mask))
+            post_fallback_fraction_gw_sox[iv] = float(np.mean(post_sox.used_background_w_mask))
+
+            print("  exact ED Matsubara Green function")
+            G_ed, _ = exact.green_iomega(1j * np.asarray(grid.omega), mu_ed[iv], args.T)
+            g_relerr_gw[iv] = _relative_green_error(gw.G, G_ed)
+            g_relerr_gw_sox[iv] = _relative_green_error(gwsox.G, G_ed)
+            g_relerr_post_gw[iv] = _relative_green_error(post.G, G_ed)
+            g_relerr_post_gw_sox[iv] = _relative_green_error(post_sox.G, G_ed)
+            g_lowfreq_relerr_gw[iv] = _lowfreq_green_error(gw.G, G_ed, grid)
+            g_lowfreq_relerr_gw_sox[iv] = _lowfreq_green_error(gwsox.G, G_ed, grid)
+            g_lowfreq_relerr_post_gw[iv] = _lowfreq_green_error(post.G, G_ed, grid)
+            g_lowfreq_relerr_post_gw_sox[iv] = _lowfreq_green_error(post_sox.G, G_ed, grid)
+            print(
+                "    full-G relerr: "
+                f"GW={g_relerr_gw[iv]:.4e} "
+                f"GW+SOX={g_relerr_gw_sox[iv]:.4e} "
+                f"post-GW={g_relerr_post_gw[iv]:.4e} "
+                f"post-(GW+SOX)={g_relerr_post_gw_sox[iv]:.4e}"
+            )
+
     args.out.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        args.out / "benchmark.npz",
+    save = dict(
         V=Vvalues,
         channels=np.asarray(channels),
         ed=ed_chi,
@@ -289,17 +402,49 @@ def main():
         cgw_sox_vertex_converged=cgw_sox_converged,
         max_sigma_sox=max_sigma_sox,
     )
+    if args.post_gw:
+        save.update(
+            mu_post_gw=mu_post_gw,
+            mu_post_gw_sox=mu_post_gw_sox,
+            g_relerr_gw=g_relerr_gw,
+            g_relerr_gw_sox=g_relerr_gw_sox,
+            g_relerr_post_gw=g_relerr_post_gw,
+            g_relerr_post_gw_sox=g_relerr_post_gw_sox,
+            g_lowfreq_relerr_gw=g_lowfreq_relerr_gw,
+            g_lowfreq_relerr_gw_sox=g_lowfreq_relerr_gw_sox,
+            g_lowfreq_relerr_post_gw=g_lowfreq_relerr_post_gw,
+            g_lowfreq_relerr_post_gw_sox=g_lowfreq_relerr_post_gw_sox,
+            max_delta_w_post_gw=max_delta_w_post_gw,
+            max_delta_w_post_gw_sox=max_delta_w_post_gw_sox,
+            post_fallback_fraction_gw=post_fallback_fraction_gw,
+            post_fallback_fraction_gw_sox=post_fallback_fraction_gw_sox,
+        )
+    npz_path = args.out / "benchmark.npz"
+    np.savez_compressed(npz_path, **save)
+
     config = {
         "geometry": {"L1": args.L1, "L2": args.L2, "n_sites": 6*ncell},
-        "methods": ["ED", "GG", "cGW", "cGW+SOX"],
-        "comparison_rule": "Compare ED to *_completed, not to raw finite-box values.",
+        "response_methods": ["ED", "GG", "cGW", "cGW+SOX"],
+        "post_one_particle_methods": (
+            ["GW", "GW+SOX", "post-GW", "post-(GW+SOX)"] if args.post_gw else []
+        ),
+        "comparison_rule": "Compare ED static response to *_completed, not raw finite-box values.",
+        "post_rule": (
+            "Post-GW is benchmarked against exact ED G(iw); no off-shell cGW-on-post curve is labeled as a physical post susceptibility."
+        ),
+        "post_screening_identity": "W_post = V - V chi_nn,cov V in the RubycGW sign convention.",
+        "post_response": "Full orbital reducible density-density chi_nn(q,iOmega), not projected pseudospin chi.",
         "parameters": vars(args).copy(),
     }
     config["parameters"]["out"] = str(args.out)
     with (args.out / "config.json").open("w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
-    print(f"\nwrote {args.out/'benchmark.npz'}")
+
+    print(f"\nwrote {npz_path}")
     print(f"wrote {args.out/'config.json'}")
+    if not args.no_plots:
+        for path in plot_benchmark_npz(npz_path):
+            print(f"wrote {path}")
 
 
 if __name__ == "__main__":
