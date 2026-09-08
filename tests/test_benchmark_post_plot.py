@@ -11,7 +11,7 @@ def _matrix_series(scale):
     return out
 
 
-def test_plotter_separates_bubble_post_response_and_green_panels(tmp_path):
+def test_plotter_shows_updated_post_state_chi_and_green_panels(tmp_path):
     path = tmp_path / "benchmark.npz"
     np.savez_compressed(
         path,
@@ -19,12 +19,9 @@ def test_plotter_separates_bubble_post_response_and_green_panels(tmp_path):
         channels=np.array(["x_even", "z_same"]),
         ed=_matrix_series(1.00).real,
         gg_completed=_matrix_series(0.90),
-        gg_gw_sox_completed=_matrix_series(0.88),
         cgw_completed=_matrix_series(1.08),
         cgw_sox_completed=_matrix_series(1.02),
-        gg_post_gw_completed=_matrix_series(0.92),
-        cgw_wpost_completed=_matrix_series(1.03),
-        cgw_post_gw_completed=_matrix_series(1.01),
+        post_gw_chi_completed=_matrix_series(1.01),
         g_relerr_gw=np.array([0.2, 0.25]),
         g_relerr_post_gw=np.array([0.12, 0.15]),
         g_lowfreq_relerr_gw=np.array([0.3, 0.35]),
@@ -32,10 +29,11 @@ def test_plotter_separates_bubble_post_response_and_green_panels(tmp_path):
     )
     made = plot_benchmark_npz(path)
     names = {p.name for p in made}
-    assert "benchmark_bubble_summary.png" in names
-    assert "benchmark_post_gw_response_x_even.png" in names
-    assert "benchmark_post_gw_response_z_same.png" in names
-    assert "benchmark_post_gw_response_summary.png" in names
+    assert "benchmark_post_gw_chi_x_even.png" in names
+    assert "benchmark_post_gw_chi_z_same.png" in names
+    assert "benchmark_post_gw_chi_summary.png" in names
+    assert "benchmark_post_gw_chi_relative_error.png" in names
     assert "benchmark_green_relative_error.png" in names
     assert "benchmark_green_lowfreq_error.png" in names
+    assert "benchmark_bubble_summary.png" not in names
     assert all(p.exists() for p in made)
