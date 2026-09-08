@@ -216,7 +216,7 @@ def test_post_gw_zero_interaction_is_identity_for_gw_and_gw_sox():
     np.testing.assert_allclose(post_sox.W_post, 0.0, atol=1e-14)
 
 
-def test_benchmark_plotter_writes_response_figures(tmp_path):
+def test_benchmark_plotter_writes_only_response_summary(tmp_path):
     V = np.array([.1, .2])
     channels = np.array(["x_even", "z_same"])
     shape = (2, 2, 2)
@@ -244,13 +244,5 @@ def test_benchmark_plotter_writes_response_figures(tmp_path):
         post_gw_chi_completed=post,
     )
     made = plot_benchmark_npz(path)
-    names = {p.name for p in made}
-    assert "benchmark_x_even.png" in names
-    assert "benchmark_z_same.png" in names
-    assert "benchmark_response_summary.png" in names
-    assert "benchmark_response_relative_error.png" in names
-    assert "benchmark_post_gw_chi_x_even.png" in names
-    assert "benchmark_post_gw_chi_summary.png" in names
-    assert "benchmark_post_gw_chi_relative_error.png" in names
-    assert "benchmark_bubble_summary.png" not in names
-    assert all(p.exists() for p in made)
+    assert [p.name for p in made] == ["benchmark_response_summary.png"]
+    assert made[0].exists()
