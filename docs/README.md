@@ -11,6 +11,7 @@
 - [tail_consistent_cgw.md](tail_consistent_cgw.md)：production SC-GW 的 analytic Matsubara tail 与 cGW H/F functional derivative 如何严格一致；包含 static、finite-Ω、finite-q 新生产路径以及 finite-source FDT 验证。
 - [ed12_order2_ledger.md](ed12_order2_ledger.md)：12-site Gamma current 的弱耦合 `O(V^2)` response ledger，把 cGW 二阶响应拆成 H(1)、F(1) dressing、F(2) repeated feedback、MT(1)、AL(1)，并与 exact ED vertex coefficient 做闭合检查。
 - [ed12_sox_order2.md](ed12_sox_order2.md)：在 V=0 自由背景上直接计算 bare second-order exchange (SOX) 自能的 covariant derivative，并与 `exact-cGW` 缺失的二阶 current-response coefficient 做定量比较；同时用严格二阶 MT+AL 做符号/归一化交叉检查。
+- [gw_sox_covariant.md](gw_sox_covariant.md)：把 strict `O(V^2)` SOX 推广到一般周期 GW 背景：SOX 自能、三条 Green-function 线的 covariant derivative、正/负 `tau` 路由、reference-tail derivative、自洽 GW+SOX，以及后续 `GG / cGW / cGW+SOX / ED` 比较接口和中强耦合适用范围。
 - [primitive_gw_cgw.md](primitive_gw_cgw.md)：production 6-site 原胞路径：static-Fock + `W-V` SC-GW、固定 filling 的快速 `mu` 求解、H/F/MT/AL q=0 cGW、matrix-free GMRES，以及它与 finite-q 扩展的关系。
 - [finite_q_cgw.md](finite_q_cgw.md)：真正的 primitive-cell finite-q cGW：`G(k+q) Gamma(k;q) G(k)`、finite-q H/F/MT/AL 动量路由、离散 q-mesh、FFT/direct 验证以及全 BZ susceptibility scan。
 - [pseudospin_susceptibility.md](pseudospin_susceptibility.md)：统一的 chirality-pseudospin 响应：TR-even `tau_x/tau_y` intra-triangle charge/orbital order、TR-odd `tau_z` loop chirality、A/B even/odd channels，以及 `chi_xx/chi_yy/chi_zz` 的 cGW 计算脚本。
