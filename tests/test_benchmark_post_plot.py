@@ -11,7 +11,7 @@ def _matrix_series(scale):
     return out
 
 
-def test_plotter_shows_updated_post_state_chi_and_green_panels(tmp_path):
+def test_plotter_writes_only_response_summary_with_post_gw(tmp_path):
     path = tmp_path / "benchmark.npz"
     np.savez_compressed(
         path,
@@ -28,12 +28,5 @@ def test_plotter_shows_updated_post_state_chi_and_green_panels(tmp_path):
         g_lowfreq_relerr_post_gw=np.array([0.18, 0.20]),
     )
     made = plot_benchmark_npz(path)
-    names = {p.name for p in made}
-    assert "benchmark_post_gw_chi_x_even.png" in names
-    assert "benchmark_post_gw_chi_z_same.png" in names
-    assert "benchmark_post_gw_chi_summary.png" in names
-    assert "benchmark_post_gw_chi_relative_error.png" in names
-    assert "benchmark_green_relative_error.png" in names
-    assert "benchmark_green_lowfreq_error.png" in names
-    assert "benchmark_bubble_summary.png" not in names
-    assert all(p.exists() for p in made)
+    assert [p.name for p in made] == ["benchmark_response_summary.png"]
+    assert made[0].exists()
