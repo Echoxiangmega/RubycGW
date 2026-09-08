@@ -9,6 +9,7 @@
 - [gw_theory.md](gw_theory.md)：self-consistent GW 的方程、每个数组的含义以及代码中的对应实现。
 - [cgw_theory.md](cgw_theory.md)：为什么对外源求导会得到 Hartree、Fock、MT、AL1、AL2，以及 q=(0,0) 版本在代码中的实现。
 - [tail_consistent_cgw.md](tail_consistent_cgw.md)：production SC-GW 的 analytic Matsubara tail 与 cGW H/F functional derivative 如何严格一致；包含 static、finite-Ω、finite-q 新生产路径以及 finite-source FDT 验证。
+- [ed12_order2_ledger.md](ed12_order2_ledger.md)：12-site Gamma current 的弱耦合 `O(V^2)` response ledger，把 cGW 二阶响应拆成 H(1)、F(1) dressing、F(2) repeated feedback、MT(1)、AL(1)，并与 exact ED vertex coefficient 做闭合检查。
 - [primitive_gw_cgw.md](primitive_gw_cgw.md)：production 6-site 原胞路径：static-Fock + `W-V` SC-GW、固定 filling 的快速 `mu` 求解、H/F/MT/AL q=0 cGW、matrix-free GMRES，以及它与 finite-q 扩展的关系。
 - [finite_q_cgw.md](finite_q_cgw.md)：真正的 primitive-cell finite-q cGW：`G(k+q) Gamma(k;q) G(k)`、finite-q H/F/MT/AL 动量路由、离散 q-mesh、FFT/direct 验证以及全 BZ susceptibility scan。
 - [pseudospin_susceptibility.md](pseudospin_susceptibility.md)：统一的 chirality-pseudospin 响应：TR-even `tau_x/tau_y` intra-triangle charge/orbital order、TR-odd `tau_z` loop chirality、A/B even/odd channels，以及 `chi_xx/chi_yy/chi_zz` 的 cGW 计算脚本。
