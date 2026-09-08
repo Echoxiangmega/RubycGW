@@ -59,145 +59,138 @@ from rubycgw.supercell_gw_bootstrap import AndersonOptions, solve_matrix_gw_ande
 
 
 _CHANNEL_TEX = {
-    "x_even": r"$x_{\rm even}$",
-    "x_odd": r"$x_{\rm odd}$",
-    "y_even": r"$y_{\rm even}$",
-    "y_odd": r"$y_{\rm odd}$",
-    "z_same": r"$z_{\rm same}$",
-    "z_opposite": r"$z_{\rm opposite}$",
+    "x_even": r"x_{\rm even}",
+    "x_odd": r"x_{\rm odd}",
+    "y_even": r"y_{\rm even}",
+    "y_odd": r"y_{\rm odd}",
+    "z_same": r"z_{\rm same}",
+    "z_opposite": r"z_{\rm opposite}",
 }
 
 
 def _args():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--L1", type=int, default=2)
+    p.add_argument("--L2", type=int, default=1)
     p.add_argument("--V", type=float, default=1.0)
-    p.add_argument("--filling", type=float, default=3.0, help="Particles per six-site primitive cell.")
+    p.add_argument("--filling", type=float, default=3.0)
     p.add_argument("--T", type=float, default=0.08)
     p.add_argument("--ti", type=float, default=0.4)
     p.add_argument("--t1", type=float, default=0.2)
     p.add_argument("--t2", type=float, default=0.2)
-    p.add_argument("--L1", type=int, default=2)
-    p.add_argument("--L2", type=int, default=1)
+    p.add_argument("--q", choices=("gamma", "m1"), default="gamma")
     p.add_argument(
         "--channels",
         nargs="+",
-        default=["x_even", "z_same", "z_opposite"],
+        default=("x_even", "z_same", "z_opposite"),
     )
-    p.add_argument("--q", choices=["gamma", "m1"], default="gamma")
     p.add_argument("--nw", type=int, default=55)
     p.add_argument("--nomega", type=int, default=12)
     p.add_argument("--tau-points", type=int, default=101)
-    p.add_argument("--thermal-discard", type=float, default=1e-12)
-    p.add_argument("--ed-mu-tol", type=float, default=1e-12)
-
-    p.add_argument("--gw-max-iter", type=int, default=500)
+    p.add_argument("--thermal-weight-tol", type=float, default=1e-12)
     p.add_argument("--gw-tol", type=float, default=1e-9)
-    p.add_argument("--gw-mu-tol", type=float, default=5e-12)
-    p.add_argument("--gw-mu-max-iter", type=int, default=80)
-    p.add_argument("--gw-verbose", action="store_true")
-    p.add_argument(
-        "--gw-ramp",
-        nargs="*",
-        type=float,
-        default=None,
-        help="Optional positive continuation V values. Default uses a conservative ramp up to target V.",
-    )
-
-    p.add_argument("--vertex-max-iter", type=int, default=180)
-    p.add_argument("--vertex-tol", type=float, default=1e-8)
-    p.add_argument("--vertex-gmres-restart", type=int, default=12)
-    p.add_argument("--vertex-workers", type=int, default=1, help="Reserved for future parallelization; current driver is serial for deterministic memory use.")
-    p.add_argument("--vertex-verbose", action="store_true")
-    p.add_argument("--momentum-backend", choices=["fft", "direct"], default="fft")
-    p.add_argument("--out", default="ed12_four_layer.npz")
-    p.add_argument("--dpi", type=int, default=190)
+    p.add_argument("--gw-max-iter", type=int, default=1200)
+    p.add_argument("--vertex-tol", type=float, default=1e-10)
+    p.add_argument("--vertex-max-iter", type=int, default=400)
+    p.add_argument("--vertex-workers", type=int, default=1)
+    p.add_argument("--dpi", type=int, default=220)
+    p.add_argument("--out", type=Path, default=Path("ed12_four_layer.npz"))
     return p.parse_args()
-
-
-def _ramp_values(target: float, raw) -> list[float]:
-    target = float(target)
-    if target < 0.0:
-        raise ValueError("V must be non-negative")
-    if raw is None:
-        base = [0.10, 0.25, 0.50, 0.75]
-    else:
-        base = [float(x) for x in raw]
-    vals = [x for x in base if 0.0 < x < target - 1e-12]
-    if target > 0.0:
-        vals.append(target)
-    else:
-        vals = [0.0]
-    return sorted(set(vals))
 
 
 def _q_value(args):
     if args.q == "gamma":
-        return np.asarray([0.0, 0.0]), "Gamma"
-    if args.L1 % 2 != 0:
-        raise ValueError("M1=(1/2,0) requires even L1")
-    return np.asarray([0.5, 0.0]), "M1=(1/2,0)"
+        return np.array([0.0, 0.0]), "Gamma"
+    if args.q == "m1":
+        return np.array([0.5, 0.0]), "M1=(1/2,0)"
+    raise ValueError(args.q)
 
 
-def _solve_gw(exact, params, grid, target_N, args):
-    h0 = exact.h0[None, None, :, :]
-    Vunit = exact.Vunit[None, None, :, :]
-    initial = None
-    last = None
-    for Vramp in _ramp_values(params.V, args.gw_ramp):
-        print(f"SC-GW continuation V={Vramp:g}")
+def _interaction_matrix_cluster(exact: ExactSmallRubyThermal, params: RubyParameters):
+    norb = exact.n_sites
+    V = np.zeros((norb, norb), dtype=complex)
+    for i, j in exact.interaction_pairs:
+        V[i, j] = float(params.V)
+        V[j, i] = float(params.V)
+    return V[None, None]
+
+
+def _h0_cluster_field(exact: ExactSmallRubyThermal):
+    return np.asarray(exact.h0, dtype=complex)[None, None]
+
+
+def _cluster_vertex(exact: ExactSmallRubyThermal, channel: str, q: np.ndarray):
+    return np.asarray(exact.operator_matrix(channel, q), dtype=complex)
+
+
+def _gw_continuation(exact, params, grid, target_N, args):
+    h0 = _h0_cluster_field(exact)
+    seed = None
+    schedule = [v for v in (0.1, 0.25, 0.5, 0.75, float(params.V)) if v <= float(params.V) + 1e-12]
+    schedule = sorted(set(round(float(v), 12) for v in schedule))
+    for V in schedule:
+        p = RubyParameters(ti=params.ti, t1=params.t1, t2=params.t2, V=V)
+        Vq = _interaction_matrix_cluster(exact, p)
         opts = GWOptions(
-            mu=0.0 if initial is None else float(initial.mu),
+            mu=0.0 if seed is None else float(seed.mu),
             target_filling=float(target_N),
             max_iter=int(args.gw_max_iter),
             tol=float(args.gw_tol),
-            mu_tol=float(args.gw_mu_tol),
-            mu_max_iter=int(args.gw_mu_max_iter),
-            verbose=bool(args.gw_verbose),
-            momentum_backend=str(args.momentum_backend),
+            mixing=0.2,
+            mixing_method="linear",
+            mu_tol=min(1e-10, float(args.gw_tol) * 0.1),
+            mu_max_iter=120,
+            verbose=False,
+            momentum_backend="direct",
         )
-        last = solve_matrix_gw_anderson(
-            h0,
-            float(Vramp) * Vunit,
-            grid,
-            opts=opts,
-            initial=initial,
-            anderson=AndersonOptions(),
-        )
+        seed = solve_matrix_gw_anderson(h0, Vq, grid, opts=opts, initial=seed, anderson=AndersonOptions())
         print(
-            f"  converged={last.converged}, it={last.iterations}, "
-            f"residual={last.final_error:.3e}, mu={last.mu:.10f}, "
-            f"N={np.sum(last.density):.10f}"
+            f"SC-GW continuation V={V:g}\n"
+            f"  converged={seed.converged}, it={seed.iterations}, residual={seed.final_error:.3e}, "
+            f"mu={seed.mu:.10f}, N={np.sum(seed.density):.10f}"
         )
-        if not last.converged:
-            raise RuntimeError(
-                f"12-site SC-GW failed at V={Vramp:g}: residual={last.final_error:.3e}"
-            )
-        initial = last
-    return last, h0, float(params.V) * Vunit
+        if not seed.converged:
+            raise RuntimeError(f"SC-GW failed at V={V:g}: residual={seed.final_error:.3e}")
+    return seed, _interaction_matrix_cluster(exact, params), h0
 
 
-def _dynamic_full_diag(gw, Vq, h0, vertices, grid, args):
-    ref = build_tail_reference(h0, gw.mu, gw.Sigma_H, grid)
-    opts = DynamicVertexOptions(
-        max_iter=int(args.vertex_max_iter),
-        tol=float(args.vertex_tol),
-        solver="gmres",
-        gmres_restart=int(args.vertex_gmres_restart),
-        include_hartree=True,
-        include_fock=True,
-        include_mt=True,
-        include_al=True,
-        verbose=bool(args.vertex_verbose),
-        momentum_backend=str(args.momentum_backend),
-    )
+def _relative_g_error(Gref, Gtest, grid):
+    ref = np.asarray(Gref, dtype=complex)
+    test = np.asarray(Gtest, dtype=complex)
+    denom = max(float(np.linalg.norm(ref.ravel())), 1e-300)
+    full = float(np.linalg.norm((test - ref).ravel()) / denom)
+    order = np.argsort(np.abs(grid.omega))
+    nlow = min(8, len(order))
+    idx = order[:nlow]
+    dlow = max(float(np.linalg.norm(ref[idx].ravel())), 1e-300)
+    low = float(np.linalg.norm((test[idx] - ref[idx]).ravel()) / dlow)
+    return full, low
+
+
+def _cgw_dynamic(gw, Vq, h0, vertices, grid, args):
+    reference = build_tail_reference(h0, gw.mu, gw.Sigma_H, grid)
     nc = len(vertices)
-    pos = np.zeros((grid.nOmega + 1, nc), dtype=complex)
-    iterations = np.zeros_like(pos.real, dtype=int)
-    residuals = np.zeros_like(pos.real)
+    mmax = int(grid.nOmega)
+    pos = {}
+    iterations = np.zeros((mmax + 1, nc), dtype=int)
+    residuals = np.zeros((mmax + 1, nc), dtype=float)
     for ic, K in enumerate(vertices):
         previous = None
-        for m in range(grid.nOmega + 1):
-            print(f"full cGW channel {ic+1}/{nc}, m={m}/{grid.nOmega}")
+        for m in range(mmax + 1):
+            print(f"full cGW channel {ic+1}/{nc}, m={m}/{mmax}")
+            opts = DynamicVertexOptions(
+                max_iter=int(args.vertex_max_iter),
+                tol=float(args.vertex_tol),
+                mixing=0.2,
+                solver="gmres",
+                gmres_restart=40,
+                include_hartree=True,
+                include_fock=True,
+                include_mt=True,
+                include_al=True,
+                verbose=False,
+                momentum_backend="direct",
+            )
             res = solve_vertex_iomega_tail(
                 gw.G,
                 gw.W,
@@ -205,17 +198,17 @@ def _dynamic_full_diag(gw, Vq, h0, vertices, grid, args):
                 K,
                 m,
                 grid,
-                ref,
+                reference,
                 opts=opts,
                 initial_gamma=previous,
             )
             if not res.converged:
                 raise RuntimeError(
-                    f"dynamic cGW failed channel={ic}, m={m}: residual={res.final_error:.3e}"
+                    f"full cGW failed for channel={ic}, m={m}: residual={res.final_error:.3e}"
                 )
-            pos[m, ic] = susceptibility_matrix_iomega(
+            pos.setdefault(m, np.zeros(nc, dtype=complex))[ic] = susceptibility_matrix_iomega(
                 gw.G,
-                K[None, :, :],
+                np.asarray([K]),
                 [res.Gamma],
                 m,
                 grid,
@@ -236,7 +229,7 @@ def _plot(tau, beta, channels, exactC, bubbleED, bubbleGW, fullC, out, dpi, qlab
     nc = len(channels)
     fig, axes = plt.subplots(nc, 2, figsize=(13.5, max(3.4 * nc, 4.0)), squeeze=False)
     for ic, ch in enumerate(channels):
-        label = _CHANNEL_TEX.get(str(ch), str(ch))
+        label = _CHANNEL_TEX.get(str(ch), str(ch).replace("_", r"\_"))
         ax = axes[ic, 0]
         ax.plot(x, np.real(exactC[:, ic]), label="exact ED")
         ax.plot(x, np.real(bubbleED[:, ic]), linestyle="--", label=r"bubble[$G_{ED}$]")
@@ -283,15 +276,10 @@ def main():
         raise ValueError("filling*number_of_cells must be integer for the target n=3 diagnostic")
     q, qlabel = _q_value(args)
     channels = tuple(str(x) for x in args.channels)
+
+    grid = MatsubaraGrid(nk1=1, nk2=1, nw=int(args.nw), nOmega=int(args.nomega), T=float(args.T))
     beta = 1.0 / float(args.T)
     tau = np.linspace(0.0, beta, int(args.tau_points))
-    grid = MatsubaraGrid(
-        nk1=1,
-        nk2=1,
-        nw=int(args.nw),
-        nOmega=int(args.nomega),
-        T=float(args.T),
-    )
 
     print("=" * 88)
     print("12-site exact-G four-layer benchmark")
@@ -304,178 +292,132 @@ def main():
     print("=" * 88)
 
     t0 = time.perf_counter()
-    exact.diagonalize(args.V)
+    exact.diagonalize_all()
     print(f"full sector ED diagonalization: {time.perf_counter()-t0:.2f} s")
-    mu_ed = exact.solve_mu(target_N, args.T, tol=args.ed_mu_tol)
-    selection = exact.thermal_selection(
-        mu_ed,
-        args.T,
-        discard_weight_tol=args.thermal_discard,
-    )
+    mu_ed = exact.solve_mu_for_mean_number(target_N, float(args.T))
+    weights = exact.thermal_weights(mu_ed, float(args.T), tol=float(args.thermal_weight_tol))
     print(
-        f"exact GC: mu={mu_ed:.10f}, <N>={selection.average_particles:.10f}, "
-        f"Var(N)={selection.variance_particles:.6e}, discarded thermal weight="
-        f"{selection.discarded_weight:.3e}"
+        f"exact GC: mu={mu_ed:.10f}, <N>={weights.mean_number:.10f}, "
+        f"Var(N)={weights.var_number:.6e}, discarded thermal weight={weights.discarded_weight:.3e}"
     )
     print("exact particle-sector weights:")
-    for N, pN in enumerate(selection.sector_probabilities):
+    for N, pN in weights.sector_probabilities.items():
         if pN > 1e-8:
             print(f"  N={N:2d}: p={pN:.8e}")
 
-    # Exact one-particle Green function.
     t0 = time.perf_counter()
-    Ged, selection_G = exact.green_iomega(
-        1j * np.asarray(grid.omega),
-        mu_ed,
-        args.T,
-        discard_weight_tol=args.thermal_discard,
-    )
+    G_ed = exact.green_iomega(mu_ed, float(args.T), grid.omega, weights)
     print(
         f"exact Lehmann G(iw): {time.perf_counter()-t0:.2f} s, "
-        f"discarded weight={selection_G.discarded_weight:.3e}"
+        f"discarded weight={weights.discarded_weight:.3e}"
     )
-    Ged5 = Ged[:, None, None, :, :]
 
-    # Exact two-body C(tau) and static susceptibility.
-    vertices = np.stack([exact.pseudospin_operator(ch, q=q) for ch in channels])
-    exact_tau = np.zeros((len(tau), len(channels)), dtype=complex)
-    exact_static = np.zeros(len(channels), dtype=float)
-    exact_means = np.zeros(len(channels), dtype=complex)
-    for ic, (ch, K) in enumerate(zip(channels, vertices)):
+    exactC = np.zeros((len(tau), len(channels)), dtype=complex)
+    chi_exact = np.zeros(len(channels), dtype=complex)
+    means = np.zeros(len(channels), dtype=complex)
+    for ic, ch in enumerate(channels):
         t0 = time.perf_counter()
-        C, chi, mean, _ = exact.correlation_tau(
-            K,
-            tau,
-            mu_ed,
-            args.T,
-            discard_weight_tol=args.thermal_discard,
+        exactC[:, ic], means[ic] = exact.correlation_tau(
+            ch, q, mu_ed, float(args.T), tau, weights
         )
-        exact_tau[:, ic] = C
-        exact_static[ic] = chi
-        exact_means[ic] = mean
+        chi_exact[ic], _ = exact.static_susceptibility(
+            ch, q, mu_ed, float(args.T), weights
+        )
         print(
-            f"exact C {ch:12s}: chi0={chi:+.8e}, <O>={mean.real:+.3e}{mean.imag:+.3e}j, "
+            f"exact C {ch:12s}: chi0={chi_exact[ic].real:+.8e}, "
+            f"<O>={means[ic].real:+.3e}{means[ic].imag:+.3e}j, "
             f"time={time.perf_counter()-t0:.2f}s"
         )
 
-    # Same 12-site SC-GW background at the same average total N.
-    gw, h0gw, Vq = _solve_gw(exact, params, grid, target_N, args)
-    Ggw = np.asarray(gw.G, dtype=complex)
-    relG = float(np.linalg.norm((Ggw - Ged5).ravel()) / max(np.linalg.norm(Ged5.ravel()), 1e-300))
-    near = np.argsort(np.abs(grid.omega))[:4]
-    relG_low = float(
-        np.linalg.norm((Ggw[near] - Ged5[near]).ravel())
-        / max(np.linalg.norm(Ged5[near].ravel()), 1e-300)
-    )
+    gw, Vq, h0 = _gw_continuation(exact, params, grid, target_N, args)
+    Gerr_full, Gerr_low = _relative_g_error(G_ed, gw.G, grid)
     print(
         f"single-particle comparison: mu_ED={mu_ed:.10f}, mu_GW={gw.mu:.10f}, "
-        f"rel||G_GW-G_ED||={relG:.6f}, low-|w| rel={relG_low:.6f}"
+        f"rel||G_GW-G_ED||={Gerr_full:.6f}, low-|w| rel={Gerr_low:.6f}"
     )
 
-    # Two bubbles on their respective one-particle backgrounds.
-    bubble_ed_iw = bubble_iomega(Ged5, vertices, grid)
-    bubble_gw_iw = bubble_iomega(Ggw, vertices, grid)
-    bubble_ed_diag_iw = np.diagonal(bubble_ed_iw, axis1=-2, axis2=-1)
-    bubble_gw_diag_iw = np.diagonal(bubble_gw_iw, axis1=-2, axis2=-1)
-    bubble_ed_tau = bosonic_iomega_to_tau(bubble_ed_diag_iw, grid, tau)
-    bubble_gw_tau = bosonic_iomega_to_tau(bubble_gw_diag_iw, grid, tau)
-
-    # Full dynamic tail-consistent cGW on G_GW.
-    full_iw, vertex_iterations, vertex_residuals = _dynamic_full_diag(
-        gw, Vq, h0gw, vertices, grid, args
+    vertices = np.asarray([_cluster_vertex(exact, ch, q) for ch in channels], dtype=complex)
+    chi_bubble_ed = bubble_iomega(G_ed, vertices, grid)[:, range(len(channels)), range(len(channels))]
+    chi_bubble_gw = bubble_iomega(gw.G, vertices, grid)[:, range(len(channels)), range(len(channels))]
+    full_iomega, vertex_iterations, vertex_residuals = _cgw_dynamic(
+        gw, Vq, h0, vertices, grid, args
     )
-    full_tau = bosonic_iomega_to_tau(full_iw, grid, tau)
 
+    bubbleED = bosonic_iomega_to_tau(chi_bubble_ed, grid, tau)
+    bubbleGW = bosonic_iomega_to_tau(chi_bubble_gw, grid, tau)
+    fullC = bosonic_iomega_to_tau(full_iomega, grid, tau)
+
+    mid = len(tau) // 2
     izero = int(np.where(np.asarray(grid.m_values) == 0)[0][0])
-    mid = int(np.argmin(np.abs(tau - beta / 2.0)))
     print("\n=== four-layer midpoint C(beta/2) ===")
     print("channel        exact ED        bubble[G_ED]    bubble[G_GW]    full cGW")
     for ic, ch in enumerate(channels):
+        bg = (bubbleED[mid, ic] - bubbleGW[mid, ic]).real
+        vex = (exactC[mid, ic] - bubbleED[mid, ic]).real
+        vcg = (fullC[mid, ic] - bubbleGW[mid, ic]).real
         print(
-            f"{ch:12s}  {exact_tau[mid,ic].real:+.8e}  "
-            f"{bubble_ed_tau[mid,ic].real:+.8e}  "
-            f"{bubble_gw_tau[mid,ic].real:+.8e}  "
-            f"{full_tau[mid,ic].real:+.8e}"
-        )
-        print(
-            " " * 14
-            + f"background={float((bubble_ed_tau[mid,ic]-bubble_gw_tau[mid,ic]).real):+.4e}, "
-            + f"exact_vertex={float((exact_tau[mid,ic]-bubble_ed_tau[mid,ic]).real):+.4e}, "
-            + f"cGW_vertex={float((full_tau[mid,ic]-bubble_gw_tau[mid,ic]).real):+.4e}"
+            f"{ch:13s} {exactC[mid,ic].real:+.8e}  {bubbleED[mid,ic].real:+.8e}  "
+            f"{bubbleGW[mid,ic].real:+.8e}  {fullC[mid,ic].real:+.8e}\n"
+            f"              background={bg:+.4e}, exact_vertex={vex:+.4e}, cGW_vertex={vcg:+.4e}"
         )
 
     print("\n=== four-layer static chi(iOmega=0) ===")
     print("channel        exact ED        bubble[G_ED]    bubble[G_GW]    full cGW")
     for ic, ch in enumerate(channels):
         print(
-            f"{ch:12s}  {exact_static[ic]:+.8e}  "
-            f"{bubble_ed_diag_iw[izero,ic].real:+.8e}  "
-            f"{bubble_gw_diag_iw[izero,ic].real:+.8e}  "
-            f"{full_iw[izero,ic].real:+.8e}"
+            f"{ch:13s} {chi_exact[ic].real:+.8e}  {chi_bubble_ed[izero,ic].real:+.8e}  "
+            f"{chi_bubble_gw[izero,ic].real:+.8e}  {full_iomega[izero,ic].real:+.8e}"
         )
 
     out = Path(args.out)
-    if out.suffix.lower() != ".npz":
-        out = out.with_suffix(".npz")
     out.parent.mkdir(parents=True, exist_ok=True)
+    png = out.with_suffix(".png")
     np.savez_compressed(
         out,
-        V=float(args.V),
-        filling=float(args.filling),
-        temperature=float(args.T),
-        beta=float(beta),
         L1=int(args.L1),
         L2=int(args.L2),
-        n_sites=int(exact.n_sites),
-        target_particles=float(target_N),
-        q=np.asarray(q),
-        q_label=np.asarray(qlabel),
+        V=float(args.V),
+        filling=float(args.filling),
+        target_N=float(target_N),
+        T=float(args.T),
+        beta=float(beta),
+        q=np.asarray(q, dtype=float),
+        qlabel=np.asarray(qlabel),
         channels=np.asarray(channels),
-        tau_grid=tau,
-        exact_mu=float(mu_ed),
-        gw_mu=float(gw.mu),
-        exact_average_particles=float(selection.average_particles),
-        exact_particle_variance=float(selection.variance_particles),
-        exact_sector_probabilities=np.asarray(selection.sector_probabilities),
-        exact_discarded_weight=float(selection.discarded_weight),
-        exact_G_iomega=Ged,
-        gw_G_iomega=np.asarray(gw.G[:, 0, 0]),
-        G_relative_error=float(relG),
-        G_low_frequency_relative_error=float(relG_low),
-        exact_correlation_tau=exact_tau,
-        exact_static_susceptibility=exact_static,
-        exact_operator_means=exact_means,
-        bubble_exact_iomega=bubble_ed_diag_iw,
-        bubble_gw_iomega=bubble_gw_diag_iw,
-        bubble_exact_tau=bubble_ed_tau,
-        bubble_gw_tau=bubble_gw_tau,
-        full_cgw_iomega=full_iw,
-        full_cgw_tau=full_tau,
-        cgw_vertex_iterations=vertex_iterations,
-        cgw_vertex_residuals=vertex_residuals,
-        m_values=np.asarray(grid.m_values),
-        Omega=np.asarray(grid.Omega),
+        tau=tau,
         omega=np.asarray(grid.omega),
-        thermal_discard_tolerance=float(args.thermal_discard),
-        note=np.asarray(
-            "grand-canonical exact ED and SC-GW independently matched to the same average total particle number"
-        ),
+        Omega=np.asarray(grid.Omega),
+        m_values=np.asarray(grid.m_values),
+        mu_ed=float(mu_ed),
+        mu_gw=float(gw.mu),
+        exact_sector_N=np.asarray(sorted(weights.sector_probabilities), dtype=int),
+        exact_sector_p=np.asarray([weights.sector_probabilities[n] for n in sorted(weights.sector_probabilities)]),
+        exact_mean_N=float(weights.mean_number),
+        exact_var_N=float(weights.var_number),
+        discarded_thermal_weight=float(weights.discarded_weight),
+        G_ed=G_ed,
+        G_gw=gw.G,
+        G_rel_error=float(Gerr_full),
+        G_lowfreq_rel_error=float(Gerr_low),
+        exact_C_tau=exactC,
+        bubble_ed_iomega=chi_bubble_ed,
+        bubble_gw_iomega=chi_bubble_gw,
+        full_cgw_iomega=full_iomega,
+        bubble_ed_C_tau=bubbleED,
+        bubble_gw_C_tau=bubbleGW,
+        full_cgw_C_tau=fullC,
+        exact_chi0=chi_exact,
+        exact_means=means,
+        vertex_iterations=vertex_iterations,
+        vertex_residuals=vertex_residuals,
+        gw_final_error=float(gw.final_error),
+        gw_iterations=int(gw.iterations),
     )
-    plot = out.with_name(out.stem + ".png")
     _plot(
-        tau,
-        beta,
-        channels,
-        exact_tau,
-        bubble_ed_tau,
-        bubble_gw_tau,
-        full_tau,
-        plot,
-        args.dpi,
-        qlabel,
+        tau, beta, channels, exactC, bubbleED, bubbleGW, fullC, png, args.dpi, qlabel
     )
-    print("saved:", out)
-    print("saved:", plot)
+    print(f"saved: {out}")
+    print(f"saved: {png}")
 
 
 if __name__ == "__main__":
