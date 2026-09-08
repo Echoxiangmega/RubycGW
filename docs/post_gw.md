@@ -78,10 +78,6 @@ W_{\rm post}(Q)=V(q)-V(q)\chi^{nn}_{\rm cov}(Q)V(q)
 Keeping only the Hartree/RPA vertex reproduces the ordinary GW screening
 identity, which is a useful sign check.
 
-This is the same post-GW idea introduced by Hui Li *et al.*, *Phys. Rev. B* 113,
-075103 (2026): reconnect the screened potential to the physical covariant
-response rather than to the RPA response.
-
 ## Full dynamic transfer kernel
 
 Post-GW needs the entire `chi_nn(q,iOmega)`, not only the static `q=0` block.
@@ -166,40 +162,113 @@ still evaluated on `G_bg`.  Therefore post-GW can compensate an overly strong
 Fock-driven tendency through improved dynamic screening/correlation and the
 resulting `G_post`, but it is not an empirical rescaling of Fock.
 
-## Benchmark policy
+## Benchmark policy: separate G, bubble chi, and W/vertex effects
 
-`benchmark_ed_gw_cgw_sox.py` keeps the static susceptibility comparison
+The earlier ED decomposition already showed that replacing the GW Green
+function by the exact ED Green function changes the bubble susceptibility much
+less than the full cGW-versus-ED discrepancy.  Therefore a post benchmark that
+only reports `||G_post-G_ED||` is not sufficient.
+
+`benchmark_ed_gw_cgw_sox.py` now records three logically separate diagnostics.
+
+### 1. Production response
+
+The original comparison is kept uncluttered:
 
 - ED,
-- GG,
+- `GG[GW]`,
 - cGW,
 - cGW+SOX.
 
-Post-GW is fundamentally a one-particle correction.  The benchmark therefore
-does **not** label an off-shell `cGW(G_post,W_post)` calculation as a physical
-post-GW susceptibility.  With `--post-gw`, it instead computes the exact ED
-Matsubara Green function and compares
+The script also stores `GG[GW+SOX]` for background decomposition.
 
-- GW,
-- GW+SOX,
-- post-GW,
-- post-(GW+SOX)
+### 2. Bubble on the post Green function
 
-through full-box and low-frequency relative Frobenius errors.
+For every selected post path the script computes
 
-Run the original response benchmark (plots are now automatic):
+\[
+\chi^{GG}[G_{post}]
+=-\frac{T}{N_k}\sum_{kn}
+\mathrm{Tr}[K G_{post} K G_{post}],
+\]
 
-```bash
-python benchmark_ed_gw_cgw_sox.py
-```
+with the same analytic observable tail completion as the other benchmark
+bubbles.  This directly answers whether the new one-particle background changes
+`x_even`, `z_same`, and `z_opposite` substantially.
 
-Run the full post-GW extension:
+The bubble plot contains, as available,
+
+- `GG[GW]`,
+- `GG[GW+SOX]`,
+- `GG[post-GW]`,
+- `GG[post-(GW+SOX)]`.
+
+ED full susceptibility is shown only as a reference; it is not labelled as an
+ED bubble.
+
+### 3. Response diagnostics using W_post
+
+Because the dominant response error need not come from `G`, the benchmark also
+asks directly what the new screened interaction does to the q=0 covariant
+response.
+
+For ordinary post-GW it saves
+
+\[
+\chi_{\rm diag}^{(W)}
+=\mathrm{cGW}[G_{GW},W_{post}],
+\]
+
+which isolates the screening change, and
+
+\[
+\chi_{\rm diag}^{(G,W)}
+=\mathrm{cGW}[G_{post},W_{post}],
+\]
+
+which includes both the changed Green function and the changed screened
+interaction.
+
+The corresponding SOX-selected path analogously uses the cGW+SOX vertex
+functional.
+
+These curves are deliberately named **diagnostics**, not strict post-GW
+susceptibilities.  A strict derivative of the complete one-shot post map would
+also differentiate the covariant density response inside
+
+\[
+W_{post}=V-V\chi^{nn}_{cov}V,
+\]
+
+and therefore requires an additional higher-order response construction.  The
+present diagnostics are nevertheless the useful quantities for answering the
+ED question: is the current-channel error mainly changed by the improved `W`,
+by the new `G`, or by neither?
+
+## Independent post switches
+
+The two expensive post paths are independently selectable.
+
+Run only ordinary post-GW on the GW background:
 
 ```bash
 python benchmark_ed_gw_cgw_sox.py --post-gw
 ```
 
-A cheap static-frequency debugging run is available as
+Run only post-(GW+SOX):
+
+```bash
+python benchmark_ed_gw_cgw_sox.py --post-gw-sox
+```
+
+Run both:
+
+```bash
+python benchmark_ed_gw_cgw_sox.py --post-gw --post-gw-sox
+```
+
+A cheap static-frequency debugging run can be applied to whichever post path is
+selected, for example
 
 ```bash
 python benchmark_ed_gw_cgw_sox.py --post-gw --post-mmax 0
@@ -208,20 +277,25 @@ python benchmark_ed_gw_cgw_sox.py --post-gw --post-mmax 0
 but this is explicitly a **windowed diagnostic**, not the full post-GW method;
 outside the selected frequency window it retains the background `W`.
 
-The full 12-site calculation is expensive: with `nOmega=12` and `nk=1`,
-Q/-Q symmetry still leaves 13 independent bosonic frequencies times 12 density
-sources for each background.  The SOX response additionally evaluates the SOX
-transfer kernel inside the vertex solve.
+The ordinary `--post-gw` option does **not** invoke the much more expensive
+finite-transfer SOX response.  This is the recommended first benchmark when the
+goal is to isolate the effect of post-GW screening before studying its
+combination with SOX.
 
 ## Plotting saved results
 
-Every benchmark run now writes response figures automatically.  An existing
-`benchmark.npz` can also be plotted without rerunning the many-body calculation:
+Every benchmark run writes figures automatically.  An existing `benchmark.npz`
+can also be plotted without rerunning the many-body calculation:
 
 ```bash
 python plot_ed_gw_cgw_sox_benchmark.py path/to/benchmark.npz
 ```
 
-The generated files include one response plot per channel, a response summary,
-a mean relative susceptibility-error plot, and—when post-GW data are present—
-full and low-frequency Green-function error plots.
+The plotting layer keeps the different questions separate:
+
+- `benchmark_response_summary.png`: production ED/GG/cGW/cGW+SOX response;
+- `benchmark_bubble_summary.png`: one-particle-background effect on chi;
+- `benchmark_post_gw_response_*.png`: ordinary post-GW W-only and G+W response diagnostics;
+- `benchmark_post_gw_sox_response_*.png`: independently selected SOX-post diagnostics;
+- `benchmark_green_relative_error.png`: full Matsubara Green-function error;
+- `benchmark_green_lowfreq_error.png`: low-frequency Green-function error.
