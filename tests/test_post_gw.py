@@ -148,6 +148,7 @@ def test_sox_transfer_endpoint_phases_match_finite_difference_of_skeleton():
 
     eps = 2e-7
     phase_t = np.exp(1j * Omega * tau)
+
     def sigma(sign):
         e = sign * eps
         gp = Gp + e * d[:, None] * Xp
@@ -155,7 +156,6 @@ def test_sox_transfer_endpoint_phases_match_finite_difference_of_skeleton():
         return sox_self_energy_full(gp, gm, v, interaction_tol=0.0)
 
     numeric_lab = (sigma(+1.0) - sigma(-1.0)) / (2.0 * eps)
-    # Remove the output source phase D_i to compare with the transfer field.
     numeric = d.conj()[:, None] * numeric_lab
     np.testing.assert_allclose(analytic, numeric, rtol=2e-7, atol=3e-7)
 
@@ -224,12 +224,14 @@ def test_benchmark_plotter_writes_response_figures(tmp_path):
     gg = np.zeros(shape, dtype=complex)
     cgw = np.zeros(shape, dtype=complex)
     sox = np.zeros(shape, dtype=complex)
+    post = np.zeros(shape, dtype=complex)
     for iv in range(2):
         for ic in range(2):
             ed[iv, ic, ic] = 1.0 + iv + .1 * ic
             gg[iv, ic, ic] = .9 * ed[iv, ic, ic]
             cgw[iv, ic, ic] = 1.05 * ed[iv, ic, ic]
             sox[iv, ic, ic] = 1.01 * ed[iv, ic, ic]
+            post[iv, ic, ic] = 1.02 * ed[iv, ic, ic]
     path = tmp_path / "benchmark.npz"
     np.savez_compressed(
         path,
@@ -239,6 +241,7 @@ def test_benchmark_plotter_writes_response_figures(tmp_path):
         gg_completed=gg,
         cgw_completed=cgw,
         cgw_sox_completed=sox,
+        post_gw_chi_completed=post,
     )
     made = plot_benchmark_npz(path)
     names = {p.name for p in made}
@@ -246,4 +249,8 @@ def test_benchmark_plotter_writes_response_figures(tmp_path):
     assert "benchmark_z_same.png" in names
     assert "benchmark_response_summary.png" in names
     assert "benchmark_response_relative_error.png" in names
+    assert "benchmark_post_gw_chi_x_even.png" in names
+    assert "benchmark_post_gw_chi_summary.png" in names
+    assert "benchmark_post_gw_chi_relative_error.png" in names
+    assert "benchmark_bubble_summary.png" not in names
     assert all(p.exists() for p in made)
