@@ -3,9 +3,13 @@
 
 This script tests whether the large current found on the 2x1 finite torus is a
 coarse momentum-transfer artifact.  It solves the translationally invariant
-six-orbital primitive-cell SC-GW problem on genuine nk x nk k/q meshes with
+six-orbital primitive-cell SC-GW problem on genuine k/q meshes with
 
     H0(k;h) = H0(k) - h_cell K_source.
+
+The default mesh list begins with 2x1.  That point has exactly the primitive
+momenta/momentum transfers of the old 12-site 2x1 periodic torus, so it is a
+useful representation bridge before increasing to 2x2, 4x4, 6x6, ... meshes.
 
 The default source convention is chosen to compare directly with the existing
 2x1 ED finite-source benchmark.  There the normalized q=0 operator is
@@ -44,7 +48,14 @@ def _args():
     p.add_argument("--V", type=float, default=1.0)
     p.add_argument("--filling", type=float, default=2.0)
     p.add_argument("--source", choices=["same", "opposite", "z_same", "z_opposite"], default="same")
-    p.add_argument("--nk", nargs="+", type=int, default=[2, 4, 6, 8, 12])
+    p.add_argument(
+        "--mesh", nargs="+", default=["2x1", "2x2", "4x4", "6x6", "8x8", "12x12"],
+        help="explicit primitive k/q meshes, e.g. --mesh 2x1 2x2 4x4 8x8",
+    )
+    p.add_argument(
+        "--nk", nargs="+", type=int, default=None,
+        help="square-mesh shortcut; if supplied, overrides --mesh",
+    )
     p.add_argument("--h", nargs="+", type=float,
                    default=[0.05, 0.02, 0.01, 0.005, 0.002, 0.001, 0.0])
     p.add_argument("--reference-ncell", type=int, default=2,
@@ -79,6 +90,29 @@ def _descending_nonnegative(values) -> np.ndarray:
     return np.asarray(sorted(set(arr.tolist()), reverse=True), dtype=float)
 
 
+def _parse_mesh_token(token: str) -> tuple[int, int]:
+    raw = str(token).strip().lower().replace("×", "x")
+    parts = raw.split("x")
+    if len(parts) != 2:
+        raise ValueError(f"invalid mesh {token!r}; expected form NxM, e.g. 2x1 or 8x8")
+    n1, n2 = int(parts[0]), int(parts[1])
+    if n1 < 1 or n2 < 1:
+        raise ValueError("mesh dimensions must be positive")
+    return n1, n2
+
+
+def _meshes(args) -> list[tuple[int, int]]:
+    if args.nk is not None:
+        raw = [(int(n), int(n)) for n in args.nk]
+    else:
+        raw = [_parse_mesh_token(x) for x in args.mesh]
+    out = []
+    for item in raw:
+        if item not in out:
+            out.append(item)
+    return out
+
+
 def _current(gw, K, Vq, grid, h0, backend) -> float:
     _, sigma_f, _, _ = compute_sigma_gw_split_components(
         gw.G, gw.W, Vq, grid, h0, gw.mu, gw.Sigma_H, backend=backend
@@ -97,8 +131,6 @@ def _fit_intercept(h, J, converged, npoints):
     if idx.size < 2:
         return np.nan, np.nan, 0
     idx = idx[np.argsort(h[idx])][: max(2, int(npoints))]
-    if idx.size < 2:
-        return np.nan, np.nan, 0
     slope, intercept = np.polyfit(h[idx], J[idx], 1)
     return float(intercept), float(slope), int(idx.size)
 
@@ -106,9 +138,7 @@ def _fit_intercept(h, J, converged, npoints):
 def main():
     args = _args()
     h_reference = _descending_nonnegative(args.h)
-    nkvalues = np.asarray(sorted(set(int(x) for x in args.nk)), dtype=int)
-    if np.any(nkvalues < 1):
-        raise ValueError("--nk values must be positive")
+    meshes = _meshes(args)
     if args.reference_ncell < 1:
         raise ValueError("--reference-ncell must be positive")
     if args.T <= 0.0:
@@ -120,7 +150,7 @@ def main():
     h_cell = h_reference / ref_root
     params = RubyParameters(ti=args.ti, t1=args.t1, t2=args.t2, V=args.V)
 
-    shape = (len(nkvalues), len(h_reference))
+    shape = (len(meshes), len(h_reference))
     j_cell = np.full(shape, np.nan)
     J_reference = np.full(shape, np.nan)
     mu = np.full(shape, np.nan)
@@ -130,22 +160,23 @@ def main():
     screening_smin = np.full(shape, np.nan)
     screening_q1 = np.full(shape, np.nan)
     screening_q2 = np.full(shape, np.nan)
+    fit_J0 = np.full(len(meshes), np.nan)
+    fit_slope = np.full(len(meshes), np.nan)
+    fit_n = np.zeros(len(meshes), dtype=int)
 
-    fit_J0 = np.full(len(nkvalues), np.nan)
-    fit_slope = np.full(len(nkvalues), np.nan)
-    fit_n = np.zeros(len(nkvalues), dtype=int)
-
+    labels = [f"{n1}x{n2}" for n1, n2 in meshes]
     print("=== primitive dense-k finite-source SC-GW scan ===")
     print(f"V={args.V:g}, filling={args.filling:g}, T={args.T:g}, source={source}")
-    print(f"nk={nkvalues.tolist()}")
+    print(f"meshes={labels}")
     print(f"reference normalized h={h_reference.tolist()}")
     print(f"reference_ncell={args.reference_ncell}; primitive h_cell=h/sqrt(Nref)")
     print(f"primitive h_cell={h_cell.tolist()}")
 
-    for ik, nk in enumerate(nkvalues):
-        print(f"\n### nk={nk}x{nk} ###")
+    for imesh, (nk1, nk2) in enumerate(meshes):
+        label = labels[imesh]
+        print(f"\n### mesh={label} ###")
         grid = MatsubaraGrid(
-            nk1=int(nk), nk2=int(nk), nw=args.nw, nOmega=args.nomega, T=args.T
+            nk1=nk1, nk2=nk2, nw=args.nw, nOmega=args.nomega, T=args.T
         )
         h0_base = np.asarray(build_h0(grid.kmesh(), params), dtype=complex)
         Vq = np.asarray(build_interaction(grid.qmesh(), params), dtype=complex)
@@ -162,29 +193,31 @@ def main():
             momentum_backend=args.backend,
         )
 
+        # Keep the most recent converged point even if an intermediate smaller-h
+        # solve fails.  It is still a much better branch seed than restarting from zero.
         last_converged = None
         for ih, (href, hpc) in enumerate(zip(h_reference, h_cell)):
             h0 = h0_base - float(hpc) * K[None, None, :, :]
             h0 = 0.5 * (h0 + np.swapaxes(h0.conj(), -1, -2))
             gw = solve_matrix_gw_fast(h0, Vq, grid, opts=opts, initial=last_converged)
 
-            converged[ik, ih] = bool(gw.converged)
-            iterations[ik, ih] = int(gw.iterations)
-            residual[ik, ih] = float(gw.final_error)
-            mu[ik, ih] = float(gw.mu)
-            screening_smin[ik, ih] = float(gw.min_screening_singular_value)
-            screening_q1[ik, ih] = float(gw.min_screening_q1)
-            screening_q2[ik, ih] = float(gw.min_screening_q2)
+            converged[imesh, ih] = bool(gw.converged)
+            iterations[imesh, ih] = int(gw.iterations)
+            residual[imesh, ih] = float(gw.final_error)
+            mu[imesh, ih] = float(gw.mu)
+            screening_smin[imesh, ih] = float(gw.min_screening_singular_value)
+            screening_q1[imesh, ih] = float(gw.min_screening_q1)
+            screening_q2[imesh, ih] = float(gw.min_screening_q2)
 
             j = _current(gw, K, Vq, grid, h0, args.backend)
-            j_cell[ik, ih] = j
-            J_reference[ik, ih] = ref_root * j
+            j_cell[imesh, ih] = j
+            J_reference[imesh, ih] = ref_root * j
 
             status = "OK" if gw.converged else "FAIL"
             print(
                 f"  h_ref={href:.8g} h_cell={hpc:.8g} {status:4s} "
                 f"iter={gw.iterations:4d} r={gw.final_error:.3e} "
-                f"j_cell={j:+.9f} J_ref={J_reference[ik,ih]:+.9f} "
+                f"j_cell={j:+.9f} J_ref={J_reference[imesh,ih]:+.9f} "
                 f"smin={gw.min_screening_singular_value:.3e} "
                 f"q*=({gw.min_screening_q1:.4f},{gw.min_screening_q2:.4f})"
             )
@@ -193,70 +226,63 @@ def main():
                 last_converged = gw
             elif not args.allow_unconverged:
                 raise RuntimeError(
-                    f"GW failed for nk={nk}, h_ref={href:g}: residual={gw.final_error:.3e}"
+                    f"GW failed for mesh={label}, h_ref={href:g}: residual={gw.final_error:.3e}"
                 )
 
         J0, slope, nfit = _fit_intercept(
-            h_reference, J_reference[ik], converged[ik], args.fit_points
+            h_reference, J_reference[imesh], converged[imesh], args.fit_points
         )
-        fit_J0[ik], fit_slope[ik], fit_n[ik] = J0, slope, nfit
+        fit_J0[imesh], fit_slope[imesh], fit_n[imesh] = J0, slope, nfit
         j0 = J0 / ref_root if np.isfinite(J0) else np.nan
         print(
             f"  small-h linear diagnostic ({nfit} points): "
             f"J_ref(h->0)={J0:+.9f}, j_cell(h->0)={j0:+.9f}, slope_ref={slope:+.9f}"
         )
 
+    nk1_values = np.asarray([x[0] for x in meshes], dtype=int)
+    nk2_values = np.asarray([x[1] for x in meshes], dtype=int)
     args.out.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         args.out / "primitive_finite_source_nk.npz",
-        nk=nkvalues,
-        h_reference=h_reference,
-        h_cell=h_cell,
-        reference_ncell=args.reference_ncell,
-        source=source,
-        V=args.V,
-        filling=args.filling,
-        T=args.T,
-        j_per_cell=j_cell,
-        J_reference=J_reference,
-        mu=mu,
-        converged=converged,
-        iterations=iterations,
-        residual=residual,
+        mesh_labels=np.asarray(labels), nk1=nk1_values, nk2=nk2_values,
+        h_reference=h_reference, h_cell=h_cell,
+        reference_ncell=args.reference_ncell, source=source,
+        V=args.V, filling=args.filling, T=args.T,
+        j_per_cell=j_cell, J_reference=J_reference,
+        mu=mu, converged=converged, iterations=iterations, residual=residual,
         screening_smin=screening_smin,
-        screening_q1=screening_q1,
-        screening_q2=screening_q2,
+        screening_q1=screening_q1, screening_q2=screening_q2,
         fit_J0_reference=fit_J0,
         fit_J0_per_cell=fit_J0 / ref_root,
-        fit_slope_reference=fit_slope,
-        fit_npoints=fit_n,
+        fit_slope_reference=fit_slope, fit_npoints=fit_n,
     )
 
     with (args.out / "primitive_finite_source_nk.csv").open("w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow([
-            "nk", "h_reference", "h_cell", "j_per_cell", "J_reference",
-            "converged", "iterations", "residual", "mu", "screening_smin",
-            "screening_q1", "screening_q2",
+            "mesh", "nk1", "nk2", "h_reference", "h_cell",
+            "j_per_cell", "J_reference", "converged", "iterations", "residual",
+            "mu", "screening_smin", "screening_q1", "screening_q2",
         ])
-        for ik, nk in enumerate(nkvalues):
+        for imesh, (nk1, nk2) in enumerate(meshes):
             for ih, href in enumerate(h_reference):
                 w.writerow([
-                    int(nk), float(href), float(h_cell[ih]),
-                    float(j_cell[ik, ih]), float(J_reference[ik, ih]),
-                    bool(converged[ik, ih]), int(iterations[ik, ih]),
-                    float(residual[ik, ih]), float(mu[ik, ih]),
-                    float(screening_smin[ik, ih]),
-                    float(screening_q1[ik, ih]), float(screening_q2[ik, ih]),
+                    labels[imesh], nk1, nk2, float(href), float(h_cell[ih]),
+                    float(j_cell[imesh, ih]), float(J_reference[imesh, ih]),
+                    bool(converged[imesh, ih]), int(iterations[imesh, ih]),
+                    float(residual[imesh, ih]), float(mu[imesh, ih]),
+                    float(screening_smin[imesh, ih]),
+                    float(screening_q1[imesh, ih]), float(screening_q2[imesh, ih]),
                 ])
 
     with (args.out / "nk_summary.csv").open("w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
-        w.writerow(["nk", "fit_J0_reference", "fit_J0_per_cell", "fit_slope_reference", "fit_npoints"])
-        for ik, nk in enumerate(nkvalues):
+        w.writerow(["mesh", "nk1", "nk2", "fit_J0_reference", "fit_J0_per_cell", "fit_slope_reference", "fit_npoints"])
+        for imesh, (nk1, nk2) in enumerate(meshes):
             w.writerow([
-                int(nk), float(fit_J0[ik]), float(fit_J0[ik] / ref_root),
-                float(fit_slope[ik]), int(fit_n[ik]),
+                labels[imesh], nk1, nk2,
+                float(fit_J0[imesh]), float(fit_J0[imesh] / ref_root),
+                float(fit_slope[imesh]), int(fit_n[imesh]),
             ])
 
     print(f"\nsaved to {args.out}")
