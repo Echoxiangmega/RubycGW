@@ -11,6 +11,16 @@ By default only the static bosonic sector is vertex-corrected (``--m-max 0``),
 which is the affordable first test suggested by the one-shot post-GW diagnostic.
 Use ``--m-max -1`` for all represented bosonic frequencies.
 
+Optionally (enabled by default) a small-torus exact diagonalization is performed
+at the same reference source and filling.  Because a dense primitive k mesh and
+an ED torus generally do not share the same momentum points, the Green-function
+benchmark compares the directly compatible cell-local object
+
+    G_loc(iw) = (1/Nk) sum_k G(k,iw)
+
+against the cell-averaged diagonal 6x6 block of the exact-torus Green matrix.
+The reported ``Gerr`` is the relative Frobenius norm with ED as reference.
+
 This is a Gamma_P screening-feedback diagnostic, not a fully conserving Hedin
 GWGamma self-energy-vertex closure; see ``rubycgw.hedin_gamma``.
 """
@@ -24,6 +34,11 @@ from pathlib import Path
 import numpy as np
 
 from benchmark_finite_source_current import _bilinear_expectation_tail_completed
+from rubycgw.ed_green_compare import (
+    primitive_local_green,
+    relative_green_error,
+    solve_exact_finite_source_local_green,
+)
 from rubycgw.grids import MatsubaraGrid
 from rubycgw.gw import GWOptions
 from rubycgw.hedin_gamma import (
@@ -74,6 +89,17 @@ def _args():
     p.add_argument("--allow-unconverged", action="store_true")
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--fit-points", type=int, default=3)
+
+    p.add_argument("--ed", dest="ed", action="store_true", default=True,
+                   help="run the small-torus ED Green benchmark (default)")
+    p.add_argument("--no-ed", dest="ed", action="store_false",
+                   help="skip the ED Green benchmark")
+    p.add_argument("--ed-L1", type=int, default=2)
+    p.add_argument("--ed-L2", type=int, default=1)
+    p.add_argument("--ed-discard-weight-tol", type=float, default=1e-12)
+    p.add_argument("--ed-low-nfreq", type=int, default=8,
+                   help="number of smallest-|omega| Matsubara points for low-frequency Gerr")
+
     p.add_argument("--out", type=Path, default=Path("results/primitive_gw_gamma"))
     return p.parse_args()
 
@@ -187,6 +213,11 @@ def _fit(h, J, ok, npoints):
     return float(intercept), float(slope), int(idx.size)
 
 
+def _low_frequency_indices(omega: np.ndarray, count: int) -> np.ndarray:
+    n = min(max(int(count), 1), len(omega))
+    return np.asarray(np.argsort(np.abs(np.asarray(omega, dtype=float)))[:n], dtype=int)
+
+
 def main():
     args = _args()
     nk1, nk2 = _parse_mesh(args.mesh)
@@ -196,6 +227,18 @@ def main():
     K = np.asarray(primitive_pseudospin_vertex(source), dtype=complex)
     root = float(np.sqrt(args.reference_ncell))
     h_cell = h_ref / root
+
+    if args.ed:
+        ed_ncell = int(args.ed_L1) * int(args.ed_L2)
+        if ed_ncell != int(args.reference_ncell):
+            raise ValueError(
+                "ED source/current normalization requires ed-L1*ed-L2 == reference-ncell; "
+                f"got {ed_ncell} != {args.reference_ncell}"
+            )
+        if 6 * ed_ncell > 16:
+            raise ValueError("ExactSmallRubyThermal requires at most 16 sites")
+        if not (0.0 <= float(args.ed_discard_weight_tol) < 1.0):
+            raise ValueError("--ed-discard-weight-tol must lie in [0,1)")
 
     params = RubyParameters(ti=args.ti, t1=args.t1, t2=args.t2, V=args.V)
     grid = MatsubaraGrid(nk1=nk1, nk2=nk2, nw=args.nw, nOmega=args.nomega, T=args.T)
@@ -239,6 +282,8 @@ def main():
     n = len(h_ref)
     Jgw = np.full(n, np.nan)
     Jgamma = np.full(n, np.nan)
+    Jed = np.full(n, np.nan)
+    mu_ed = np.full(n, np.nan)
     gw_ok = np.zeros(n, dtype=bool)
     gamma_ok = np.zeros(n, dtype=bool)
     gamma_err = np.full(n, np.nan)
@@ -250,15 +295,30 @@ def main():
     q2_gamma = np.full(n, np.nan)
     hed_err = np.full(n, np.nan)
     vertex_err = np.full(n, np.nan)
+    Gerr_gw = np.full(n, np.nan)
+    Gerr_gamma = np.full(n, np.nan)
+    Gerr_gw_low = np.full(n, np.nan)
+    Gerr_gamma_low = np.full(n, np.nan)
+    G_ed_local = np.full((n, grid.nf, 6, 6), np.nan + 0j, dtype=complex)
+    G_gw_local = np.full_like(G_ed_local, np.nan + 0j)
+    G_gamma_local = np.full_like(G_ed_local, np.nan + 0j)
+    ed_kept_weight = np.full(n, np.nan)
 
     print("=== primitive finite-source iterative GW-Gamma_P screening ===")
     print(f"V={args.V:g}, filling={args.filling:g}, T={args.T:g}, source={source}")
     print(f"mesh={nk1}x{nk2}, h_ref={h_ref.tolist()}, m_max={m_max}")
     print("Gamma enters covariant density screening; Sigma retains the GW form.")
+    if args.ed:
+        print(
+            f"ED Green benchmark: {args.ed_L1}x{args.ed_L2} torus; "
+            "Gerr compares cell-local Matsubara G (dense-k finite-size caveat applies)."
+        )
 
     last_gw = None
     last_gamma = None
     rows = []
+    low_idx = _low_frequency_indices(grid.omega, args.ed_low_nfreq)
+
     for ih, (href, hpc) in enumerate(zip(h_ref, h_cell)):
         print(f"\n-- h_ref={href:.8g}, h_cell={hpc:.8g} --")
         h0 = h0_base - float(hpc) * K[None, None]
@@ -267,10 +327,38 @@ def main():
         gw, retry = _gw_retry(h0, Vq, grid, gw_opts, initial=last_gw)
         gw_ok[ih] = bool(gw.converged)
         Jgw[ih] = root * _gw_current(gw, K, Vq, h0, grid, args.backend)
+        G_gw_local[ih] = primitive_local_green(gw.G)
         if gw.converged:
             last_gw = gw
         if not gw.converged and not args.allow_unconverged:
             raise RuntimeError(f"GW did not converge at h_ref={href:g}")
+
+        if args.ed:
+            print("      solving matching exact ED Green function ...")
+            ed = solve_exact_finite_source_local_green(
+                L1=args.ed_L1,
+                L2=args.ed_L2,
+                params=params,
+                V=args.V,
+                source_channel=source,
+                h_ref=href,
+                filling_per_cell=args.filling,
+                T=args.T,
+                omega=grid.omega,
+                discard_weight_tol=args.ed_discard_weight_tol,
+            )
+            Jed[ih] = ed.J_ref
+            mu_ed[ih] = ed.mu
+            ed_kept_weight[ih] = ed.kept_weight
+            G_ed_local[ih] = ed.G_local
+            Gerr_gw[ih] = relative_green_error(G_gw_local[ih], G_ed_local[ih])
+            Gerr_gw_low[ih] = relative_green_error(
+                G_gw_local[ih, low_idx], G_ed_local[ih, low_idx]
+            )
+            print(
+                f"      ED: J_ref={Jed[ih]:+.9f}, mu={mu_ed[ih]:+.9f}, "
+                f"kept_weight={ed_kept_weight[ih]:.12f}, Gerr_GW(local)={Gerr_gw[ih]:.6e}"
+            )
 
         print("      iterating covariant Gamma_P screening feedback ...")
         gamma = solve_matrix_gw_gamma_feedback(
@@ -296,12 +384,19 @@ def main():
             h0,
             grid,
         )
+        G_gamma_local[ih] = primitive_local_green(gamma.G)
         if gamma.converged:
             last_gamma = gamma
         elif not args.allow_unconverged:
             raise RuntimeError(
                 f"GW-Gamma_P feedback did not converge at h_ref={href:g}: "
                 f"{gamma.final_error:.3e}"
+            )
+
+        if args.ed:
+            Gerr_gamma[ih] = relative_green_error(G_gamma_local[ih], G_ed_local[ih])
+            Gerr_gamma_low[ih] = relative_green_error(
+                G_gamma_local[ih, low_idx], G_ed_local[ih, low_idx]
             )
 
         mask = _finite_mask(gamma.P_gamma)
@@ -325,6 +420,21 @@ def main():
             f"    GWGamma_P:{'OK' if gamma.converged else 'FAIL':4s} J_ref={Jgamma[ih]:+.9f}, "
             f"iter={gamma.iterations}, r={gamma.final_error:.3e}, dJ={Jgamma[ih]-Jgw[ih]:+.9f}"
         )
+        if args.ed:
+            ratio = Gerr_gamma[ih] / Gerr_gw[ih] if Gerr_gw[ih] > 0 else np.nan
+            ratio_low = Gerr_gamma_low[ih] / Gerr_gw_low[ih] if Gerr_gw_low[ih] > 0 else np.nan
+            print(
+                f"    ED:       J_ref={Jed[ih]:+.9f}, dJ_GW={Jgw[ih]-Jed[ih]:+.9f}, "
+                f"dJ_Gamma={Jgamma[ih]-Jed[ih]:+.9f}"
+            )
+            print(
+                f"    Gerr local: GW={Gerr_gw[ih]:.6e}, GWGamma_P={Gerr_gamma[ih]:.6e}, "
+                f"Gamma/GW={ratio:.4f}"
+            )
+            print(
+                f"    Gerr low(|w|,{len(low_idx)} pts): GW={Gerr_gw_low[ih]:.6e}, "
+                f"GWGamma_P={Gerr_gamma_low[ih]:.6e}, Gamma/GW={ratio_low:.4f}"
+            )
         print(
             f"    vertex:   maxerr={vertex_err[ih]:.3e}, rel||P_Gamma-P_bub||={relP[ih]:.4e}, "
             f"Hedin identity err={hed_err[ih]:.3e}"
@@ -338,9 +448,17 @@ def main():
         rows.append({
             "h_ref": href,
             "h_cell": hpc,
+            "J_ed": Jed[ih],
             "J_gw": Jgw[ih],
             "J_gamma": Jgamma[ih],
             "dJ": Jgamma[ih] - Jgw[ih],
+            "dJ_gw_vs_ed": Jgw[ih] - Jed[ih],
+            "dJ_gamma_vs_ed": Jgamma[ih] - Jed[ih],
+            "mu_ed": mu_ed[ih],
+            "Gerr_gw_local": Gerr_gw[ih],
+            "Gerr_gamma_local": Gerr_gamma[ih],
+            "Gerr_gw_low": Gerr_gw_low[ih],
+            "Gerr_gamma_low": Gerr_gamma_low[ih],
             "gw_ok": int(gw_ok[ih]),
             "gamma_ok": int(gamma_ok[ih]),
             "gamma_iter": gamma_iter[ih],
@@ -373,8 +491,20 @@ def main():
         npz_path,
         h_ref=h_ref,
         h_cell=h_cell,
+        J_ed=Jed,
         J_gw=Jgw,
         J_gamma=Jgamma,
+        mu_ed=mu_ed,
+        Gerr_gw_local=Gerr_gw,
+        Gerr_gamma_local=Gerr_gamma,
+        Gerr_gw_low=Gerr_gw_low,
+        Gerr_gamma_low=Gerr_gamma_low,
+        G_ed_local=G_ed_local,
+        G_gw_local=G_gw_local,
+        G_gamma_local=G_gamma_local,
+        ed_kept_weight=ed_kept_weight,
+        ed_low_frequency_indices=low_idx,
+        omega=grid.omega,
         gw_ok=gw_ok,
         gamma_ok=gamma_ok,
         gamma_error=gamma_err,
@@ -389,6 +519,9 @@ def main():
         slope_gw=bg,
         J0_gamma=J0x,
         slope_gamma=bx,
+        ed_L1=int(args.ed_L1),
+        ed_L2=int(args.ed_L2),
+        ed_enabled=bool(args.ed),
     )
     print(f"wrote {csv_path}")
     print(f"wrote {npz_path}")
