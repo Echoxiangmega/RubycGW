@@ -1,10 +1,13 @@
 """Warm-started covariant density response for iterative GW-Gamma_P feedback.
 
 This module preserves the equations of :mod:`rubycgw.covariant_density` but
-allows converged three-point density vertices to be reused between successive
-outer feedback iterations.  The expensive transfer BSE/GMRES systems change
-only smoothly when G and W are mixed, so this cache can substantially reduce
-Krylov work after the first outer iteration without changing the fixed point.
+adds two performance optimizations:
+
+1. converged three-point density vertices are reused between successive outer
+   feedback iterations;
+2. for the FFT backend, all six orbital density sources at a fixed external
+   transfer share one prepared background MT/AL kernel, avoiding repeated FFTs
+   of the same G and W fields inside every GMRES matrix-vector product.
 """
 from __future__ import annotations
 
@@ -18,10 +21,10 @@ from .response_tail import build_tail_reference
 from .sox_covariant import SOXOptions
 from .sox_transfer import compute_sox_vertex_transfer_periodic
 from .supercell_cgw import SupercellVertexOptions
-from .transfer_cgw import (
-    negative_transfer,
-    solve_vertex_transfer_tail,
-    transfer_response_tail_completed,
+from .transfer_cgw import negative_transfer, transfer_response_tail_completed
+from .transfer_cgw_fast import (
+    prepare_transfer_fft_context,
+    solve_vertex_transfer_tail_fast,
 )
 
 
@@ -113,6 +116,9 @@ def compute_covariant_density_susceptibility_fast(
                 if not _representative_transfer(p, m, grid):
                     continue
 
+                prepared = prepare_transfer_fft_context(
+                    G, W, Vq, p, m, grid, vertex_opts
+                )
                 gammas: list[np.ndarray] = []
                 errs: list[float] = []
                 oks: list[bool] = []
@@ -141,7 +147,7 @@ def compute_covariant_density_susceptibility_fast(
                     else:
                         seed = adjacent_seed[b]
 
-                    vr = solve_vertex_transfer_tail(
+                    vr = solve_vertex_transfer_tail_fast(
                         G,
                         W,
                         Vq,
@@ -153,6 +159,7 @@ def compute_covariant_density_susceptibility_fast(
                         opts=vertex_opts,
                         initial_gamma=seed,
                         extra_kernel=extra,
+                        prepared=prepared,
                     )
                     gamma_cache[key] = vr.Gamma
                     adjacent_seed[b] = vr.Gamma
