@@ -43,14 +43,33 @@ def _small_background():
     return grid, h0, mu, G, Vq, W, sigma_h, sigma_f
 
 
-def _vopts():
+def _small_fft_background():
+    grid = MatsubaraGrid(nk1=2, nk2=1, nw=4, nOmega=1, T=.20)
+    h0 = np.empty((2, 1, 2, 2), dtype=complex)
+    h0[0, 0] = np.array([[.13, .17 + .01j], [.17 - .01j, -.09]])
+    h0[1, 0] = np.array([[.10, .14 - .025j], [.14 + .025j, -.06]])
+    mu = .018
+    G = _free_G(h0, mu, grid)
+    Vq = np.empty_like(h0)
+    Vq[0, 0] = np.array([[0.0, .14], [.14, 0.0]])
+    Vq[1, 0] = np.array([[0.0, .09], [.09, 0.0]])
+    P = compute_polarization_matrix(G, grid, backend="fft")
+    W = compute_screened_interaction_matrix(P, Vq)
+    sigma_h = np.zeros((2, 2), dtype=complex)
+    _, sigma_f, _, _ = compute_sigma_gw_split_components(
+        G, W, Vq, grid, h0, mu, sigma_h, backend="fft"
+    )
+    return grid, h0, mu, G, Vq, W, sigma_h, sigma_f
+
+
+def _vopts(backend="direct"):
     return SupercellVertexOptions(
         max_iter=80,
         tol=5e-10,
         solver="gmres",
         gmres_restart=8,
         verbose=False,
-        momentum_backend="direct",
+        momentum_backend=backend,
     )
 
 
@@ -75,6 +94,22 @@ def test_fast_covariant_density_matches_reference_and_reuses_cache():
     np.testing.assert_allclose(fast2.chi_completed, ref.chi_completed, rtol=2e-9, atol=3e-10)
     assert stats2.cache_hits == stats2.n_solves == 2
     assert len(cache2) == 2
+
+
+def test_prepared_fft_density_kernel_matches_reference():
+    grid, h0, mu, G, Vq, W, sigma_h, sigma_f = _small_fft_background()
+    opts = _vopts("fft")
+    ref = compute_covariant_density_susceptibility(
+        G, W, Vq, h0, mu, sigma_h, sigma_f, grid,
+        vertex_opts=opts, m_max=0,
+    )
+    fast, _, stats = compute_covariant_density_susceptibility_fast(
+        G, W, Vq, h0, mu, sigma_h, sigma_f, grid,
+        vertex_opts=opts, m_max=0,
+    )
+    np.testing.assert_allclose(fast.chi_completed, ref.chi_completed, rtol=3e-9, atol=5e-10)
+    np.testing.assert_allclose(fast.chi_raw, ref.chi_raw, rtol=3e-9, atol=5e-10)
+    assert stats.n_solves == 4
 
 
 def test_three_block_pulay_coefficients_sum_to_one():
