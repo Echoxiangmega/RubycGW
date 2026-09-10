@@ -55,10 +55,10 @@ Use a static source
 h_0(\phi)=h_0-\phi K.
 \]
 
-Define
+With the RubycGW convention define
 
 \[
-\Gamma_K=-\frac{\delta G^{-1}}{\delta\phi},
+\Gamma_K=\frac{\delta G^{-1}}{\delta\phi},
 \qquad
 X_K=G\Gamma_KG=-\frac{\delta G}{\delta\phi}.
 \]
