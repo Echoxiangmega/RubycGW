@@ -21,6 +21,16 @@ in lambda while keeping the fermionic codec state fixed.
 The augmented state uses an unconstrained logit coordinate u for lambda.  This
 keeps 0 < lambda < 1 automatically without making a boundary minimum look like
 an interior PMS solution.
+
+The module also exposes a *diagnostic* derivative in the full two-dimensional
+Fierz simplex,
+
+    lambda_n + lambda_B + lambda_J = 1,
+
+using (lambda_B, lambda_J) as independent coordinates.  This is useful for
+checking whether a stationary point on the symmetric B=J line is genuinely
+stationary in the full Fierz plane or only stationary along that one-dimensional
+cut.
 """
 from __future__ import annotations
 
@@ -31,8 +41,10 @@ import numpy as np
 
 from .fierz_free_energy import ChannelGWFreeEnergyResult, evaluate_channel_gw_free_energy
 from .fierz_mixed import (
+    FierzWeights,
     WeightedFierzGWResidual,
     build_weighted_nbj_definition,
+    validate_weights,
     weights_from_lambda,
 )
 from .grids import MatsubaraGrid
@@ -139,6 +151,27 @@ class PMSResidualEvaluation:
         return float(self.base_evaluation.soft_Omega)
 
 
+@dataclass(frozen=True)
+class FierzSimplexGradient:
+    """Explicit fixed-G free-energy gradient in the full n/B/J simplex.
+
+    Independent coordinates are b=lambda_B and j=lambda_J, with
+    lambda_n=1-b-j.  ``parallel`` is the normalized derivative along the
+    symmetric one-parameter PMS line when lambda increases, i.e. direction
+    (-1,-1)/sqrt(2) in (b,j).  ``perpendicular`` probes the missing B-J
+    antisymmetric direction (1,-1)/sqrt(2).
+    """
+
+    dF_dlambda_B_per_cell: float
+    dF_dlambda_J_per_cell: float
+    gradient_norm_per_cell: float
+    parallel_per_cell: float
+    perpendicular_per_cell: float
+    dF_dlambda_reconstructed_per_cell: float
+    line_consistency_error_per_cell: float
+    fd_h_used: float
+
+
 class WeightedFierzPMSResidual:
     """Augmented GW+PMS residual with lambda solved self-consistently.
 
@@ -225,26 +258,26 @@ class WeightedFierzPMSResidual:
             density=np.real(np.diag(np.asarray(base_ev.rho))),
         )
 
-    def _free_energy_at_lambda(
+    def _free_energy_at_weights(
         self,
         background,
         V: float,
-        lambda_value: float,
+        weights: FierzWeights,
         reference_definition,
     ) -> ChannelGWFreeEnergyResult:
+        weights = validate_weights(weights)
         definition = build_weighted_nbj_definition(
             self.pairs,
             self.norb,
             float(V),
-            weights_from_lambda(lambda_value),
+            weights,
         )
-        # In the interior of the one-parameter simplex the n/B/J vertex basis is
-        # lambda-independent; only g changes.  Reusing P is therefore exact for
-        # the explicit derivative at fixed G.  Guard this assumption loudly.
+        # At an interior simplex point the n/B/J vertex basis is independent of
+        # the weights; only g changes.  P=GG is therefore unchanged at fixed G.
         if definition.labels != reference_definition.labels:
-            raise RuntimeError("lambda finite difference changed the active channel basis")
+            raise RuntimeError("Fierz finite difference changed the active channel basis")
         if not np.array_equal(definition.vertices, reference_definition.vertices):
-            raise RuntimeError("lambda finite difference changed channel vertices")
+            raise RuntimeError("Fierz finite difference changed channel vertices")
         return evaluate_channel_gw_free_energy(
             background,
             definition,
@@ -252,6 +285,20 @@ class WeightedFierzPMSResidual:
             self.grid,
             target_particles=self.target,
             primitive_cells_per_supercell=self.primitive_cells,
+        )
+
+    def _free_energy_at_lambda(
+        self,
+        background,
+        V: float,
+        lambda_value: float,
+        reference_definition,
+    ) -> ChannelGWFreeEnergyResult:
+        return self._free_energy_at_weights(
+            background,
+            V,
+            weights_from_lambda(lambda_value),
+            reference_definition,
         )
 
     def _stencil_h(self, lambda_value: float) -> float:
@@ -262,6 +309,86 @@ class WeightedFierzPMSResidual:
                 "lambda approached a simplex boundary too closely for a stable PMS derivative"
             )
         return float(h)
+
+    def _simplex_stencil_h(self, weights: FierzWeights, h: float | None = None) -> float:
+        w = validate_weights(weights)
+        distance = min(w.density, w.bond, w.current)
+        nominal = self.lambda_fd_h if h is None else float(h)
+        if not np.isfinite(nominal) or nominal <= 0.0:
+            raise ValueError("simplex finite-difference h must be positive")
+        # Five-point stencil reaches +/-2h.  Keep a generous factor-five margin
+        # from every simplex boundary so all three channel families stay active.
+        used = min(nominal, 0.20 * distance)
+        if used <= 1e-8:
+            raise FloatingPointError(
+                "Fierz weights approached a simplex boundary too closely for a stable 2D gradient"
+            )
+        return float(used)
+
+    def simplex_gradient(
+        self,
+        y: np.ndarray,
+        V: float,
+        *,
+        h: float | None = None,
+        evaluation: PMSResidualEvaluation | None = None,
+    ) -> FierzSimplexGradient:
+        """Return the explicit full-simplex gradient at a PMS state.
+
+        The fermionic state is held fixed.  Coordinates are b=lambda_B and
+        j=lambda_J with n=1-b-j.  This is the correct diagnostic derivative of
+        the stationary LW functional.  No additional self-consistent GW solves
+        are performed for the finite-difference stencil.
+        """
+        x, _, lam = self.codec.decode(y)
+        ev = self.evaluate(y, float(V)) if evaluation is None else evaluation
+        reference = self._problem(lam).definition(float(V))
+        background = self._background_from_fixed_state(x, ev.base_evaluation)
+        w0 = weights_from_lambda(lam)
+        hh = self._simplex_stencil_h(w0, h)
+
+        def F_of(b: float, j: float) -> float:
+            n = 1.0 - float(b) - float(j)
+            result = self._free_energy_at_weights(
+                background,
+                V,
+                FierzWeights(n, float(b), float(j)),
+                reference,
+            )
+            return float(result.free_energy_per_primitive_cell)
+
+        b0 = float(w0.bond)
+        j0 = float(w0.current)
+
+        Fb_m2 = F_of(b0 - 2.0 * hh, j0)
+        Fb_m1 = F_of(b0 - hh, j0)
+        Fb_p1 = F_of(b0 + hh, j0)
+        Fb_p2 = F_of(b0 + 2.0 * hh, j0)
+        gB = (Fb_m2 - 8.0 * Fb_m1 + 8.0 * Fb_p1 - Fb_p2) / (12.0 * hh)
+
+        Fj_m2 = F_of(b0, j0 - 2.0 * hh)
+        Fj_m1 = F_of(b0, j0 - hh)
+        Fj_p1 = F_of(b0, j0 + hh)
+        Fj_p2 = F_of(b0, j0 + 2.0 * hh)
+        gJ = (Fj_m2 - 8.0 * Fj_m1 + 8.0 * Fj_p1 - Fj_p2) / (12.0 * hh)
+
+        inv_sqrt2 = 1.0 / np.sqrt(2.0)
+        parallel = -(gB + gJ) * inv_sqrt2
+        perpendicular = (gB - gJ) * inv_sqrt2
+        reconstructed = -0.5 * (gB + gJ)
+        line_error = reconstructed - float(ev.dF_dlambda_per_cell)
+        grad_norm = float(np.hypot(gB, gJ))
+
+        return FierzSimplexGradient(
+            dF_dlambda_B_per_cell=float(gB),
+            dF_dlambda_J_per_cell=float(gJ),
+            gradient_norm_per_cell=grad_norm,
+            parallel_per_cell=float(parallel),
+            perpendicular_per_cell=float(perpendicular),
+            dF_dlambda_reconstructed_per_cell=float(reconstructed),
+            line_consistency_error_per_cell=float(line_error),
+            fd_h_used=float(hh),
+        )
 
     def evaluate(self, y: np.ndarray, V: float) -> PMSResidualEvaluation:
         x, u, lam = self.codec.decode(y)
@@ -313,5 +440,6 @@ class WeightedFierzPMSResidual:
 __all__ = [
     "PMSLambdaCodec",
     "PMSResidualEvaluation",
+    "FierzSimplexGradient",
     "WeightedFierzPMSResidual",
 ]
