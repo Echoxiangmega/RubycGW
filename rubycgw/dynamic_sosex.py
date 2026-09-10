@@ -1,13 +1,15 @@
 """Frequency-dependent screened second-order exchange for periodic Ruby lattices.
 
-Write W(Q)=V(q)+Wp(Q).  The dynamic one-screened-line SOSEX used here is
+Write W(Q)=V(q)+Wp(Q).  Three production modes are supported:
 
-  Sigma_dSOSEX = Sigma_SOX + 1/2 [Sigma_(Wp,V) + Sigma_(V,Wp)].
+  sosex  = Sigma_SOX + 1/2 [Sigma_(Wp,V) + Sigma_(V,Wp)]
+  2sosex = Sigma_SOX +     [Sigma_(Wp,V) + Sigma_(V,Wp)]
+  g3w2   = Sigma_SOX + Sigma_(Wp,V) + Sigma_(V,Wp) + Sigma_(Wp,Wp)
 
-This is the frequency-dependent counterpart of the historical static
-``oneW-sym`` diagnostic.  Only the polarizable part Wp=W-V is explicitly
-truncated on the bosonic Matsubara grid; the non-decaying (V,V) piece is the
-existing tail-completed bare-SOX implementation.
+The last line is the full two-screened-line dynamic G3W2 / WW skeleton.  The
+V,V piece is evaluated by the existing tail-completed bare-SOX implementation;
+only the polarizable part Wp=W-V is explicitly truncated on the represented
+bosonic Matsubara grid.
 
 For the full finite torus, with fermionic n and bosonic m,
 
@@ -15,15 +17,21 @@ For the full finite torus, with fermionic n and bosonic m,
     = T sum_m,kl Wp_il(m) G_ik(n+m) B_klj(m) V_kj,
   B_klj(m) = T sum_r G_kl(r+m) G_lj(r),
 
-and
-
   Sigma_(V,Wp),ij(n)
     = T sum_m,kl V_il C_ikl(m) Wp_kj(m) G_lj(n+m),
-  C_ikl(m) = T sum_r G_ik(r) G_kl(r+m).
+  C_ikl(m) = T sum_r G_ik(r) G_kl(r+m),
+
+and the genuinely double-dynamic contribution is
+
+  Sigma_(Wp,Wp),ij(n)
+    = T^2 sum_m,m',k,l Wp_il(m) Wp_kj(m')
+        G_ik(n+m) G_kl(n+m+m') G_lj(n+m').
 
 The pair sums B,C are completed analytically with a static H+F reference.
-Spatial momentum routing is exact because k/q matrices are unfolded to the
-finite real-space torus before the contraction.
+Shifted Green functions in the Wp,Wp term are reference-tail completed whenever
+n+m, n+m', or n+m+m' leaves the represented fermionic box.  Spatial momentum
+routing is exact because k/q matrices are unfolded to the finite real-space
+torus before contraction.
 """
 from __future__ import annotations
 
@@ -46,7 +54,7 @@ class DynamicSOSEXOptions:
     interaction_tol: float = 1.0e-13
     tail_complete: bool = True
     tail_edge_points: int = 2
-    mode: str = "sosex"          # sosex or 2sosex
+    mode: str = "sosex"          # sosex, 2sosex, or g3w2
     max_full_sites: int = 36
 
     def validate(self):
@@ -56,8 +64,8 @@ class DynamicSOSEXOptions:
             raise ValueError("interaction_tol must be non-negative")
         if int(self.tail_edge_points) < 1:
             raise ValueError("tail_edge_points must be positive")
-        if str(self.mode).strip().lower() not in {"sosex", "2sosex"}:
-            raise ValueError("mode must be 'sosex' or '2sosex'")
+        if str(self.mode).strip().lower() not in {"sosex", "2sosex", "g3w2"}:
+            raise ValueError("mode must be 'sosex', '2sosex', or 'g3w2'")
         if int(self.max_full_sites) < 1:
             raise ValueError("max_full_sites must be positive")
         return self
@@ -69,6 +77,7 @@ class DynamicSOSEXParts:
     Sigma_SOX: np.ndarray
     Sigma_WpV: np.ndarray
     Sigma_VWp: np.ndarray
+    Sigma_WpWp: np.ndarray
     mixed_line_relative_difference: float
     mode: str
 
@@ -123,14 +132,12 @@ def _reference_pair_tensors(U, xi, occ, m, T):
     nsite = int(U.shape[0])
     Uc = U.conj()
 
-    # B[k,l,j] = sum_pq U[k,p]U*[l,p] S[p,q] U[l,q]U*[j,q]
     B = np.empty((nsite, nsite, nsite), dtype=complex)
     for l in range(nsite):
         left = U * Uc[l][None, :]
         right = U[l][:, None] * Uc.T
         B[:, l, :] = left @ S @ right
 
-    # C[i,k,l] = sum_pq U[i,q]U*[k,q] S[p,q] U[k,p]U*[l,p]
     C = np.empty((nsite, nsite, nsite), dtype=complex)
     for k in range(nsite):
         left = U * Uc[k][None, :]
@@ -140,6 +147,7 @@ def _reference_pair_tensors(U, xi, occ, m, T):
 
 
 def _shifted_green_with_reference_tail(Gfull, Gref_base, U, xi, m, grid):
+    """Return G(n+m), continuing missing frequencies with the H+F reference."""
     base_n = np.asarray(grid.n_values, dtype=int)
     target_n = base_n + int(m)
     Gref_shift = _reference_green_full(U, xi, target_n, grid.T)
@@ -174,8 +182,6 @@ def _mixed_sparse_contractions(
     A = np.zeros((nf, nsite, nsite), dtype=complex)  # (Wp,V)
     D = np.zeros_like(A)                             # (V,Wp)
 
-    # A[n,i,j] = sum_{k in N(j)} G[n,i,k]V[k,j]
-    #            * sum_l Wp[i,l]B[k,l,j]
     for j in range(nsite):
         for a in range(col_idx.shape[1]):
             k = int(col_idx[j, a])
@@ -185,8 +191,6 @@ def _mixed_sparse_contractions(
             vec_i = Wp @ B[k, :, j]
             A[:, :, j] += Gshift[:, :, k] * vec_i[None, :] * vkj
 
-    # D[n,i,j] = sum_{l in N(i)} V[i,l]G[n,l,j]
-    #            * sum_k C[i,k,l]Wp[k,j]
     for i in range(nsite):
         for a in range(row_idx.shape[1]):
             l = int(row_idx[i, a])
@@ -196,6 +200,36 @@ def _mixed_sparse_contractions(
             vec_j = C[i, :, l] @ Wp
             D[:, i, :] += Gshift[:, l, :] * vec_j[None, :] * vil
     return A, D
+
+
+def _double_screened_contraction(Wpm, Wpp, Gm, Gmm, Gmp):
+    """One (m,m') contribution to the Wp,Wp G3W2 term.
+
+    Computes, for every external fermionic frequency n,
+
+      sum_kl Wpm[i,l] Wpp[k,j]
+             Gm[n,i,k] Gmm[n,k,l] Gmp[n,l,j].
+
+    The explicit j loop reduces the contraction to batched matrix products and
+    is much faster than a generic five-factor einsum for the 12-site benchmark.
+    """
+    Gm = np.asarray(Gm, dtype=complex)
+    Gmm = np.asarray(Gmm, dtype=complex)
+    Gmp = np.asarray(Gmp, dtype=complex)
+    Wpm = np.asarray(Wpm, dtype=complex)
+    Wpp = np.asarray(Wpp, dtype=complex)
+    nf, nsite, _ = Gm.shape
+    out = np.zeros((nf, nsite, nsite), dtype=complex)
+    for j in range(nsite):
+        # X[n,i,k] = G(n+m)[i,k] Wp(m')[k,j]
+        X = Gm * Wpp[:, j][None, None, :]
+        # Y[n,i,l] = sum_k X[n,i,k] G(n+m+m')[k,l]
+        Y = np.matmul(X, Gmm)
+        # Finish the l contraction with Wp(m)[i,l] G(n+m')[l,j].
+        out[:, :, j] = np.sum(
+            Y * Wpm[None, :, :] * Gmp[:, :, j][:, None, :], axis=2
+        )
+    return out
 
 
 def compute_dynamic_sosex_self_energy_periodic_fast(
@@ -209,10 +243,11 @@ def compute_dynamic_sosex_self_energy_periodic_fast(
     *,
     return_parts: bool = False,
 ):
-    """Dynamic SOSEX with the full W(iOmega) on the screened line.
+    """Dynamic SOSEX / G3W2 with full W(iOmega) dependence.
 
     mode='sosex':  SOX + 1/2[(Wp,V)+(V,Wp)]
     mode='2sosex': SOX +     [(Wp,V)+(V,Wp)]
+    mode='g3w2':   SOX + (Wp,V)+(V,Wp)+(Wp,Wp) = full W,W skeleton
     """
     opts.validate()
     norb = _check_shapes(G, grid, "G")
@@ -251,6 +286,16 @@ def compute_dynamic_sosex_self_energy_periodic_fast(
 
     WpV_full = np.zeros_like(Gfull)
     VWp_full = np.zeros_like(Gfull)
+    shift_cache: dict[int, np.ndarray] = {0: np.asarray(Gfull)}
+
+    def shifted(s: int):
+        s = int(s)
+        if s not in shift_cache:
+            shift_cache[s] = _shifted_green_with_reference_tail(
+                Gfull, Gref_base, U, xi, s, grid
+            )[0]
+        return shift_cache[s]
+
     for im, m_raw in enumerate(grid.m_values):
         m = int(m_raw)
         Wpm = np.asarray(Wp_full[im], dtype=complex)
@@ -259,6 +304,7 @@ def compute_dynamic_sosex_self_energy_periodic_fast(
         Gshift, Gref_shift = _shifted_green_with_reference_tail(
             Gfull, Gref_base, U, xi, m, grid
         )
+        shift_cache[m] = Gshift
         Bref, Cref = _reference_pair_tensors(U, xi, occ, m, grid.T)
         B, C = _tail_completed_pair_tensors(
             Gfull, Gref_base, Gshift, Gref_shift, Bref, Cref, grid.T
@@ -277,17 +323,45 @@ def compute_dynamic_sosex_self_energy_periodic_fast(
     )
 
     mode = str(opts.mode).strip().lower()
+    WpWp_full = np.zeros_like(Gfull)
+    if mode == "g3w2":
+        active = [
+            (im, int(m)) for im, m in enumerate(grid.m_values)
+            if np.max(np.abs(Wp_full[im])) > float(opts.interaction_tol)
+        ]
+        T2 = float(grid.T) ** 2
+        for im, m in active:
+            Wpm = np.asarray(Wp_full[im], dtype=complex)
+            Gm = shifted(m)
+            for ip, mp in active:
+                Wpp = np.asarray(Wp_full[ip], dtype=complex)
+                WpWp_full += T2 * _double_screened_contraction(
+                    Wpm, Wpp, Gm, shifted(m + mp), shifted(mp)
+                )
+
+    sigma_WpWp = _full_periodic_to_kfield_batch(
+        WpWp_full, grid.nk1, grid.nk2, norb
+    )
+
     if mode == "sosex":
         sigma = sigma_sox + 0.5 * (sigma_WpV + sigma_VWp)
-    else:
+    elif mode == "2sosex":
         sigma = sigma_sox + sigma_WpV + sigma_VWp
+    else:
+        sigma = sigma_sox + sigma_WpV + sigma_VWp + sigma_WpWp
 
+    # The two mixed orderings are related by orbital transpose.  Compare them
+    # in that symmetry channel rather than using the misleading raw A-D norm.
     den = max(
         float(np.linalg.norm(sigma_WpV.ravel())),
         float(np.linalg.norm(sigma_VWp.ravel())),
         1.0e-300,
     )
-    asym = float(np.linalg.norm((sigma_WpV - sigma_VWp).ravel()) / den)
+    asym = float(
+        np.linalg.norm(
+            (sigma_WpV - np.swapaxes(sigma_VWp, -1, -2)).ravel()
+        ) / den
+    )
 
     if return_parts:
         return DynamicSOSEXParts(
@@ -295,6 +369,7 @@ def compute_dynamic_sosex_self_energy_periodic_fast(
             Sigma_SOX=np.asarray(sigma_sox),
             Sigma_WpV=np.asarray(sigma_WpV),
             Sigma_VWp=np.asarray(sigma_VWp),
+            Sigma_WpWp=np.asarray(sigma_WpWp),
             mixed_line_relative_difference=asym,
             mode=mode,
         )
