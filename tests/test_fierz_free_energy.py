@@ -17,7 +17,7 @@ from rubycgw.supercell_gw import dyson_from_sigma_matrix
 from rubycgw.supercell_gw_split import one_body_density_matrix_tail
 
 
-def test_density_channel_free_energy_matches_existing_split_gw():
+def test_density_channel_free_energy_matches_existing_density_functional():
     grid = MatsubaraGrid(nk1=1, nk2=1, nw=6, nOmega=3, T=0.17)
     h0 = np.array([[[[0.15, -0.22], [-0.22, -0.08]]]], dtype=complex)
     mu = 0.04
@@ -34,7 +34,6 @@ def test_density_channel_free_energy_matches_existing_split_gw():
     definition = build_weighted_nbj_definition([(0, 1)], 2, 0.7, FierzWeights(1.0, 0.0, 0.0))
     sigma_static, tad, exchange = channel_static_self_energy(rho, definition)
 
-    # Rebuild G with the static self-energy used by both functionals.
     G = dyson_from_sigma_matrix(h0, grid, mu, sigma_static, sigma_c)
     rho = one_body_density_matrix_tail(G, grid, h0, mu, sigma_static)[0, 0]
     sigma_static, tad, exchange = channel_static_self_energy(rho, definition)
@@ -50,12 +49,16 @@ def test_density_channel_free_energy_matches_existing_split_gw():
         bg, definition, h0, grid, target_particles=1.0, primitive_cells_per_supercell=1
     )
 
+    # evaluate_gw_free_energy uses its Sigma_H argument as the tail reference
+    # static self-energy.  Put the full channel static piece there and sigma_c in
+    # Sigma_GW so the total Sigma and tail convention exactly match the channel
+    # solver; Phi_H/Phi_F are still reconstructed independently from rho and V.
     old_state = SimpleNamespace(
         G=G,
         P=Pch[:, None, None],
         W=np.zeros_like(Pch[:, None, None]),
-        Sigma_H=tad,
-        Sigma_GW=exchange[None, None, None] + sigma_c,
+        Sigma_H=sigma_static,
+        Sigma_GW=sigma_c,
         mu=mu,
         density=np.real(np.diag(rho)),
     )
