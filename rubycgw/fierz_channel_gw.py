@@ -401,6 +401,11 @@ def channel_vertex_kernel_parts(
         "ba,aik,kl,blj->ij", g, K, drho, K, optimize=True
     )
     d_static = d_tad + d_ex
+    # The background map explicitly Hermitian-symmetrizes its static
+    # tadpole/exchange matrices. Differentiate that numerical map itself, rather
+    # than its unsymmetrized algebraic precursor, so the analytic cGW kernel is
+    # exactly the tangent of the fixed-point equations used above.
+    d_static = 0.5 * (d_static + d_static.conj().T)
     gamma_static = np.broadcast_to(
         d_static[None, None, None], np.asarray(Gamma).shape
     ).copy()
