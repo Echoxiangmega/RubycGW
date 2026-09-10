@@ -32,6 +32,25 @@ class BranchStateArchive:
         return int(self.X.shape[1])
 
 
+@dataclass(frozen=True)
+class TargetCrossing:
+    """One branch-local initial guess for an exact target parameter value.
+
+    ``left_index == right_index`` denotes an archived state already lying at the
+    target within tolerance.  Otherwise the guess is the linear interpolation
+    between the two adjacent archived states that straddle the target.
+    """
+
+    left_index: int
+    right_index: int
+    left_step: int
+    right_step: int
+    V_left: float
+    V_right: float
+    alpha: float
+    x_guess: np.ndarray
+
+
 def _validated_arrays(steps, kinds, V_values, X_values):
     step = np.asarray(steps, dtype=np.int64).reshape(-1)
     kind = np.asarray(kinds, dtype=str).reshape(-1)
@@ -138,10 +157,83 @@ def states_match(x1, V1, x2, V2, *, atol: float = 1e-12) -> bool:
     )
 
 
+def find_target_crossings(
+    archive: BranchStateArchive,
+    target: float,
+    *,
+    atol: float = 1e-10,
+) -> list[TargetCrossing]:
+    """Return every archived branch encounter with ``V=target``.
+
+    Exact archived hits are returned once each.  Strict sign-changing adjacent
+    pairs are also returned with a linearly interpolated codec-state guess.  A
+    segment touching an exact archived hit is not separately returned, avoiding
+    the ordinary double count where one target point belongs to two neighboring
+    segments.  Distinct exact hits remain distinct candidates; the fixed-V
+    postprocessor can subsequently deduplicate roots after nonlinear refinement.
+    """
+    target = float(target)
+    atol = float(atol)
+    if not np.isfinite(target):
+        raise ValueError("target must be finite")
+    if not np.isfinite(atol) or atol < 0.0:
+        raise ValueError("atol must be finite and non-negative")
+
+    V = np.asarray(archive.V, dtype=float)
+    X = np.asarray(archive.X, dtype=float)
+    step = np.asarray(archive.step, dtype=np.int64)
+    delta = V - target
+    exact = np.abs(delta) <= atol
+    out: list[TargetCrossing] = []
+
+    for i in np.flatnonzero(exact):
+        ii = int(i)
+        out.append(
+            TargetCrossing(
+                left_index=ii,
+                right_index=ii,
+                left_step=int(step[ii]),
+                right_step=int(step[ii]),
+                V_left=float(V[ii]),
+                V_right=float(V[ii]),
+                alpha=0.0,
+                x_guess=np.asarray(X[ii], dtype=float).copy(),
+            )
+        )
+
+    for i in range(max(0, archive.nstate - 1)):
+        if exact[i] or exact[i + 1]:
+            continue
+        if delta[i] * delta[i + 1] >= 0.0:
+            continue
+        denom = float(V[i + 1] - V[i])
+        if abs(denom) <= max(atol, 1e-15):
+            continue
+        alpha = float((target - V[i]) / denom)
+        x_guess = np.asarray(X[i] + alpha * (X[i + 1] - X[i]), dtype=float)
+        out.append(
+            TargetCrossing(
+                left_index=int(i),
+                right_index=int(i + 1),
+                left_step=int(step[i]),
+                right_step=int(step[i + 1]),
+                V_left=float(V[i]),
+                V_right=float(V[i + 1]),
+                alpha=alpha,
+                x_guess=x_guess,
+            )
+        )
+
+    out.sort(key=lambda c: (c.left_index, c.right_index))
+    return out
+
+
 __all__ = [
     "BranchStateArchive",
+    "TargetCrossing",
     "save_branch_state_archive",
     "load_branch_state_archive",
     "append_state_in_memory",
     "states_match",
+    "find_target_crossings",
 ]
