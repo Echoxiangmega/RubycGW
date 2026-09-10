@@ -134,10 +134,23 @@ def pseudo_arclength_step(
 
         delta, info = _call_gmres(A, -f0, opts, cb)
         gmres_total += gmres_count[0]
-        if info != 0 or not np.all(np.isfinite(delta)):
+        if not np.all(np.isfinite(delta)):
             if opts.verbose:
-                print(f"      GMRES failed/info={info}; stopping corrector")
+                print("      GMRES returned a non-finite direction")
             break
+
+        # Matrix-free finite-difference Jacobians are only approximately linear,
+        # so SciPy can return info!=0 even when the inexact Newton direction is
+        # useful.  Accept it when it still reduces the linearized residual.
+        if info != 0:
+            try:
+                lin_ratio = float(np.linalg.norm(A @ delta + f0) / max(rnorm, 1e-300))
+            except Exception:
+                lin_ratio = float("inf")
+            if opts.verbose:
+                print(f"      GMRES info={info}, linear residual ratio={lin_ratio:.3e}")
+            if not np.isfinite(lin_ratio) or lin_ratio >= 0.95:
+                break
 
         lam = 1.0
         accepted = False
