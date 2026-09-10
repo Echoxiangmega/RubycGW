@@ -1,4 +1,4 @@
-"""Self-consistent GW plus fully frequency-dependent one-screened-line SOSEX.
+"""Self-consistent GW plus frequency-dependent SOSEX / G3W2.
 
 Screening remains ordinary self-consistent GW,
 
@@ -6,13 +6,15 @@ Screening remains ordinary self-consistent GW,
 
 while
 
-    Sigma_corr = Sigma_GW + Sigma_dSOSEX.
+    Sigma_corr = Sigma_GW + Sigma_exchange.
 
-The default dynamic SOSEX correction is
+Supported dynamic exchange corrections are
 
-    Sigma_dSOSEX = SOX + 1/2[(W-V,V)+(V,W-V)],
+    sosex  = SOX + 1/2[(W-V,V)+(V,W-V)],
+    2sosex = SOX +     [(W-V,V)+(V,W-V)],
+    g3w2   = SOX + (W-V,V)+(V,W-V)+(W-V,W-V),
 
-so no W(q,Omega=0) replacement is made.
+where ``g3w2`` is the full two-screened-line dynamic W,W skeleton.
 """
 from __future__ import annotations
 
@@ -26,7 +28,6 @@ from .dynamic_sosex import (
 from .grids import MatsubaraGrid
 from .gw import (
     GWOptions,
-    GWResult,
     _check_backend,
     _check_mixing_method,
     _mixed_self_energies,
@@ -65,6 +66,7 @@ class GWDynamicSOSEXResult:
     Sigma_SOX: np.ndarray
     Sigma_WpV: np.ndarray
     Sigma_VWp: np.ndarray
+    Sigma_WpWp: np.ndarray
     mu: float
     density: np.ndarray
     converged: bool
@@ -120,9 +122,8 @@ def solve_matrix_gw_dynamic_sosex(
     if opts.target_filling is None:
         G = dyson_from_sigma_matrix(h0, grid, mu, sigma_h, sigma_corr)
         tail_cache = _build_tail_cache(h0, sigma_h)
-        mu_neval = 0
     else:
-        mu, G, tail_cache, mu_neval = _solve_mu_matrix_fast(
+        mu, G, tail_cache, _ = _solve_mu_matrix_fast(
             h0, sigma_h, sigma_corr, grid, float(opts.target_filling), mu,
             mu_tol_used, opts.mu_max_iter,
         )
@@ -158,9 +159,10 @@ def solve_matrix_gw_dynamic_sosex(
         )
         if opts.verbose:
             print(
-                f"SC-GW+dSOSEX iter {it:4d}: residual={err:.3e}, "
+                f"SC-GW+dynamic exchange iter {it:4d}: residual={err:.3e}, "
                 f"mu={mu:.10f}, n={np.sum(density):.10f}, "
-                f"max|Sigma_dSOSEX|={np.max(np.abs(parts.Sigma)):.3e}, "
+                f"max|Sigma_ex|={np.max(np.abs(parts.Sigma)):.3e}, "
+                f"max|WpWp|={np.max(np.abs(parts.Sigma_WpWp)):.3e}, "
                 f"line_asym={parts.mixed_line_relative_difference:.3e}, "
                 f"mode={dsosex_opts.mode}, method={method}"
             )
@@ -178,9 +180,8 @@ def solve_matrix_gw_dynamic_sosex(
                 h0, grid, mu, sigma_h_next, sigma_corr_next
             )
             cache_next = _build_tail_cache(h0, sigma_h_next)
-            mu_neval_next = 0
         else:
-            mu, Gnext, cache_next, mu_neval_next = _solve_mu_matrix_fast(
+            mu, Gnext, cache_next, _ = _solve_mu_matrix_fast(
                 h0, sigma_h_next, sigma_corr_next, grid,
                 float(opts.target_filling), mu, mu_tol_next, opts.mu_max_iter,
             )
@@ -188,7 +189,6 @@ def solve_matrix_gw_dynamic_sosex(
         sigma_corr = sigma_corr_next
         G = Gnext
         tail_cache = cache_next
-        mu_neval = mu_neval_next
         mu_tol_used = mu_tol_next
 
     mu, G, tail_cache, mu_neval_final = _strict_refine_fixed_filling(
@@ -214,7 +214,7 @@ def solve_matrix_gw_dynamic_sosex(
 
     if opts.verbose and opts.target_filling is not None:
         print(
-            f"SC-GW+dSOSEX strict mu refine: mu={mu:.10f}, "
+            f"SC-GW+dynamic exchange strict mu refine: mu={mu:.10f}, "
             f"n={np.sum(density):.10f}, mu_eval={mu_neval_final}, "
             f"residual={err:.3e}, mu_tol_last={mu_tol_used:.3e}"
         )
@@ -232,6 +232,7 @@ def solve_matrix_gw_dynamic_sosex(
         Sigma_SOX=np.asarray(parts.Sigma_SOX),
         Sigma_WpV=np.asarray(parts.Sigma_WpV),
         Sigma_VWp=np.asarray(parts.Sigma_VWp),
+        Sigma_WpWp=np.asarray(parts.Sigma_WpWp),
         mu=float(mu), density=np.asarray(density), converged=converged,
         iterations=int(it), final_error=float(err), mixing_method=method,
         dynamic_sosex_mode=str(dsosex_opts.mode),
