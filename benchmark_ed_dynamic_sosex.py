@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Compare ED, SC-GW, static oneW-sym, and fully dynamic SOSEX backgrounds.
+"""Compare ED, SC-GW, static oneW-sym, dynamic SOSEX, and full G3W2 backgrounds.
 
 The intended production case is the exactly geometry-matched 2x1 Ruby torus
-represented as one 12-orbital cell (nk=1).  Dynamic SOSEX keeps the full
-W(iOmega) dependence on its screened line.  No covariant/post correction is
-performed here: this script tests whether the background Green function itself
-improves once the static W(0) approximation is removed.
+represented as one 12-orbital cell (nk=1).  ``dynamic-mode=g3w2`` keeps two
+fully frequency-dependent screened W lines.  No covariant/post correction is
+performed here: this script tests the background Green function itself.
 """
 from __future__ import annotations
 
@@ -46,7 +45,10 @@ def _args():
     p.add_argument("--pulay-regularization", type=float, default=1e-9)
     p.add_argument("--backend", choices=["fft", "direct"], default="direct")
     p.add_argument("--nquad", type=int, default=128)
-    p.add_argument("--dynamic-mode", choices=["sosex", "2sosex"], default="sosex")
+    p.add_argument(
+        "--dynamic-mode", choices=["sosex", "2sosex", "g3w2"], default="sosex",
+        help="sosex=one dynamic W line; 2sosex=both mixed terms; g3w2=full dynamic W,W",
+    )
     p.add_argument("--max-full-sites", type=int, default=36)
     p.add_argument("--initial", choices=["static", "gw", "zero"], default="static")
     p.add_argument("--allow-unconverged", action="store_true")
@@ -113,9 +115,10 @@ def main():
         max_full_sites=args.max_full_sites,
     )
 
-    print("=== ED / GW / static oneW / dynamic SOSEX background benchmark ===")
+    print("=== ED / GW / static oneW / dynamic exchange background benchmark ===")
     print(f"V={args.V:g}, filling={args.filling:g}, T={args.T:g}, "
-          f"torus={args.L1}x{args.L2}, nw={args.nw}, nOmega={args.nomega}")
+          f"torus={args.L1}x{args.L2}, nw={args.nw}, nOmega={args.nomega}, "
+          f"mode={args.dynamic_mode}")
 
     print("\nsolving ordinary SC-GW ...")
     gw = solve_matrix_gw_fast(h0, Vq, grid, opts=gw_opts)
@@ -136,16 +139,17 @@ def main():
               f"r={static.final_error:.3e} mu={static.mu:+.10f}")
 
     initial = static if args.initial == "static" else (gw if args.initial == "gw" else None)
-    print("\nsolving fully frequency-dependent SOSEX ...")
+    print(f"\nsolving fully frequency-dependent {args.dynamic_mode} ...")
     dyn = solve_matrix_gw_dynamic_sosex(
         h0, Vq, grid, opts=gw_opts, dsosex_opts=dyn_opts, initial=initial
     )
     if not dyn.converged and not args.allow_unconverged:
-        raise RuntimeError(f"dynamic SOSEX failed: {dyn.final_error:.3e}")
+        raise RuntimeError(f"dynamic calculation failed: {dyn.final_error:.3e}")
     print(f"  dynamic: {'OK' if dyn.converged else 'FAIL'} iter={dyn.iterations} "
           f"r={dyn.final_error:.3e} mu={dyn.mu:+.10f}")
-    print(f"  max|Sigma_dSOSEX|={np.max(np.abs(dyn.Sigma_dSOSEX)):.6e}, "
-          f"mixed-line asym={dyn.mixed_line_relative_difference:.3e}")
+    print(f"  max|Sigma_exchange|={np.max(np.abs(dyn.Sigma_dSOSEX)):.6e}, "
+          f"max|Sigma_WpWp|={np.max(np.abs(dyn.Sigma_WpWp)):.6e}, "
+          f"mixed-line transpose asym={dyn.mixed_line_relative_difference:.3e}")
 
     Ged, _ = exact.green_iomega(1j*np.asarray(grid.omega), mu_ed, args.T)
     ggw, lgw = _green_errors(gw.G, Ged, grid, args.low_count)
@@ -188,10 +192,12 @@ def main():
         Sigma_GW_dynamic=np.asarray(dyn.Sigma_GW),
         Sigma_dSOSEX=np.asarray(dyn.Sigma_dSOSEX),
         Sigma_SOX=np.asarray(dyn.Sigma_SOX), Sigma_WpV=np.asarray(dyn.Sigma_WpV),
-        Sigma_VWp=np.asarray(dyn.Sigma_VWp), delta_sigma_ed_minus_dynamic=delta,
+        Sigma_VWp=np.asarray(dyn.Sigma_VWp), Sigma_WpWp=np.asarray(dyn.Sigma_WpWp),
+        delta_sigma_ed_minus_dynamic=delta,
         mixed_line_relative_difference=dyn.mixed_line_relative_difference,
         gerr_gw=ggw, gerr_low_gw=lgw, gerr_static=gs, gerr_low_static=ls,
         gerr_dynamic=gdyn, gerr_low_dynamic=ldyn,
+        dynamic_mode=args.dynamic_mode,
         dynamic_converged=dyn.converged, dynamic_residual=dyn.final_error,
     )
     print(f"\nsaved {outfile}")
