@@ -19,7 +19,7 @@ from rubycgw.supercell_gw_split import one_body_density_matrix_tail
 
 def test_density_channel_free_energy_matches_existing_split_gw():
     grid = MatsubaraGrid(nk1=1, nk2=1, nw=6, nOmega=3, T=0.17)
-    h0 = np.array([[[[0.15, -0.22], [-0.22, -0.08]]]]], dtype=complex)
+    h0 = np.array([[[[0.15, -0.22], [-0.22, -0.08]]]], dtype=complex)
     mu = 0.04
     sigma_static_guess = np.array([[0.11, 0.015], [0.015, -0.03]], dtype=complex)
     sigma_c = np.zeros((grid.nf, 1, 1, 2, 2), dtype=complex)
