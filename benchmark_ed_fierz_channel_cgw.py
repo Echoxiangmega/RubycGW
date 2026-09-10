@@ -4,6 +4,11 @@
 The microscopic Hamiltonian is unchanged. Only the GW resummation channel is
 changed. This is therefore a direct diagnostic of Fierz/channel ambiguity in
 the strong-coupling Ruby current response.
+
+Expensive ED reference data are cached persistently.  If the geometry,
+Hamiltonian, filling, temperature, and fermionic Matsubara grid are unchanged,
+a later run skips ED diagonalization and immediately proceeds to the requested
+GW/cGW modes.
 """
 from __future__ import annotations
 
@@ -11,6 +16,7 @@ import argparse
 from pathlib import Path
 import numpy as np
 
+from rubycgw.ed_benchmark_cache import load_ed_cache, save_ed_cache
 from rubycgw.fierz_channel_gw import (
     build_channel_definition,
     solve_channel_gw_same_torus,
@@ -57,6 +63,14 @@ def _args():
     p.add_argument("--allow-unconverged", action="store_true")
     p.add_argument("--verbose", action="store_true")
     p.add_argument(
+        "--ed-cache-dir", type=Path, default=Path("results/ed_cache"),
+        help="persistent directory for exact ED reference data",
+    )
+    p.add_argument(
+        "--refresh-ed-cache", action="store_true",
+        help="ignore an existing matching ED cache entry and recompute it",
+    )
+    p.add_argument(
         "--out", type=Path, default=Path("results/ed_fierz_channel_cgw")
     )
     return p.parse_args()
@@ -83,6 +97,22 @@ def _physical_chi(chi):
     return np.asarray(herm.real, dtype=float), float(np.max(np.abs(herm.imag)))
 
 
+def _ed_signature(args):
+    """Parameters that actually determine the cached ED reference data."""
+    return {
+        "L1": int(args.L1),
+        "L2": int(args.L2),
+        "V": float(args.V),
+        "filling": float(args.filling),
+        "T": float(args.T),
+        "ti": float(args.ti),
+        "t1": float(args.t1),
+        "t2": float(args.t2),
+        "nw": int(args.nw),
+        "channels": list(CHANNELS),
+    }
+
+
 def main():
     args = _args()
     if 6 * args.L1 * args.L2 > 16:
@@ -91,20 +121,56 @@ def main():
     target = float(args.filling) * ncell
 
     params = RubyParameters(ti=args.ti, t1=args.t1, t2=args.t2, V=args.V)
+    # Constructing the geometry is cheap and is still needed by GW.  The costly
+    # sector-by-sector diagonalization is done only on an ED cache miss.
     exact = ExactSmallRubyThermal(args.L1, args.L2, params)
-    exact.diagonalize(float(args.V))
-    mu_ed = exact.solve_mu(target, args.T)
     norb = int(exact.n_sites)
     grid = MatsubaraGrid(nk1=1, nk2=1, nw=args.nw, nOmega=args.nomega, T=args.T)
     h0 = np.asarray(exact.h0, dtype=complex)[None, None]
-
     operators = np.stack([
         np.asarray(exact.pseudospin_operator(ch, (0.0, 0.0)), dtype=complex)
         for ch in CHANNELS
     ])
-    chi_ed, _ = exact.static_susceptibility_matrix(operators, mu_ed, args.T)
-    chi_ed = np.asarray(chi_ed, dtype=float)
-    Ged, _ = exact.green_iomega(1j * np.asarray(grid.omega), mu_ed, args.T)
+
+    ed_signature = _ed_signature(args)
+    ed_cached = None
+    if not args.refresh_ed_cache:
+        ed_cached = load_ed_cache(
+            args.ed_cache_dir,
+            ed_signature,
+            np.asarray(grid.omega),
+            norb,
+        )
+
+    if ed_cached is not None:
+        mu_ed = float(ed_cached["mu_ed"])
+        Ged = np.asarray(ed_cached["G_ed"], dtype=complex)
+        chi_ed = np.asarray(ed_cached["chi_ed"], dtype=float)
+        ed_cache_path = Path(ed_cached["path"])
+        ed_cache_hit = True
+        print(f"ED cache hit: {ed_cache_path}")
+        print("skipping exact diagonalization / ED susceptibility / ED Green function")
+    else:
+        if args.refresh_ed_cache:
+            print("ED cache refresh requested; recomputing exact reference ...")
+        else:
+            print("ED cache miss; computing exact reference ...")
+        exact.diagonalize(float(args.V))
+        mu_ed = exact.solve_mu(target, args.T)
+        chi_ed, _ = exact.static_susceptibility_matrix(operators, mu_ed, args.T)
+        chi_ed = np.asarray(chi_ed, dtype=float)
+        Ged, _ = exact.green_iomega(1j * np.asarray(grid.omega), mu_ed, args.T)
+        Ged = np.asarray(Ged, dtype=complex)
+        ed_cache_path = save_ed_cache(
+            args.ed_cache_dir,
+            ed_signature,
+            np.asarray(grid.omega),
+            mu_ed,
+            Ged,
+            chi_ed,
+        )
+        ed_cache_hit = False
+        print(f"ED cache saved: {ed_cache_path}")
 
     gw_opts = GWOptions(
         target_filling=target,
@@ -149,6 +215,8 @@ def main():
         "mu_ed": mu_ed,
         "G_ed": np.asarray(Ged),
         "chi_ed": chi_ed,
+        "ed_cache_hit": bool(ed_cache_hit),
+        "ed_cache_path": np.asarray(str(ed_cache_path)),
     }
 
     for mode_in in args.modes:
