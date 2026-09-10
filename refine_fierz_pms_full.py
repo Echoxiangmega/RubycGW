@@ -11,9 +11,10 @@ For every sign change of dF/da, interpolate the stored fermionic state and
 
 The converged state is an interior stationary point in the full n/B/J Fierz
 simplex.  At that same two-dimensional PMS root this script evaluates the GW
-Luttinger-Ward Helmholtz free energy and the q=0 covariant-GW current response
-for ``z_same`` and ``z_opposite``.  ED reference values are reused from the
-upstream target NPZ when available; ED is not recomputed here.
+Luttinger-Ward Helmholtz free energy, Green-function error against ED, and the
+q=0 covariant-GW current response for ``z_same`` and ``z_opposite``.  ED
+reference values are reused from the upstream target NPZ when available; ED is
+not recomputed here.
 """
 from __future__ import annotations
 
@@ -60,6 +61,10 @@ def _args():
     p.add_argument("--vertex-tol", type=float, default=1e-8)
     p.add_argument("--vertex-gmres-restart", type=int, default=16)
     p.add_argument(
+        "--low-count", type=int, default=8,
+        help="number of lowest-|omega| Matsubara points used for Gerr_low",
+    )
+    p.add_argument(
         "--skip-chi", action="store_true",
         help="refine the full PMS root and free energy but skip the cGW vertex solve",
     )
@@ -84,12 +89,13 @@ def _load_meta(transverse_npz: Path):
         source_checkpoint = Path(str(np.asarray(d["source_checkpoint"]).item()))
         F_ed_pc = float(np.asarray(d["F_ed_per_cell"]).item()) if "F_ed_per_cell" in d else np.nan
         chi_ed = np.asarray(d["chi_ed"], dtype=float) if "chi_ed" in d else np.empty((0,), dtype=float)
+        G_ed = np.asarray(d["G_ed"], dtype=complex) if "G_ed" in d else np.empty((0,), dtype=complex)
     if not source_checkpoint.exists():
         raise RuntimeError(f"source checkpoint not found: {source_checkpoint}")
     with np.load(source_checkpoint, allow_pickle=False) as d:
         signature = str(np.asarray(d["signature"]).item())
     meta = json.loads(signature)
-    return V, root_index, a, s, Fa, X, source_target, meta, F_ed_pc, chi_ed
+    return V, root_index, a, s, Fa, X, source_target, meta, F_ed_pc, chi_ed, G_ed
 
 
 def _crossings(a, Fa):
@@ -164,6 +170,22 @@ def _relerr(a, b):
     return float(np.linalg.norm((aa - bb).ravel()) / den)
 
 
+def _green_errors(G, G_ed, grid, low_count):
+    """Match benchmark_fierz_pms_target.py definitions of Gerr and Gerr_low."""
+    arr = np.asarray(G, dtype=complex)
+    if arr.ndim == 5:
+        arr = arr[:, 0, 0]
+    exact = np.asarray(G_ed, dtype=complex)
+    if exact.size == 0:
+        return np.nan, np.nan
+    if arr.shape != exact.shape:
+        raise ValueError(
+            f"GW/ED Green-function shape mismatch: GW {arr.shape}, ED {exact.shape}"
+        )
+    idx = np.argsort(np.abs(np.asarray(grid.omega)))[:min(int(low_count), grid.nf)]
+    return _relerr(arr, exact), _relerr(arr[idx], exact[idx])
+
+
 def _write_csv(path, rows):
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
@@ -173,8 +195,10 @@ def _write_csv(path, rows):
 
 def main():
     args = _args()
+    if args.low_count < 1:
+        raise ValueError("--low-count must be positive")
     (
-        V, root_index, a, s, Fa, X, source_target, meta, F_ed_pc, chi_ed
+        V, root_index, a, s, Fa, X, source_target, meta, F_ed_pc, chi_ed, G_ed
     ) = _load_meta(args.transverse_npz)
     if X.shape[0] != len(a) or len(s) != len(a) or len(Fa) != len(a):
         raise RuntimeError("transverse arrays have inconsistent lengths")
@@ -218,6 +242,8 @@ def main():
     print("=== Exact full-simplex Fierz-PMS refinement + cGW response ===")
     print(f"source={args.transverse_npz}")
     print(f"V={V:g}, source root={root_index}, sign-change candidates={len(brackets)}")
+    if G_ed.size:
+        print(f"ED reference G loaded: shape={G_ed.shape}, low-count={args.low_count}")
     if chi_ed.shape == (2, 2):
         print(f"ED reference chi=({chi_ed[0,0]:.9f},{chi_ed[1,1]:.9f})")
     if np.isfinite(F_ed_pc):
@@ -277,6 +303,8 @@ def main():
         bg = _make_background(
             problem, definition, ev, root, sigma_static, sigma_c, mu
         )
+        gerr, gerr_low = _green_errors(bg.G, G_ed, grid, args.low_count)
+        print(f"      Gerr={gerr:.6e}, Gerr_low={gerr_low:.6e}")
 
         chi_raw = np.full((2, 2), np.nan + 0j, dtype=complex)
         chi = np.full((2, 2), np.nan, dtype=float)
@@ -329,6 +357,8 @@ def main():
             "F_per_cell": f"{Fpc:.16g}",
             "F_ED_per_cell": f"{F_ed_pc:.16g}",
             "F_minus_ED_per_cell": f"{Ferr:.16g}",
+            "Gerr": f"{gerr:.16g}",
+            "Gerr_low": f"{gerr_low:.16g}",
             "chi_same": f"{chi[0,0]:.16g}",
             "chi_opposite": f"{chi[1,1]:.16g}",
             "chi_relerr": f"{chi_err:.16g}",
@@ -383,6 +413,9 @@ def main():
         F_gw=np.asarray([z["F"] for z in saved]),
         F_gw_per_cell=np.asarray([z["F_per_cell"] for z in saved]),
         F_ed_per_cell=float(F_ed_pc),
+        Gerr=np.asarray([float(r["Gerr"]) for r in rows]),
+        Gerr_low=np.asarray([float(r["Gerr_low"]) for r in rows]),
+        G_ed=np.asarray(G_ed),
         chi=np.stack([z["chi"] for z in saved]),
         chi_raw=np.stack([z["chi_raw"] for z in saved]),
         chi_same=np.asarray([float(r["chi_same"]) for r in rows]),
