@@ -2,7 +2,7 @@ import numpy as np
 
 from rubycgw.fierz_pac import FierzStateCodec
 from rubycgw.grids import MatsubaraGrid
-from rubycgw.pseudo_arclength import PACOptions, pseudo_arclength_step
+from rubycgw.pseudo_arclength import PACOptions, pseudo_arclength_step, refine_fixed_parameter
 
 
 def test_pseudo_arclength_crosses_simple_fold():
@@ -25,6 +25,23 @@ def test_pseudo_arclength_crosses_simple_fold():
     assert out.converged
     assert out.x[0] < 0.0
     assert abs(out.x[0] ** 2 + out.parameter - 1.0) < 1e-9
+
+
+def test_fixed_parameter_refinement_hits_requested_parameter_root():
+    def residual(x, p):
+        return np.asarray([x[0] ** 2 + p - 1.0])
+
+    target = 0.75
+    out = refine_fixed_parameter(
+        np.asarray([0.45]), target, residual,
+        opts=PACOptions(
+            tol=1e-12, max_newton=12, fd_eps=1e-7,
+            gmres_rtol=1e-10, gmres_maxiter=20, gmres_restart=5,
+        ),
+    )
+    assert out.converged
+    assert abs(out.x[0] - 0.5) < 1e-9
+    assert abs(residual(out.x, target)[0]) < 1e-10
 
 
 def test_fierz_state_codec_roundtrip_preserves_physical_symmetry():
