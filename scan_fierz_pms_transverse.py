@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """Scan away from the symmetric B=J PMS line at fixed physical V.
 
-Input is the NPZ produced by ``benchmark_fierz_pms_target.py``.  For each chosen
+Input is the NPZ produced by ``benchmark_fierz_pms_target.py``. For each chosen
 PMS root, define
 
     s = lambda_B + lambda_J,
     a = lambda_B - lambda_J,
 
-and use ``a`` as the scan coordinate.  At every accepted a the fermionic GW state
+and use ``a`` as the scan coordinate. At every accepted a the fermionic GW state
 and s are re-solved self-consistently from
 
     R_GW = 0,
     dF/ds = 0.
 
 The reported transverse derivative dF/da therefore tests the missing Fierz
-direction without freezing the longitudinal PMS coordinate.  A sign change of
-dF/da is a candidate for a true full-simplex stationary point; at such a point
-both dF/ds and dF/da vanish.
+direction without freezing the longitudinal PMS coordinate. By default the scan
+stops as soon as two consecutive accepted points on the same continued branch
+bracket a zero of dF/da. Partial CSV/NPZ output is written after every accepted
+point, so an expensive scan always leaves a usable checkpoint. Use ``--scan-full``
+only when the full longitudinal-PMS branch is explicitly needed.
 """
 from __future__ import annotations
 
@@ -58,16 +60,25 @@ def _args():
     p.add_argument("--gmres-restart", type=int, default=20)
     p.add_argument("--line-search-min", type=float, default=1.0 / 4096.0)
     p.add_argument("--screening-floor", type=float, default=1e-8)
+    p.add_argument(
+        "--scan-full",
+        action="store_true",
+        help="continue to the requested endpoint after a dF/da crossing; default stops at first crossing",
+    )
     p.add_argument("--out", type=Path, default=Path("results/fierz_pms_transverse"))
     p.add_argument("--verbose", action="store_true")
     return p.parse_args()
 
 
 def _write_csv(path: Path, rows):
-    with path.open("w", newline="", encoding="utf-8") as f:
+    if not rows:
+        return
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
         w.writerows(rows)
+    tmp.replace(path)
 
 
 def _source_meta(target_npz: Path):
@@ -162,14 +173,99 @@ def _solve_at_a(solver, x_guess, s_guess, a, opts, screening_floor):
     return np.asarray(root.x), np.asarray(x), float(s), ev, diag, root
 
 
+def _crosses_zero(f0, f1):
+    f0 = float(f0)
+    f1 = float(f1)
+    if not (np.isfinite(f0) and np.isfinite(f1)):
+        return False
+    return f0 == 0.0 or f1 == 0.0 or np.signbit(f0) != np.signbit(f1)
+
+
+def _root_paths(args, ir):
+    stem = args.target_npz.stem
+    csvfile = args.out / f"{stem}_root{ir}_transverse.csv"
+    npzfile = args.out / f"{stem}_root{ir}_transverse.npz"
+    return csvfile, npzfile
+
+
+def _save_root_outputs(*, args, ir, V, points, solver, crossing=None, scan_complete=False):
+    """Atomically update per-root CSV/NPZ from all accepted points so far."""
+    if not points:
+        return [], None, None
+
+    ordered = sorted(points, key=lambda z: z[0])
+    rows = []
+    for seq, (a, y, x, s, ev, diag, root, direction) in enumerate(ordered):
+        rows.append(_point_row(ir, seq, direction, a, y, ev, diag, solver))
+
+    csvfile, npzfile = _root_paths(args, ir)
+    _write_csv(csvfile, rows)
+
+    if crossing is None:
+        crossing_a = np.empty(0, dtype=float)
+        crossing_Fa = np.empty(0, dtype=float)
+        crossing_s = np.empty(0, dtype=float)
+        crossing_X_base = np.empty((0, np.asarray(ordered[0][2], dtype=float).size), dtype=float)
+        crossing_Y = np.empty((0, np.asarray(ordered[0][1], dtype=float).size), dtype=float)
+    else:
+        left, right = crossing
+        crossing_a = np.asarray([float(left[0]), float(right[0])], dtype=float)
+        crossing_Fa = np.asarray(
+            [float(left[5].dF_da_per_cell), float(right[5].dF_da_per_cell)], dtype=float
+        )
+        crossing_s = np.asarray([float(left[3]), float(right[3])], dtype=float)
+        crossing_X_base = np.stack(
+            [np.asarray(left[2], dtype=float), np.asarray(right[2], dtype=float)]
+        )
+        crossing_Y = np.stack(
+            [np.asarray(left[1], dtype=float), np.asarray(right[1], dtype=float)]
+        )
+
+    tmp_npz = npzfile.with_name(npzfile.stem + ".tmp.npz")
+    save_npz = np.savez_compressed if scan_complete else np.savez
+    save_npz(
+        tmp_npz,
+        V=float(V),
+        root=int(ir),
+        a=np.asarray([float(r["a"]) for r in rows]),
+        s=np.asarray([float(r["s"]) for r in rows]),
+        lambda_n=np.asarray([float(r["lambda_n"]) for r in rows]),
+        lambda_B=np.asarray([float(r["lambda_B"]) for r in rows]),
+        lambda_J=np.asarray([float(r["lambda_J"]) for r in rows]),
+        F_per_cell=np.asarray([float(r["F_per_cell"]) for r in rows]),
+        dF_ds_per_cell=np.asarray([float(r["dF_ds_per_cell"]) for r in rows]),
+        dF_da_per_cell=np.asarray([float(r["dF_da_per_cell"]) for r in rows]),
+        gB_per_cell=np.asarray([float(r["gB_per_cell"]) for r in rows]),
+        gJ_per_cell=np.asarray([float(r["gJ_per_cell"]) for r in rows]),
+        gradient_norm_per_cell=np.asarray([float(r["gradient_norm_per_cell"]) for r in rows]),
+        d2F_da2_per_cell=np.asarray([float(r["d2F_da2_per_cell"]) for r in rows]),
+        X_base=np.stack([np.asarray(z[2], dtype=float) for z in ordered]),
+        Y_longitudinal=np.stack([np.asarray(z[1], dtype=float) for z in ordered]),
+        direction=np.asarray([str(z[7]) for z in ordered]),
+        crossing_found=np.asarray(crossing is not None),
+        crossing_a=crossing_a,
+        crossing_Fa_per_cell=crossing_Fa,
+        crossing_s=crossing_s,
+        crossing_X_base=crossing_X_base,
+        crossing_Y_longitudinal=crossing_Y,
+        scan_complete=np.asarray(bool(scan_complete)),
+        stopped_on_crossing=np.asarray(crossing is not None and not args.scan_full),
+        source_target_npz=np.asarray(str(args.target_npz)),
+    )
+    tmp_npz.replace(npzfile)
+    return rows, csvfile, npzfile
+
+
 def _scan_direction(
-    *, root_index, sign, endpoint, solver, x0, s0, opts, args,
+    *, root_index, sign, endpoint, solver, x0, s0, origin, opts, args, on_accept,
 ):
+    """Continue one direction until endpoint, failure floor, or first Fa crossing."""
     direction = "positive" if sign > 0 else "negative"
     accepted = []
     current_a = 0.0
     current_x = np.asarray(x0, dtype=float)
     current_s = float(s0)
+    previous = origin
     step_nominal = float(args.a_step)
     step = step_nominal
     seq = 1
@@ -190,6 +286,7 @@ def _scan_direction(
             continue
 
         y, x, s, ev, diag, root = solved
+        item = (float(trial_a), y, x, s, ev, diag, root, direction)
         print(
             f"  {direction} {seq:02d}: a={trial_a:+.6f}, s={s:.6f}, "
             f"w=({ev.weights.density:.5f},{ev.weights.bond:.5f},{ev.weights.current:.5f}), "
@@ -197,13 +294,32 @@ def _scan_direction(
             f"|grad|={diag.gradient_norm_per_cell:.3e}, F/cell={ev.free_energy.free_energy_per_primitive_cell:+.9f}, "
             f"smin={ev.smin:.3e}"
         )
-        accepted.append((trial_a, y, x, s, ev, diag, root))
+
+        crossing = None
+        if _crosses_zero(previous[5].dF_da_per_cell, diag.dF_da_per_cell):
+            crossing = (previous, item)
+
+        accepted.append(item)
+        on_accept(item, crossing)
+
+        if crossing is not None:
+            print("  >>> transverse dF/da sign change bracketed on the continued PMS branch")
+            print(
+                f"      a={previous[0]:+.6f}->{item[0]:+.6f}: "
+                f"Fa={previous[5].dF_da_per_cell:+.4e}->{item[5].dF_da_per_cell:+.4e}"
+            )
+            if not args.scan_full:
+                print("  >>> saved checkpoint/bracket; stop this root immediately")
+                return accepted, crossing, True
+
+        previous = item
         current_a = float(trial_a)
         current_x = np.asarray(x)
         current_s = float(s)
         step = min(step_nominal, 1.25 * step)
         seq += 1
-    return accepted
+
+    return accepted, None, False
 
 
 def main():
@@ -264,7 +380,11 @@ def main():
     print(f"target={args.target_npz}")
     print(f"source checkpoint={source_checkpoint}")
     print(f"V={V:g}, roots={roots}, direction={args.direction}, da={args.a_step:g}, fd_h={fd_h:g}")
-    print("At each a: solve R_GW=0 and dF/ds=0; monitor dF/da.\n")
+    print("At each a: solve R_GW=0 and dF/ds=0; monitor dF/da.")
+    if args.scan_full:
+        print("scan mode: FULL branch (--scan-full); crossings are saved but do not stop the scan.\n")
+    else:
+        print("scan mode: STOP at first dF/da crossing; checkpoint after every accepted point.\n")
 
     for ir in roots:
         base_x, _, lam = pms.codec.decode(Y[ir])
@@ -280,81 +400,119 @@ def main():
             f"dF/da={diag0.dF_da_per_cell:+.9e}, |grad|={diag0.gradient_norm_per_cell:.3e}, "
             f"F/cell={ev0.free_energy.free_energy_per_primitive_cell:+.12e}"
         )
-        points = [(0.0, y0, x0, s0_ref, ev0, diag0, root0, "origin")]
+
+        origin = (0.0, y0, x0, s0_ref, ev0, diag0, root0, "origin")
+        points = [origin]
+        root_crossing = None
+
+        # Write the first usable NPZ immediately, before any expensive transverse step.
+        root_rows, csvfile, npzfile = _save_root_outputs(
+            args=args,
+            ir=ir,
+            V=V,
+            points=points,
+            solver=solver,
+            crossing=None,
+            scan_complete=False,
+        )
+        print(f"  checkpoint {npzfile}")
+
+        if float(diag0.dF_da_per_cell) == 0.0 and not args.scan_full:
+            print("  >>> a=0 already has dF/da=0; no transverse scan is needed")
+            _save_root_outputs(
+                args=args,
+                ir=ir,
+                V=V,
+                points=points,
+                solver=solver,
+                crossing=(origin, origin),
+                scan_complete=True,
+            )
+            all_rows.extend(root_rows)
+            if not args.scan_full:
+                print("  >>> first full-PMS zero found; stop the entire scan")
+                break
+            continue
+
         endpoint_abs = float(args.a_max_frac) * float(s0_ref)
 
+        def on_accept(item, crossing):
+            nonlocal root_crossing
+            points.append(item)
+            if crossing is not None and root_crossing is None:
+                root_crossing = crossing
+            _save_root_outputs(
+                args=args,
+                ir=ir,
+                V=V,
+                points=points,
+                solver=solver,
+                crossing=root_crossing,
+                scan_complete=False,
+            )
+
+        stopped_on_crossing = False
         if args.direction in ("positive", "both"):
-            for item in _scan_direction(
+            _, crossing, stopped = _scan_direction(
                 root_index=ir,
                 sign=+1.0,
                 endpoint=endpoint_abs,
                 solver=solver,
                 x0=x0,
                 s0=s0_ref,
+                origin=origin,
                 opts=opts,
                 args=args,
-            ):
-                points.append((*item, "positive"))
-        if args.direction in ("negative", "both"):
-            for item in _scan_direction(
+                on_accept=on_accept,
+            )
+            if crossing is not None and root_crossing is None:
+                root_crossing = crossing
+            stopped_on_crossing = stopped
+
+        if not stopped_on_crossing and args.direction in ("negative", "both"):
+            _, crossing, stopped = _scan_direction(
                 root_index=ir,
                 sign=-1.0,
                 endpoint=-endpoint_abs,
                 solver=solver,
                 x0=x0,
                 s0=s0_ref,
+                origin=origin,
                 opts=opts,
                 args=args,
-            ):
-                points.append((*item, "negative"))
+                on_accept=on_accept,
+            )
+            if crossing is not None and root_crossing is None:
+                root_crossing = crossing
+            stopped_on_crossing = stopped
 
-        points.sort(key=lambda z: z[0])
-        prev = None
-        crossings = []
-        root_rows = []
-        for seq, (a, y, x, s, ev, diag, root, direction) in enumerate(points):
-            row = _point_row(ir, seq, direction, a, y, ev, diag, solver)
-            root_rows.append(row)
-            all_rows.append(row)
-            if prev is not None:
-                a0, f0 = prev
-                f1 = float(diag.dF_da_per_cell)
-                if f0 == 0.0 or f1 == 0.0 or np.signbit(f0) != np.signbit(f1):
-                    crossings.append((a0, a, f0, f1))
-            prev = (float(a), float(diag.dF_da_per_cell))
+        root_rows, csvfile, npzfile = _save_root_outputs(
+            args=args,
+            ir=ir,
+            V=V,
+            points=points,
+            solver=solver,
+            crossing=root_crossing,
+            scan_complete=True,
+        )
+        all_rows.extend(root_rows)
 
-        if crossings:
-            print("  transverse dF/da sign-change candidates:")
-            for a0, a1, f0, f1 in crossings:
-                print(f"    a={a0:+.6f}->{a1:+.6f}: Fa={f0:+.4e}->{f1:+.4e}")
+        if root_crossing is not None:
+            left, right = root_crossing
+            print("  transverse dF/da sign-change candidate saved:")
+            print(
+                f"    a={left[0]:+.6f}->{right[0]:+.6f}: "
+                f"Fa={left[5].dF_da_per_cell:+.4e}->{right[5].dF_da_per_cell:+.4e}"
+            )
         else:
             print("  no transverse dF/da sign change on scanned longitudinal-PMS manifold")
 
-        stem = args.target_npz.stem
-        csvfile = args.out / f"{stem}_root{ir}_transverse.csv"
-        npzfile = args.out / f"{stem}_root{ir}_transverse.npz"
-        _write_csv(csvfile, root_rows)
-        np.savez_compressed(
-            npzfile,
-            V=float(V),
-            root=int(ir),
-            a=np.asarray([float(r["a"]) for r in root_rows]),
-            s=np.asarray([float(r["s"]) for r in root_rows]),
-            lambda_n=np.asarray([float(r["lambda_n"]) for r in root_rows]),
-            lambda_B=np.asarray([float(r["lambda_B"]) for r in root_rows]),
-            lambda_J=np.asarray([float(r["lambda_J"]) for r in root_rows]),
-            F_per_cell=np.asarray([float(r["F_per_cell"]) for r in root_rows]),
-            dF_ds_per_cell=np.asarray([float(r["dF_ds_per_cell"]) for r in root_rows]),
-            dF_da_per_cell=np.asarray([float(r["dF_da_per_cell"]) for r in root_rows]),
-            gB_per_cell=np.asarray([float(r["gB_per_cell"]) for r in root_rows]),
-            gJ_per_cell=np.asarray([float(r["gJ_per_cell"]) for r in root_rows]),
-            gradient_norm_per_cell=np.asarray([float(r["gradient_norm_per_cell"]) for r in root_rows]),
-            d2F_da2_per_cell=np.asarray([float(r["d2F_da2_per_cell"]) for r in root_rows]),
-            X_base=np.stack([np.asarray(z[2], dtype=float) for z in points]),
-            source_target_npz=np.asarray(str(args.target_npz)),
-        )
         print(f"  saved {csvfile}")
         print(f"  saved {npzfile}\n")
+
+        if stopped_on_crossing and not args.scan_full:
+            print("first transverse crossing found; stop the entire scan.")
+            break
 
     if all_rows:
         combined = args.out / f"{args.target_npz.stem}_transverse_allroots.csv"
