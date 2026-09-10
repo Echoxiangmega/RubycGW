@@ -5,6 +5,11 @@ canonical parameter signature and the fermionic Matsubara grid match exactly.
 This keeps ED reference data separate from the approximate solver settings, so
 changing GW mixing, channel choice, vertex tolerance, or nOmega does not force
 ED to be recomputed.
+
+Thermodynamic fields are optional and backward compatible.  Older cache entries
+containing only mu/G/chi remain valid; callers that need exact Omega/F can detect
+missing fields, compute them once, and rewrite the same cache entry with the
+additional scalars.
 """
 from __future__ import annotations
 
@@ -59,6 +64,9 @@ def load_ed_cache(
             mu_ed = float(np.asarray(data["mu_ed"]).item())
             G_ed = np.asarray(data["G_ed"], dtype=complex)
             chi_ed = np.asarray(data["chi_ed"], dtype=float)
+            omega_ed = float(np.asarray(data["omega_ed"]).item()) if "omega_ed" in data else np.nan
+            F_ed = float(np.asarray(data["F_ed"]).item()) if "F_ed" in data else np.nan
+            N_ed = float(np.asarray(data["N_ed"]).item()) if "N_ed" in data else np.nan
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
@@ -78,6 +86,10 @@ def load_ed_cache(
         "mu_ed": mu_ed,
         "G_ed": G_ed,
         "chi_ed": chi_ed,
+        "omega_ed": omega_ed,
+        "F_ed": F_ed,
+        "N_ed": N_ed,
+        "has_thermo": bool(np.isfinite(omega_ed) and np.isfinite(F_ed) and np.isfinite(N_ed)),
     }
 
 
@@ -88,6 +100,10 @@ def save_ed_cache(
     mu_ed: float,
     G_ed: np.ndarray,
     chi_ed: np.ndarray,
+    *,
+    omega_ed: float | None = None,
+    F_ed: float | None = None,
+    N_ed: float | None = None,
 ) -> Path:
     """Atomically save an ED reference result and return its cache path."""
     path = ed_cache_path(cache_dir, signature)
@@ -95,15 +111,21 @@ def save_ed_cache(
     fd, tmp_name = tempfile.mkstemp(prefix=path.stem + ".", suffix=".npz", dir=path.parent)
     os.close(fd)
     tmp_path = Path(tmp_name)
+    payload = {
+        "signature_json": np.asarray(canonical_ed_signature(signature)),
+        "omega": np.asarray(omega, dtype=float),
+        "mu_ed": float(mu_ed),
+        "G_ed": np.asarray(G_ed, dtype=complex),
+        "chi_ed": np.asarray(chi_ed, dtype=float),
+    }
+    if omega_ed is not None:
+        payload["omega_ed"] = float(omega_ed)
+    if F_ed is not None:
+        payload["F_ed"] = float(F_ed)
+    if N_ed is not None:
+        payload["N_ed"] = float(N_ed)
     try:
-        np.savez_compressed(
-            tmp_path,
-            signature_json=np.asarray(canonical_ed_signature(signature)),
-            omega=np.asarray(omega, dtype=float),
-            mu_ed=float(mu_ed),
-            G_ed=np.asarray(G_ed, dtype=complex),
-            chi_ed=np.asarray(chi_ed, dtype=float),
-        )
+        np.savez_compressed(tmp_path, **payload)
         os.replace(tmp_path, path)
     finally:
         if tmp_path.exists():
