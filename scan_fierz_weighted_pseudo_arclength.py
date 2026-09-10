@@ -13,6 +13,8 @@ an independent GW approximation/branch continuation, seeded at weak coupling.
 
 This is a branch solver, not a free-energy selector: PAC follows every connected
 fixed point it encounters, including stable, metastable and unstable segments.
+Every accepted codec state X is also persisted in a separate *_states.npz
+archive so arbitrary V crossings can be reconstructed after a long run.
 """
 from __future__ import annotations
 
@@ -23,6 +25,13 @@ from pathlib import Path
 
 import numpy as np
 
+from rubycgw.branch_state_archive import (
+    BranchStateArchive,
+    append_state_in_memory,
+    load_branch_state_archive,
+    save_branch_state_archive,
+    states_match,
+)
 from rubycgw.fierz_channel_gw import solve_channel_gw_same_torus
 from rubycgw.fierz_mixed import (
     WeightedFierzGWResidual,
@@ -159,6 +168,43 @@ def _save_checkpoint(path, signature, problem, x_prev, V_prev, x_curr, V_curr, d
     )
 
 
+def _metadata_for_last_two(rows):
+    if len(rows) >= 2:
+        return (
+            [int(rows[-2]["step"]), int(rows[-1]["step"])],
+            [str(rows[-2]["kind"]), str(rows[-1]["kind"])],
+        )
+    return ([-1, 0], ["resume", "resume"])
+
+
+def _legacy_archive(signature, rows, x_prev, V_prev, x_curr, V_curr):
+    steps, kinds = _metadata_for_last_two(rows)
+    return BranchStateArchive(
+        str(signature),
+        np.asarray(steps, dtype=np.int64),
+        np.asarray(kinds, dtype=str),
+        np.asarray([V_prev, V_curr], dtype=float),
+        np.stack([np.asarray(x_prev, dtype=float), np.asarray(x_curr, dtype=float)]),
+    )
+
+
+def _sync_archive_with_checkpoint(archive, rows, x_prev, V_prev, x_curr, V_curr):
+    """Repair the only expected interrupted-write case: archive one point behind."""
+    if states_match(archive.X[-1], archive.V[-1], x_curr, V_curr):
+        return archive
+    if states_match(archive.X[-1], archive.V[-1], x_prev, V_prev):
+        if rows:
+            step = int(rows[-1]["step"])
+            kind = str(rows[-1]["kind"])
+        else:
+            step = int(archive.step[-1]) + 1
+            kind = "resume"
+        return append_state_in_memory(archive, step, kind, V_curr, x_curr)
+    raise RuntimeError(
+        "full-state archive and resume checkpoint disagree; refusing to corrupt branch history"
+    )
+
+
 def _run_lambda(args, lam, geometry, h0, grid, target, norb, operators, pac_opts):
     weights = weights_from_lambda(lam)
     problem = WeightedFierzGWResidual(
@@ -172,6 +218,7 @@ def _run_lambda(args, lam, geometry, h0, grid, target, norb, operators, pac_opts
     )
     checkpoint = args.out / f"{tag}_checkpoint.npz"
     history_file = args.out / f"{tag}_history.csv"
+    states_file = args.out / f"{tag}_states.npz"
     signature = _signature(args, norb, target, lam, weights)
 
     print("\n" + "=" * 78)
@@ -187,17 +234,48 @@ def _run_lambda(args, lam, geometry, h0, grid, target, norb, operators, pac_opts
 
     rows = []
     if args.resume and checkpoint.exists():
-        data = np.load(checkpoint, allow_pickle=False)
-        got = str(np.asarray(data["signature"]).item())
-        if got != signature:
-            raise RuntimeError(f"checkpoint parameters do not match lambda={lam:g} run")
-        x_prev = np.asarray(data["x_prev"], dtype=float)
-        V_prev = float(data["V_prev"])
-        x_curr = np.asarray(data["x_curr"], dtype=float)
-        V_curr = float(data["V_curr"])
-        ds = float(data["ds"])
+        with np.load(checkpoint, allow_pickle=False) as data:
+            got = str(np.asarray(data["signature"]).item())
+            if got != signature:
+                raise RuntimeError(f"checkpoint parameters do not match lambda={lam:g} run")
+            x_prev = np.asarray(data["x_prev"], dtype=float)
+            V_prev = float(data["V_prev"])
+            x_curr = np.asarray(data["x_curr"], dtype=float)
+            V_curr = float(data["V_curr"])
+            ds = float(data["ds"])
         rows = _read_history(history_file)
-        print(f"resume: V_prev={V_prev:.9f}, V_curr={V_curr:.9f}, ds={ds:.5g}")
+        if states_file.exists():
+            archive = load_branch_state_archive(
+                states_file,
+                expected_signature=signature,
+                expected_state_size=problem.codec.size,
+            )
+            before = archive.nstate
+            archive = _sync_archive_with_checkpoint(
+                archive, rows, x_prev, V_prev, x_curr, V_curr
+            )
+            if archive.nstate != before:
+                save_branch_state_archive(
+                    states_file, archive.signature, archive.step, archive.kind,
+                    archive.V, archive.X,
+                )
+                print("resume: repaired full-state archive from newer checkpoint")
+        else:
+            archive = _legacy_archive(
+                signature, rows, x_prev, V_prev, x_curr, V_curr
+            )
+            save_branch_state_archive(
+                states_file, archive.signature, archive.step, archive.kind,
+                archive.V, archive.X,
+            )
+            print(
+                "resume: legacy checkpoint had no full-X archive; "
+                "recording starts from its last two states"
+            )
+        print(
+            f"resume: V_prev={V_prev:.9f}, V_curr={V_curr:.9f}, ds={ds:.5g}, "
+            f"full-X states={archive.nstate}"
+        )
     else:
         seed_opts = GWOptions(
             target_filling=target, max_iter=args.seed_max_iter, tol=args.seed_tol,
@@ -232,9 +310,20 @@ def _run_lambda(args, lam, geometry, h0, grid, target, norb, operators, pac_opts
         x_prev, V_prev, _ = seeds[0]
         x_curr, V_curr, ev_curr = seeds[1]
         ds = float(args.ds)
+        archive = BranchStateArchive(
+            str(signature),
+            np.asarray([0, 1], dtype=np.int64),
+            np.asarray(["seed", "seed"], dtype=str),
+            np.asarray([V_prev, V_curr], dtype=float),
+            np.stack([np.asarray(x_prev, dtype=float), np.asarray(x_curr, dtype=float)]),
+        )
         _write_history(history_file, rows)
         _save_checkpoint(
             checkpoint, signature, problem, x_prev, V_prev, x_curr, V_curr, ds, ev_curr
+        )
+        save_branch_state_archive(
+            states_file, archive.signature, archive.step, archive.kind,
+            archive.V, archive.X,
         )
 
     direction = np.sign(float(args.V_second) - float(args.V_start))
@@ -311,6 +400,13 @@ def _run_lambda(args, lam, geometry, h0, grid, target, norb, operators, pac_opts
         _save_checkpoint(
             checkpoint, signature, problem, x_prev, V_prev, x_curr, V_curr, ds, ev
         )
+        archive = append_state_in_memory(
+            archive, step_index, "pac", V_curr, x_curr
+        )
+        save_branch_state_archive(
+            states_file, archive.signature, archive.step, archive.kind,
+            archive.V, archive.X,
+        )
         step_index += 1
 
         if direction * (V_curr - float(args.V_stop)) >= 0.0:
@@ -320,6 +416,7 @@ def _run_lambda(args, lam, geometry, h0, grid, target, norb, operators, pac_opts
 
     print(f"history: {history_file}")
     print(f"checkpoint: {checkpoint}")
+    print(f"full-X states: {states_file} ({archive.nstate} states)")
     return reached
 
 
