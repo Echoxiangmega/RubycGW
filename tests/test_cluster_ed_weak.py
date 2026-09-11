@@ -1,7 +1,9 @@
 import numpy as np
 
+from benchmark_cluster_ed_weak_chi import _choose_ed_method
 from rubycgw.gf2 import second_order_bare_interaction
 from rubycgw.cluster_ed_weak_fast import canonical_weak_solver
+from rubycgw.cluster_ed_weak_covariant import solve_cluster_source_warm_weak
 from run_cluster_ed_weak import _resolved_mesh
 
 
@@ -10,6 +12,10 @@ class _Args:
     Ly = 2
     nk1 = None
     nk2 = None
+
+
+class _EDArgs:
+    ed_mode = "auto"
 
 
 def test_weak_solver_names():
@@ -33,3 +39,11 @@ def test_second_order_bare_interaction_is_v_plus_vpv():
     got = second_order_bare_interaction(P, V)
     expected = V[None] + V[None] @ P @ V[None]
     np.testing.assert_allclose(got, expected, atol=1e-14, rtol=1e-14)
+
+
+def test_ed_auto_skips_when_kmesh_differs_from_finite_torus():
+    assert _choose_ed_method(_EDArgs(), 2, 1, 2.0, False) == "none"
+
+
+def test_generic_source_solver_symbol_is_callable():
+    assert callable(solve_cluster_source_warm_weak)
