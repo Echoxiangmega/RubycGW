@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
 import hashlib
 import json
 from pathlib import Path
+import sys
 
 import numpy as np
 
@@ -20,6 +22,29 @@ from rubycgw.small_cluster_exact import ExactSmallRubyThermal
 
 
 _CACHE_VERSION = 1
+
+
+class _ClusterEDGWLogFilter:
+    """Pass through normal stdout, but keep only residual lines from cluster ED+GW."""
+
+    def __init__(self, stream):
+        self.stream = stream
+        self._buffer = ""
+
+    def write(self, text):
+        text = str(text)
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if (
+                not line.startswith("[cluster-ED+GW]")
+                or (" outer " in line and "residual=" in line)
+            ):
+                self.stream.write(line + "\n")
+        return len(text)
+
+    def flush(self):
+        self.stream.flush()
 
 
 def _args():
@@ -287,15 +312,18 @@ def main():
         f"embed_mix={args.embed_mixing_method}",
         flush=True,
     )
-    result = solve_cluster_ed_gw_fast(
-        h0,
-        Vq,
-        params,
-        grid,
-        gw_opts=gw_opts,
-        embed_opts=embed_opts,
-        background=background,
-    )
+    log_filter = _ClusterEDGWLogFilter(sys.stdout)
+    with redirect_stdout(log_filter):
+        result = solve_cluster_ed_gw_fast(
+            h0,
+            Vq,
+            params,
+            grid,
+            gw_opts=gw_opts,
+            embed_opts=embed_opts,
+            background=background,
+        )
+    log_filter.flush()
     if use_cache and (background is None or args.refresh_cache):
         _save_gw_cache(gw_cache, result.background)
         print(f"[cache] SC-GW saved: {gw_cache}", flush=True)
