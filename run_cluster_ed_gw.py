@@ -65,9 +65,13 @@ def _args():
     p.add_argument("--gw-mixing", type=float, default=0.25)
     p.add_argument("--gw-mixing-method", choices=("linear", "pulay"), default="pulay")
 
-    p.add_argument("--embed-max", type=int, default=30)
+    # The coupled cluster/impurity fixed point is smooth but appreciably slower
+    # than the initial lattice GW solve.  The V=1, L=2x1 benchmark contracts
+    # monotonically with no Pulay safeguard hits, so use a less conservative
+    # Pulay damping and leave enough outer iterations to reach the requested tol.
+    p.add_argument("--embed-max", type=int, default=100)
     p.add_argument("--embed-tol", type=float, default=2e-5)
-    p.add_argument("--embed-mixing", type=float, default=0.40)
+    p.add_argument("--embed-mixing", type=float, default=0.80)
     p.add_argument("--embed-mixing-method", choices=("linear", "pulay"), default="pulay")
     p.add_argument("--embed-pulay-history", type=int, default=6)
     p.add_argument("--embed-pulay-start", type=int, default=3)
