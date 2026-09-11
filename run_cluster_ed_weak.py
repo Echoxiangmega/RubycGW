@@ -5,6 +5,11 @@
 momentum integration is controlled independently by ``nk1,nk2``.  When nk1 or
 nk2 is omitted it defaults to Lx or Ly respectively, reproducing the historical
 finite-torus calculation exactly.
+
+The production bath fit defaults to the impurity Weiss Green function G0 rather
+than Delta itself.  For nbath>=7 the impurity solver defaults to a sparse
+low-temperature Lanczos implementation; use ``--impurity-solver dense`` for the
+historical exact full-spectrum finite-bath solver.
 """
 from __future__ import annotations
 
@@ -15,10 +20,12 @@ from pathlib import Path
 
 import numpy as np
 
+from rubycgw.bath_fit_optimized import BATH_FIT_METRICS, install_optimized_bath_fit
 from rubycgw.cluster_ed_gw_fast import ClusterEDGWFastOptions
 from rubycgw.cluster_ed_weak_fast import WEAK_SOLVERS, solve_cluster_ed_weak_fast
 from rubycgw.grids import MatsubaraGrid
 from rubycgw.gw import GWOptions, GWResult
+from rubycgw.impurity_ed_lanczos import install_impurity_solver
 from rubycgw.model import RubyParameters, build_h0, build_interaction
 from rubycgw.small_cluster_exact import ExactSmallRubyThermal
 from rubycgw.sox_covariant import SOXOptions
@@ -65,7 +72,28 @@ def _args():
     p.add_argument("--bath-fit-max-nfev", type=int, default=300)
     p.add_argument("--bath-energy-window", type=float, default=4.0)
     p.add_argument("--bath-coupling-bound", type=float, default=4.0)
+    p.add_argument(
+        "--bath-fit-metric",
+        choices=BATH_FIT_METRICS,
+        default="g0",
+        help="g0 (recommended) fits the impurity Weiss Green function; delta reproduces the historical target",
+    )
+    p.add_argument("--bath-fit-low-nfreq", type=int, default=4)
+    p.add_argument(
+        "--bath-fit-numerical-jacobian",
+        action="store_true",
+        help="disable the analytic bath-fit Jacobian (diagnostic only)",
+    )
     p.add_argument("--discard-weight-tol", type=float, default=1e-11)
+    p.add_argument(
+        "--impurity-solver",
+        choices=("auto", "dense", "lanczos"),
+        default="auto",
+        help="auto uses dense for nbath<=6 and sparse Lanczos for nbath>=7",
+    )
+    p.add_argument("--impurity-thermal-tol", type=float, default=1e-10)
+    p.add_argument("--impurity-thermal-max-states", type=int, default=64)
+    p.add_argument("--impurity-krylov-steps", type=int, default=18)
 
     p.add_argument("--benchmark-ed", action="store_true")
     p.add_argument("--quiet-weak", action="store_true")
@@ -202,6 +230,31 @@ def main():
     )
     h0 = build_h0(grid.kmesh(), params)
     Vq = build_interaction(grid.qmesh(), params)
+    h_cluster = np.mean(h0, axis=(0, 1))
+    h_cluster = 0.5 * (h_cluster + h_cluster.conj().T)
+
+    # Install the production numerical improvements before entering either the
+    # ordinary or warm-start embedding loop.
+    fitter = install_optimized_bath_fit(
+        h_cluster,
+        metric=str(args.bath_fit_metric),
+        low_nfit=int(args.bath_fit_low_nfreq),
+        analytic_jacobian=not bool(args.bath_fit_numerical_jacobian),
+    )
+    # The warm-start module imports the historical fitter into its own namespace.
+    # Patch that reference too so warm and cold starts solve exactly the same map.
+    try:
+        import rubycgw.cluster_ed_weak_warm as warm_module
+        warm_module.fit_finite_bath = fitter
+    except Exception:
+        pass
+    _, impurity_solver_resolved = install_impurity_solver(
+        mode=str(args.impurity_solver),
+        nbath=int(args.nbath),
+        thermal_state_tol=float(args.impurity_thermal_tol),
+        thermal_max_states=int(args.impurity_thermal_max_states),
+        krylov_steps=int(args.impurity_krylov_steps),
+    )
 
     args.out.mkdir(parents=True, exist_ok=True)
     cache_dir = args.cache_dir if args.cache_dir is not None else args.out / "cache"
@@ -255,7 +308,8 @@ def main():
     print(
         f"benchmark L={args.Lx}x{args.Ly}; kmesh={nk1}x{nk2}; weak={args.weak_solver}; "
         f"V={args.V:g}, filling={args.filling:g}, T={args.T:g}, nw={args.nw}, "
-        f"nOmega={args.nomega}, nbath={args.nbath}"
+        f"nOmega={args.nomega}, nbath={args.nbath}; bath_metric={args.bath_fit_metric}; "
+        f"impurity_solver={impurity_solver_resolved}"
     )
     result = solve_cluster_ed_weak_fast(
         h0,
@@ -272,11 +326,19 @@ def main():
         _save_background(cache_path, result.background)
         print(f"[cache] {args.weak_solver.upper()} saved: {cache_path}")
 
+    bath_delta_err = float(getattr(result.bath, "delta_fit_error", np.nan))
+    bath_g0_err = float(getattr(result.bath, "g0_fit_error", np.nan))
+    bath_g0_low_err = float(getattr(result.bath, "g0_low_fit_error", np.nan))
     print(
         f"final: converged={result.converged}, iterations={result.iterations}, "
         f"residual={result.final_error:.3e}, impurity_mismatch={result.impurity_mismatch:.3e}, "
         f"bath_fit={result.bath_fit_error:.3e}, mu={result.mu:+.10f}, "
         f"mix={result.mixing_method}, pulay_fallbacks={result.pulay_fallbacks}"
+    )
+    print(
+        f"bath diagnostics: metric={args.bath_fit_metric}, "
+        f"Delta_rel={bath_delta_err:.3e}, G0_rel={bath_g0_err:.3e}, "
+        f"G0_low{args.bath_fit_low_nfreq}_rel={bath_g0_low_err:.3e}"
     )
 
     default_mesh = (nk1, nk2) == (args.Lx, args.Ly)
@@ -336,6 +398,15 @@ def main():
         final_error=float(result.final_error),
         impurity_mismatch=float(result.impurity_mismatch),
         bath_fit_error=float(result.bath_fit_error),
+        bath_fit_metric=str(args.bath_fit_metric),
+        bath_delta_fit_error=float(bath_delta_err),
+        bath_g0_fit_error=float(bath_g0_err),
+        bath_g0_low_fit_error=float(bath_g0_low_err),
+        bath_g0_low_nfreq=int(args.bath_fit_low_nfreq),
+        impurity_solver=str(impurity_solver_resolved),
+        impurity_thermal_tol=float(args.impurity_thermal_tol),
+        impurity_thermal_max_states=int(args.impurity_thermal_max_states),
+        impurity_krylov_steps=int(args.impurity_krylov_steps),
         mixing_method=str(result.mixing_method),
         pulay_fallbacks=int(result.pulay_fallbacks),
         residual_history=np.asarray(result.residual_history),
