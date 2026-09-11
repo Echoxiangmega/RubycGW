@@ -33,6 +33,6 @@ def test_dyson_kernel_vanishes_for_noninteracting_green_function():
 def test_local_nonlocal_decomposition_has_zero_k_average_nonlocal():
     rng = np.random.default_rng(321)
     K = rng.normal(size=(4, 3, 2, 6, 6)) + 1j * rng.normal(size=(4, 3, 2, 6, 6))
-    local, nonlocal = decompose_kernel(K)
-    assert np.max(np.abs(np.mean(nonlocal, axis=(1, 2)))) < 1e-13
-    assert np.max(np.abs(K - local[:, None, None] - nonlocal)) < 1e-13
+    local, nonloc = decompose_kernel(K)
+    assert np.max(np.abs(np.mean(nonloc, axis=(1, 2)))) < 1e-13
+    assert np.max(np.abs(K - local[:, None, None] - nonloc)) < 1e-13
