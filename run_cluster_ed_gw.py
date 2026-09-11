@@ -65,10 +65,6 @@ def _args():
     p.add_argument("--gw-mixing", type=float, default=0.25)
     p.add_argument("--gw-mixing-method", choices=("linear", "pulay"), default="pulay")
 
-    # The coupled cluster/impurity fixed point is smooth but appreciably slower
-    # than the initial lattice GW solve.  The V=1, L=2x1 benchmark contracts
-    # monotonically with no Pulay safeguard hits, so use a less conservative
-    # Pulay damping and leave enough outer iterations to reach the requested tol.
     p.add_argument("--embed-max", type=int, default=100)
     p.add_argument("--embed-tol", type=float, default=2e-5)
     p.add_argument("--embed-mixing", type=float, default=0.80)
@@ -247,6 +243,77 @@ def _get_exact_ed(args, params, grid, cache_dir: Path, use_cache: bool):
     return float(mu_ed), np.asarray(G_ed), path
 
 
+def _save_cluster_result(
+    outfile: Path,
+    args,
+    grid: MatsubaraGrid,
+    result,
+    gw_cache: Path,
+    use_cache: bool,
+    *,
+    Gerr_bg: float = np.nan,
+    Gerr_emb: float = np.nan,
+    mu_ed: float = np.nan,
+    G_ed: np.ndarray | None = None,
+    ed_cache: Path | None = None,
+    benchmark_status: str = "not_requested",
+) -> None:
+    """Persist the expensive embedding result independently of benchmark success."""
+    if G_ed is None:
+        G_ed = np.empty((0,), dtype=complex)
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        outfile,
+        Lx=int(args.Lx),
+        Ly=int(args.Ly),
+        V=float(args.V),
+        filling=float(args.filling),
+        T=float(args.T),
+        ti=float(args.ti),
+        t1=float(args.t1),
+        t2=float(args.t2),
+        omega=np.asarray(grid.omega),
+        Omega=np.asarray(grid.Omega),
+        converged=bool(result.converged),
+        iterations=int(result.iterations),
+        final_error=float(result.final_error),
+        impurity_mismatch=float(result.impurity_mismatch),
+        bath_fit_error=float(result.bath_fit_error),
+        mixing_method=str(result.mixing_method),
+        pulay_fallbacks=int(result.pulay_fallbacks),
+        residual_history=np.asarray(result.residual_history),
+        impurity_residual_history=np.asarray(result.impurity_residual_history),
+        impurity_mismatch_history=np.asarray(result.impurity_mismatch_history),
+        bath_fit_history=np.asarray(result.bath_fit_history),
+        mu_history=np.asarray(result.mu_history),
+        bath_nfev_history=np.asarray(result.bath_nfev_history),
+        elapsed_history=np.asarray(result.elapsed_history),
+        mu=float(result.mu),
+        density=np.asarray(result.density),
+        G=np.asarray(result.G),
+        W=np.asarray(result.W),
+        P=np.asarray(result.P),
+        Sigma_H=np.asarray(result.Sigma_H),
+        Sigma_emb=np.asarray(result.Sigma_emb),
+        Sigma_GW_lattice=np.asarray(result.Sigma_GW_lattice),
+        Sigma_GW_cluster=np.asarray(result.Sigma_GW_cluster),
+        Sigma_ED_cluster=np.asarray(result.Sigma_ED_cluster),
+        G_cluster=np.asarray(result.G_cluster),
+        G_impurity=np.asarray(result.G_impurity),
+        bath_energies=np.asarray(result.bath.energies),
+        bath_couplings=np.asarray(result.bath.couplings),
+        G_background=np.asarray(result.background.G),
+        mu_background=float(result.background.mu),
+        Gerr_background=float(Gerr_bg),
+        Gerr_embedded=float(Gerr_emb),
+        mu_ed=float(mu_ed),
+        G_ed=np.asarray(G_ed),
+        benchmark_status=str(benchmark_status),
+        gw_cache_path=str(gw_cache if use_cache else ""),
+        ed_cache_path=str(ed_cache if (use_cache and ed_cache is not None) else ""),
+    )
+
+
 def main():
     args = _args()
     if args.Lx < 1 or args.Ly < 1:
@@ -340,78 +407,60 @@ def main():
         flush=True,
     )
 
+    outfile = args.out / (
+        f"cluster_ed_gw_L{args.Lx}x{args.Ly}_V{args.V:.6g}_fill{args.filling:.6g}.npz"
+    )
+    initial_status = "pending" if args.benchmark_ed else "not_requested"
+    _save_cluster_result(
+        outfile, args, grid, result, gw_cache, use_cache,
+        benchmark_status=initial_status,
+    )
+    print(f"saved core result {outfile}", flush=True)
+
     Gerr_bg = Gerr_emb = np.nan
     mu_ed = np.nan
     G_ed = np.empty((0,), dtype=complex)
     ed_cache = None
+    benchmark_status = initial_status
     if args.benchmark_ed:
         nsites = 6 * int(args.Lx) * int(args.Ly)
         if nsites > 16:
-            raise ValueError("--benchmark-ed is limited to <=16 sites by ExactSmallRubyThermal")
-        mu_ed, G_ed, ed_cache = _get_exact_ed(
-            args, params, grid, cache_dir, use_cache
-        )
-        G_bg_real = _lattice_to_realspace(result.background.G, args.Lx, args.Ly)
-        G_emb_real = _lattice_to_realspace(result.G, args.Lx, args.Ly)
-        Gerr_bg = _relerr(G_bg_real, G_ed)
-        Gerr_emb = _relerr(G_emb_real, G_ed)
-        print(
-            f"[benchmark] mu_ED={mu_ed:+.10f}, Gerr_GW={Gerr_bg:.6e}, "
-            f"Gerr_clusterED+GW={Gerr_emb:.6e}, ratio={Gerr_emb/Gerr_bg:.6f}",
-            flush=True,
-        )
+            benchmark_status = "full_ed_unsupported"
+            print(
+                f"[benchmark] full-spectrum ExactSmallRubyThermal supports <=16 sites; "
+                f"skipping benchmark for {nsites} sites. Core embedding result is already saved.",
+                flush=True,
+            )
+        else:
+            try:
+                mu_ed, G_ed, ed_cache = _get_exact_ed(
+                    args, params, grid, cache_dir, use_cache
+                )
+                G_bg_real = _lattice_to_realspace(result.background.G, args.Lx, args.Ly)
+                G_emb_real = _lattice_to_realspace(result.G, args.Lx, args.Ly)
+                Gerr_bg = _relerr(G_bg_real, G_ed)
+                Gerr_emb = _relerr(G_emb_real, G_ed)
+                benchmark_status = "exact_ed_complete"
+                print(
+                    f"[benchmark] mu_ED={mu_ed:+.10f}, Gerr_GW={Gerr_bg:.6e}, "
+                    f"Gerr_clusterED+GW={Gerr_emb:.6e}, ratio={Gerr_emb/Gerr_bg:.6f}",
+                    flush=True,
+                )
+            except Exception as exc:
+                benchmark_status = f"failed:{type(exc).__name__}"
+                print(
+                    f"[benchmark] failed after embedding result was saved: {exc}",
+                    flush=True,
+                )
 
-    outfile = args.out / (
-        f"cluster_ed_gw_L{args.Lx}x{args.Ly}_V{args.V:.6g}_fill{args.filling:.6g}.npz"
-    )
-    np.savez_compressed(
-        outfile,
-        Lx=int(args.Lx),
-        Ly=int(args.Ly),
-        V=float(args.V),
-        filling=float(args.filling),
-        T=float(args.T),
-        ti=float(args.ti),
-        t1=float(args.t1),
-        t2=float(args.t2),
-        omega=np.asarray(grid.omega),
-        Omega=np.asarray(grid.Omega),
-        converged=bool(result.converged),
-        iterations=int(result.iterations),
-        final_error=float(result.final_error),
-        impurity_mismatch=float(result.impurity_mismatch),
-        bath_fit_error=float(result.bath_fit_error),
-        mixing_method=str(result.mixing_method),
-        pulay_fallbacks=int(result.pulay_fallbacks),
-        residual_history=np.asarray(result.residual_history),
-        impurity_residual_history=np.asarray(result.impurity_residual_history),
-        impurity_mismatch_history=np.asarray(result.impurity_mismatch_history),
-        bath_fit_history=np.asarray(result.bath_fit_history),
-        mu_history=np.asarray(result.mu_history),
-        bath_nfev_history=np.asarray(result.bath_nfev_history),
-        elapsed_history=np.asarray(result.elapsed_history),
-        mu=float(result.mu),
-        density=np.asarray(result.density),
-        G=np.asarray(result.G),
-        W=np.asarray(result.W),
-        P=np.asarray(result.P),
-        Sigma_H=np.asarray(result.Sigma_H),
-        Sigma_emb=np.asarray(result.Sigma_emb),
-        Sigma_GW_lattice=np.asarray(result.Sigma_GW_lattice),
-        Sigma_GW_cluster=np.asarray(result.Sigma_GW_cluster),
-        Sigma_ED_cluster=np.asarray(result.Sigma_ED_cluster),
-        G_cluster=np.asarray(result.G_cluster),
-        G_impurity=np.asarray(result.G_impurity),
-        bath_energies=np.asarray(result.bath.energies),
-        bath_couplings=np.asarray(result.bath.couplings),
-        G_background=np.asarray(result.background.G),
-        mu_background=float(result.background.mu),
-        Gerr_background=float(Gerr_bg),
-        Gerr_embedded=float(Gerr_emb),
-        mu_ed=float(mu_ed),
-        G_ed=np.asarray(G_ed),
-        gw_cache_path=str(gw_cache if use_cache else ""),
-        ed_cache_path=str(ed_cache if (use_cache and ed_cache is not None) else ""),
+    _save_cluster_result(
+        outfile, args, grid, result, gw_cache, use_cache,
+        Gerr_bg=Gerr_bg,
+        Gerr_emb=Gerr_emb,
+        mu_ed=mu_ed,
+        G_ed=G_ed,
+        ed_cache=ed_cache,
+        benchmark_status=benchmark_status,
     )
     print(f"saved {outfile}", flush=True)
 
