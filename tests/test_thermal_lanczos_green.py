@@ -8,7 +8,10 @@ from rubycgw.thermal_lanczos_green import ThermalLanczosOptions, thermal_lanczos
 def test_thermal_lanczos_green_matches_full_ed_on_one_cell():
     params = RubyParameters(ti=0.4, t1=0.2, t2=0.2, V=0.4)
     T = 0.08
-    target = 2.0
+    # Use N=3 so the low-temperature N=2,3,4 thermal window never needs
+    # the trivial N=0 or N=6 one-dimensional target sectors.  The production
+    # 18/24-site filling=2/cell windows are likewise far from Fock-space edges.
+    target = 3.0
     omega = (2 * np.arange(-4, 5) + 1) * np.pi * T
 
     exact = ExactSmallRubyThermal(1, 1, params)
@@ -59,7 +62,7 @@ def test_thermal_lanczos_result_has_small_sector_edge_weight_at_low_T():
         params,
         V=params.V,
         T=T,
-        target_particles=2.0,
+        target_particles=3.0,
         omega=omega,
         opts=opts,
     )
