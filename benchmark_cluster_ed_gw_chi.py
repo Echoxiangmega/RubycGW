@@ -1,24 +1,33 @@
 #!/usr/bin/env python3
-"""Compare 2x1 cluster-ED+GW covariant current susceptibility with exact ED.
+"""Covariant current susceptibility from a saved cluster-ED+GW NPZ.
 
-The only required input is a converged ``cluster_ed_gw_*.npz`` file.  The script
-reconstructs the model and Matsubara grid from that file, refines the saved
-zero-source embedding with the complex-bath response map, then evaluates the
-full fixed-point derivative by symmetric source solves,
+The only required input is a converged ``cluster_ed_gw_*.npz`` file.  For any
+primitive rectangular ``Lx x Ly`` mesh the script reconstructs the model and
+Matsubara grid, refines the saved zero-source embedding with the same complex-
+bath functional used in the response calculation, and then evaluates the full
+fixed-point derivative by static source solves,
 
     chi_ab = d <K_a> / d h_b,
     H(h_b) = H(0) - h_b K_b,
 
-at fixed filling.  This is a numerical covariant derivative of the complete
-cluster-ED+GW approximation: lattice GW, finite bath, impurity ED,
-Sigma_ED-Sigma_GW,C double-counting correction and chemical potential are all
-allowed to respond.
+at fixed filling.  The source response is the numerical derivative of the
+complete cluster-ED+GW approximation: lattice GW, finite bath, impurity ED,
+Sigma_ED-Sigma_GW,C double-counting correction, and chemical potential all
+relax together.
 
-For the 2x1 torus the exact comparison uses full-spectrum ED and the exact
-Lehmann static susceptibility.  The number operator is included explicitly so
-the ED result is converted from fixed-mu to fixed-filling response through the
-Schur complement.  For the TR-odd current channels the correction should be
-numerically negligible, but computing it removes any ambiguity.
+Exact ED comparison is automatic when a trustworthy static susceptibility
+solver is available.  At present this means full-spectrum ED for <=16 physical
+sites (the Ruby rectangles that matter here are 1x1 and 2x1/1x2).  Larger
+meshes still produce the cluster-ED+GW response and explicitly record that an
+ED chi benchmark was unavailable.  The 18/24-site thermal-Lanczos Green-
+function benchmark is intentionally not reused as a two-particle response
+solver because G(iw) alone does not determine the exact static susceptibility.
+
+Multiple source magnitudes are followed by warm continuation from the smallest
+|h| outward.  By default both +h and -h are solved.  ``--tr-reduce`` can halve
+the source work by using time-reversal symmetry of the TR-odd current channels,
+J_a(-h_b)=-J_a(+h_b); the explicit two-sided solve remains the conservative
+default.
 """
 from __future__ import annotations
 
@@ -41,17 +50,35 @@ from rubycgw.small_cluster_exact import ExactSmallRubyThermal
 
 
 CHANNELS = ("z_same", "z_opposite")
+_ED_MODES = ("auto", "full", "none")
 
 
 def _args():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("input", type=Path, help="converged cluster_ed_gw_L2x1_*.npz")
+    p.add_argument("input", type=Path, help="converged cluster_ed_gw_*.npz")
     p.add_argument("--h", nargs="+", type=float, default=[2e-3, 1e-3])
     p.add_argument("--response-max", type=int, default=60)
     p.add_argument("--response-tol", type=float, default=2e-6)
     p.add_argument("--response-mixing", type=float, default=0.70)
     p.add_argument("--bath-fit-max-nfev", type=int, default=500)
     p.add_argument("--bath-fit-xtol", type=float, default=1e-10)
+    p.add_argument(
+        "--ed-mode",
+        choices=_ED_MODES,
+        default="auto",
+        help=(
+            "auto: full-spectrum ED when <=16 sites, otherwise cluster-only; "
+            "full: require full-spectrum ED; none: skip ED"
+        ),
+    )
+    p.add_argument(
+        "--tr-reduce",
+        action="store_true",
+        help=(
+            "solve only +h and infer -h from time reversal for the two TR-odd "
+            "current channels; default solves both signs explicitly"
+        ),
+    )
     p.add_argument("--allow-unconverged", action="store_true")
     p.add_argument("--quiet", action="store_true")
     p.add_argument("--out", type=Path, default=None)
@@ -104,19 +131,73 @@ def _print_matrix(name: str, mat: np.ndarray):
     )
 
 
+def _full_ed_supported(Lx: int, Ly: int) -> bool:
+    return 6 * int(Lx) * int(Ly) <= 16
+
+
+def _exact_full_ed_response(
+    Lx: int,
+    Ly: int,
+    params: RubyParameters,
+    V: float,
+    filling: float,
+    T: float,
+) -> dict:
+    exact = ExactSmallRubyThermal(int(Lx), int(Ly), params)
+    exact.diagonalize(float(V))
+    target_particles = float(filling) * int(Lx) * int(Ly)
+    mu_ed = exact.solve_mu(target_particles, float(T))
+    ops = [exact.pseudospin_operator(ch, (0.0, 0.0)) for ch in CHANNELS]
+    # Total-number operator gives the fixed-mu -> fixed-filling Schur complement.
+    ops.append(np.eye(exact.n_sites, dtype=complex))
+    chi_aug, means_aug = exact.static_susceptibility_matrix(
+        np.stack(ops), mu_ed, float(T)
+    )
+    nc = len(CHANNELS)
+    chi_mu = np.asarray(chi_aug[:nc, :nc], dtype=float)
+    chi_kn = np.asarray(chi_aug[:nc, nc], dtype=float)
+    chi_nn = float(chi_aug[nc, nc])
+    if chi_nn > 1e-14:
+        chi_fixed = chi_mu - np.outer(chi_kn, chi_kn) / chi_nn
+    else:
+        chi_fixed = chi_mu.copy()
+    return dict(
+        method="full_spectrum_ed",
+        chi_fixed_mu=chi_mu,
+        chi_fixed_filling=chi_fixed,
+        chi_kn=chi_kn,
+        chi_nn=chi_nn,
+        means=np.asarray(means_aug[:nc]),
+        mu=float(mu_ed),
+    )
+
+
+def _empty_ed_result() -> dict:
+    nc = len(CHANNELS)
+    return dict(
+        method="unavailable",
+        chi_fixed_mu=np.full((nc, nc), np.nan, dtype=float),
+        chi_fixed_filling=np.full((nc, nc), np.nan, dtype=float),
+        chi_kn=np.full(nc, np.nan, dtype=float),
+        chi_nn=np.nan,
+        means=np.full(nc, np.nan + 0.0j, dtype=complex),
+        mu=np.nan,
+    )
+
+
 def main():
     args = _args()
     if not args.input.exists():
         raise FileNotFoundError(args.input)
-    hvalues = np.asarray(sorted(set(abs(float(x)) for x in args.h if abs(float(x)) > 0.0), reverse=True))
+    hvalues = np.asarray(
+        sorted(set(abs(float(x)) for x in args.h if abs(float(x)) > 0.0))
+    )
     if hvalues.size == 0:
         raise ValueError("--h must contain at least one nonzero magnitude")
 
     with np.load(args.input, allow_pickle=False) as z:
         Lx = int(z["Lx"])
         Ly = int(z["Ly"])
-        if (Lx, Ly) not in ((2, 1), (1, 2)):
-            raise ValueError("this first covariant chi benchmark is intentionally limited to the 2x1 torus")
         if not bool(z["converged"]):
             raise ValueError("input cluster-ED+GW result is not converged")
         V = float(z["V"])
@@ -137,10 +218,20 @@ def main():
         bath_err = float(z["bath_fit_error"])
         nbath = int(len(bath_e))
 
+    nsites = 6 * Lx * Ly
+    print(
+        f"=== cluster-ED+GW chi: Lx={Lx}, Ly={Ly}, sites={nsites}, "
+        f"V={V:g}, filling={filling:g}, T={T:g}, nbath={nbath} ===",
+        flush=True,
+    )
+
     nw = int(len(omega) // 2)
     nOmega = int((len(Omega) - 1) // 2)
     grid = MatsubaraGrid(nk1=Lx, nk2=Ly, nw=nw, nOmega=nOmega, T=T)
-    if np.max(np.abs(grid.omega - omega)) > 1e-12 or np.max(np.abs(grid.Omega - Omega)) > 1e-12:
+    if (
+        np.max(np.abs(grid.omega - omega)) > 1e-12
+        or np.max(np.abs(grid.Omega - Omega)) > 1e-12
+    ):
         raise ValueError("saved Matsubara arrays do not match reconstructed grid")
 
     params = RubyParameters(ti=ti, t1=t1, t2=t2, V=V)
@@ -169,7 +260,7 @@ def main():
     # Refine once at h=0 with the same complex-bath functional used by the
     # source solves.  This prevents an O(h^0) mismatch between the saved
     # historical real-bath fixed point and the response functional.
-    print("=== zero-source covariant-map refinement ===", flush=True)
+    print("\n=== zero-source covariant-map refinement ===", flush=True)
     zero = solve_cluster_source_warm(
         h0,
         Vq,
@@ -182,15 +273,23 @@ def main():
     )
     if not zero.converged and not args.allow_unconverged:
         raise RuntimeError(
-            f"zero-source response-map refinement did not converge: {zero.final_error:.3e}"
+            f"zero-source response-map refinement did not converge: "
+            f"{zero.final_error:.3e}"
         )
     zero_state = zero.state
-    zero_obs = np.asarray([
-        onebody_expectation_from_lattice_G(
-            zero_state.G, K[a], h0, zero_state.mu, zero_state.Sigma_H, grid
-        )
-        for a in range(len(CHANNELS))
-    ])
+    zero_obs = np.asarray(
+        [
+            onebody_expectation_from_lattice_G(
+                zero_state.G,
+                K[a],
+                h0,
+                zero_state.mu,
+                zero_state.Sigma_H,
+                grid,
+            )
+            for a in range(len(CHANNELS))
+        ]
+    )
     print(
         f"zero: converged={zero.converged}, iter={zero.iterations}, "
         f"residual={zero.final_error:.3e}, bath={zero.bath_fit_error:.3e}, "
@@ -210,85 +309,104 @@ def main():
     source_mu = np.full((nh, nc, 2), np.nan)
 
     print("\n=== cluster-ED+GW numerical covariant response ===", flush=True)
-    for ih, h in enumerate(hvalues):
-        for b, ch in enumerate(CHANNELS):
+    if args.tr_reduce:
+        print(
+            "using TR reduction: only +h source solves are performed; "
+            "-h observables are inferred as -J(+h)",
+            flush=True,
+        )
+
+    # Follow each source continuously from the smallest perturbation outward.
+    # This avoids repeatedly restarting every h from the zero-source state.
+    for b, ch in enumerate(CHANNELS):
+        plus_seed = _copy_state(zero_state)
+        minus_seed = _copy_state(zero_state)
+        for ih, h in enumerate(hvalues):
             print(f"\n--- source {ch}, |h|={h:.3e} ---", flush=True)
             hp = h0 - float(h) * K[b][None, None, :, :]
-            hm = h0 + float(h) * K[b][None, None, :, :]
             rp = solve_cluster_source_warm(
-                hp, Vq, params, grid, K[b], filling, _copy_state(zero_state), opts
+                hp, Vq, params, grid, K[b], filling, plus_seed, opts
             )
-            rm = solve_cluster_source_warm(
-                hm, Vq, params, grid, K[b], filling, _copy_state(zero_state), opts
-            )
-            for isign, r in enumerate((rp, rm)):
-                source_converged[ih, b, isign] = r.converged
-                source_iterations[ih, b, isign] = r.iterations
-                source_residual[ih, b, isign] = r.final_error
-                source_bath_fit[ih, b, isign] = r.bath_fit_error
-                source_mu[ih, b, isign] = r.state.mu
-            if (not rp.converged or not rm.converged) and not args.allow_unconverged:
-                raise RuntimeError(
-                    f"source solve failed for {ch}, h={h:g}: "
-                    f"+ residual={rp.final_error:.3e}, - residual={rm.final_error:.3e}"
+            plus_seed = _copy_state(rp.state)
+            source_converged[ih, b, 0] = rp.converged
+            source_iterations[ih, b, 0] = rp.iterations
+            source_residual[ih, b, 0] = rp.final_error
+            source_bath_fit[ih, b, 0] = rp.bath_fit_error
+            source_mu[ih, b, 0] = rp.state.mu
+
+            if args.tr_reduce:
+                rm = None
+                source_converged[ih, b, 1] = rp.converged
+                source_iterations[ih, b, 1] = 0
+                source_residual[ih, b, 1] = rp.final_error
+                source_bath_fit[ih, b, 1] = rp.bath_fit_error
+                source_mu[ih, b, 1] = rp.state.mu
+            else:
+                hm = h0 + float(h) * K[b][None, None, :, :]
+                rm = solve_cluster_source_warm(
+                    hm, Vq, params, grid, K[b], filling, minus_seed, opts
                 )
+                minus_seed = _copy_state(rm.state)
+                source_converged[ih, b, 1] = rm.converged
+                source_iterations[ih, b, 1] = rm.iterations
+                source_residual[ih, b, 1] = rm.final_error
+                source_bath_fit[ih, b, 1] = rm.bath_fit_error
+                source_mu[ih, b, 1] = rm.state.mu
+
+            if not rp.converged and not args.allow_unconverged:
+                raise RuntimeError(
+                    f"+h source solve failed for {ch}, h={h:g}: "
+                    f"residual={rp.final_error:.3e}"
+                )
+            if rm is not None and (not rm.converged) and not args.allow_unconverged:
+                raise RuntimeError(
+                    f"-h source solve failed for {ch}, h={h:g}: "
+                    f"residual={rm.final_error:.3e}"
+                )
+
             for a in range(nc):
                 jp = onebody_expectation_from_lattice_G(
-                    rp.state.G, K[a], hp, rp.state.mu, rp.state.Sigma_H, grid
+                    rp.state.G,
+                    K[a],
+                    hp,
+                    rp.state.mu,
+                    rp.state.Sigma_H,
+                    grid,
                 )
-                jm = onebody_expectation_from_lattice_G(
-                    rm.state.G, K[a], hm, rm.state.mu, rm.state.Sigma_H, grid
-                )
+                if rm is None:
+                    jm = -jp
+                else:
+                    hm = h0 + float(h) * K[b][None, None, :, :]
+                    jm = onebody_expectation_from_lattice_G(
+                        rm.state.G,
+                        K[a],
+                        hm,
+                        rm.state.mu,
+                        rm.state.Sigma_H,
+                        grid,
+                    )
                 plus_obs[ih, a, b] = jp
                 minus_obs[ih, a, b] = jm
                 chi_h[ih, a, b] = (jp - jm) / (2.0 * float(h))
+
+            if rm is None:
+                residual_note = f"+res={rp.final_error:.2e}, TR-inferred -h"
+            else:
+                residual_note = (
+                    f"+res={rp.final_error:.2e}, -res={rm.final_error:.2e}"
+                )
             print(
-                f"chi column {ch}: {chi_h[ih,:,b].tolist()} "
-                f"(+res={rp.final_error:.2e}, -res={rm.final_error:.2e})",
+                f"chi column {ch}: {chi_h[ih,:,b].tolist()} ({residual_note})",
                 flush=True,
             )
 
-    # The exact equilibrium response is symmetric.  Numerical source solves can
-    # carry tiny antisymmetric solver noise, so report both raw and symmetric
-    # matrices; the latter is the physical comparison.
+    # Equilibrium response is symmetric.  Keep the raw extrapolated matrix for
+    # diagnostics and report its symmetric part as the physical response.
     chi_cluster_raw = _extrapolate_h2(hvalues, chi_h)
     chi_cluster = 0.5 * (chi_cluster_raw + chi_cluster_raw.T)
 
-    print("\n=== exact full-spectrum ED response ===", flush=True)
-    exact = ExactSmallRubyThermal(Lx, Ly, params)
-    exact.diagonalize(V)
-    target_particles = filling * Lx * Ly
-    mu_ed = exact.solve_mu(target_particles, T)
-    ops = [exact.pseudospin_operator(ch, (0.0, 0.0)) for ch in CHANNELS]
-    # Total-number operator is needed for the fixed-filling Schur complement.
-    ops.append(np.eye(exact.n_sites, dtype=complex))
-    chi_aug, means_aug = exact.static_susceptibility_matrix(np.stack(ops), mu_ed, T)
-    chi_ed_mu = np.asarray(chi_aug[:nc, :nc], dtype=float)
-    chi_kn = np.asarray(chi_aug[:nc, nc], dtype=float)
-    chi_nn = float(chi_aug[nc, nc])
-    if chi_nn > 1e-14:
-        chi_ed = chi_ed_mu - np.outer(chi_kn, chi_kn) / chi_nn
-    else:
-        chi_ed = chi_ed_mu.copy()
-
-    relerr = _matrix_relerr(chi_cluster, chi_ed)
-    diag_relerr = np.abs(np.diag(chi_cluster) - np.diag(chi_ed)) / np.maximum(
-        np.abs(np.diag(chi_ed)), 1e-300
-    )
-
-    print("\n=== comparison ===", flush=True)
-    _print_matrix("ED fixed-filling chi", chi_ed)
+    print("\n=== cluster-ED+GW result ===", flush=True)
     _print_matrix("cluster-ED+GW covariant chi", chi_cluster)
-    print(
-        f"matrix relerr={relerr:.6e}; "
-        f"diag relerr: same={diag_relerr[0]:.6e}, opposite={diag_relerr[1]:.6e}",
-        flush=True,
-    )
-    print(
-        f"ED fixed-mu -> fixed-filling correction: chi_KN={chi_kn.tolist()}, "
-        f"chi_NN={chi_nn:.6e}",
-        flush=True,
-    )
     for ih, h in enumerate(hvalues):
         sym = 0.5 * (chi_h[ih] + chi_h[ih].T)
         print(
@@ -297,6 +415,52 @@ def main():
             flush=True,
         )
 
+    ed = _empty_ed_result()
+    full_supported = _full_ed_supported(Lx, Ly)
+    if args.ed_mode == "full" and not full_supported:
+        raise ValueError(
+            f"--ed-mode full requested for {nsites} sites, but "
+            "ExactSmallRubyThermal supports <=16 sites"
+        )
+    run_full_ed = args.ed_mode == "full" or (
+        args.ed_mode == "auto" and full_supported
+    )
+
+    if run_full_ed:
+        print("\n=== exact full-spectrum ED response ===", flush=True)
+        ed = _exact_full_ed_response(Lx, Ly, params, V, filling, T)
+        chi_ed = np.asarray(ed["chi_fixed_filling"], dtype=float)
+        relerr = _matrix_relerr(chi_cluster, chi_ed)
+        diag_relerr = np.abs(np.diag(chi_cluster) - np.diag(chi_ed)) / np.maximum(
+            np.abs(np.diag(chi_ed)), 1e-300
+        )
+        print("\n=== comparison ===", flush=True)
+        _print_matrix("ED fixed-filling chi", chi_ed)
+        _print_matrix("cluster-ED+GW covariant chi", chi_cluster)
+        print(
+            f"matrix relerr={relerr:.6e}; "
+            f"diag relerr: same={diag_relerr[0]:.6e}, "
+            f"opposite={diag_relerr[1]:.6e}",
+            flush=True,
+        )
+        print(
+            f"ED fixed-mu -> fixed-filling correction: "
+            f"chi_KN={np.asarray(ed['chi_kn']).tolist()}, "
+            f"chi_NN={float(ed['chi_nn']):.6e}",
+            flush=True,
+        )
+    else:
+        relerr = np.nan
+        diag_relerr = np.full(nc, np.nan, dtype=float)
+        if args.ed_mode == "none":
+            reason = "disabled by --ed-mode none"
+        else:
+            reason = (
+                f"no validated static ED chi solver for {nsites} sites; "
+                "thermal-Lanczos G benchmark is one-particle only"
+            )
+        print(f"\n=== ED comparison skipped: {reason} ===", flush=True)
+
     outfile = args.out
     if outfile is None:
         outfile = args.input.with_name(args.input.stem + "_covariant_chi.npz")
@@ -304,17 +468,27 @@ def main():
     np.savez_compressed(
         outfile,
         source_file=str(args.input),
+        Lx=int(Lx),
+        Ly=int(Ly),
+        nsites=int(nsites),
+        V=float(V),
+        filling=float(filling),
+        T=float(T),
+        nbath=int(nbath),
         channels=np.asarray(CHANNELS),
         h_values=hvalues,
+        tr_reduced=bool(args.tr_reduce),
         chi_cluster_h=chi_h,
         chi_cluster_raw_extrapolated=chi_cluster_raw,
         chi_cluster_covariant=chi_cluster,
-        chi_ed_fixed_mu=chi_ed_mu,
-        chi_ed_fixed_filling=chi_ed,
-        chi_ed_KN=chi_kn,
-        chi_ed_NN=chi_nn,
-        means_ed=np.asarray(means_aug[:nc]),
-        mu_ed=float(mu_ed),
+        ed_available=bool(run_full_ed),
+        ed_method=str(ed["method"]),
+        chi_ed_fixed_mu=np.asarray(ed["chi_fixed_mu"]),
+        chi_ed_fixed_filling=np.asarray(ed["chi_fixed_filling"]),
+        chi_ed_KN=np.asarray(ed["chi_kn"]),
+        chi_ed_NN=float(ed["chi_nn"]),
+        means_ed=np.asarray(ed["means"]),
+        mu_ed=float(ed["mu"]),
         matrix_relerr=float(relerr),
         diag_relerr=diag_relerr,
         zero_expectation=zero_obs,
