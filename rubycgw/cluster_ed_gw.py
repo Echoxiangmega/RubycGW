@@ -96,7 +96,13 @@ class ClusterEDGWResult:
 
 
 def build_intracell_h0(params: RubyParameters) -> np.ndarray:
-    """Return only primitive-cell (R=0) hopping as a 6x6 Hermitian matrix."""
+    """Return only primitive-cell (R=0) hopping as a 6x6 Hermitian matrix.
+
+    For a finite torus with Lx=1 or Ly=1 this is not necessarily the local block
+    of that torus, because a nonzero primitive translation can wrap back onto the
+    same cluster.  The embedding solver therefore uses the k-average of the actual
+    finite-torus h0(k) as its impurity one-body block.
+    """
     p0 = RubyParameters(ti=params.ti, t1=params.t1, t2=params.t2, V=0.0)
     h = np.zeros((NSUB, NSUB), dtype=complex)
     for i, j, R, amp in ruby_hoppings(p0):
@@ -340,7 +346,24 @@ def solve_cluster_ed_gw(
     if not background.converged:
         raise RuntimeError(f"initial lattice GW background is not converged: {background.final_error:.3e}")
 
-    h_cluster = build_intracell_h0(params)
+    # The impurity one-body block must be the local block of the *actual finite
+    # torus*, which is exactly the k-average of h0(k).  This differs from the
+    # strict R=0 primitive-cell block when Lx=1 or Ly=1 because a translated
+    # hopping can wrap around the PBC torus and return to the same cluster.  If
+    # that static wrap-around term were omitted here, Delta_target would retain
+    # a nonzero constant at |omega|->infinity, which no finite bath can represent
+    # because every bath hybridization decays as 1/(i omega).
+    h_cluster_strict = build_intracell_h0(params)
+    h_cluster = np.mean(h0, axis=(0, 1))
+    h_cluster = 0.5 * (h_cluster + h_cluster.conj().T)
+    alias_norm = _maxabs(h_cluster - h_cluster_strict)
+    if embed_opts.verbose and alias_norm > 1.0e-12:
+        print(
+            f"[cluster-ED+GW] finite-torus local-block correction: "
+            f"max|h_local-h_R0|={alias_norm:.3e}",
+            flush=True,
+        )
+
     interactions = ruby_cluster_interactions(params)
     V_cluster = np.asarray(Vq[0, 0], dtype=complex)
 
@@ -457,7 +480,7 @@ def solve_cluster_ed_gw(
             print(
                 f"[cluster-ED+GW] outer {it:02d}: residual={err:.3e}, "
                 f"Gimp/Gc mismatch={mismatch:.3e}, bath={bath.fit_error:.3e}, "
-                f"Nimp={selection.average_particles:.6f}, mu={mu:+.9f}, dt={elapsed:.1f}s",
+                f"Ntot_imp={selection.average_particles:.6f}, mu={mu:+.9f}, dt={elapsed:.1f}s",
                 flush=True,
             )
         sigma_imp = sigma_ed
