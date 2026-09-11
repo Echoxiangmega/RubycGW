@@ -1,22 +1,3 @@
-"""Exact diagonalization on rectangular periodic Ruby clusters.
-
-This module complements the specialized three-cell :mod:`rubycgw.ed18` code.
-It is intended for ordinary ``L1 x L2`` primitive-cell tori, in particular the
-2x2 (24-site) cluster whose primitive momenta are Gamma and the three M points.
-
-The main design goal is to make 24-site fixed-N Lanczos practical without
-constructing a gigantic many-body sparse Hamiltonian.  The Hilbert basis is an
-ascending fixed-popcount bit basis.  Hopping is applied matrix-free using
-cached fermionic transition source lists, while the density interaction is a
-small integer diagonal.  For Nsite<=24 a dense state->basis-index lookup table
-uses only 64 MiB at 24 sites and avoids Python dictionaries with millions of
-entries.
-
-The solver is exact for the chosen finite torus.  It does not imply a
-thermodynamic-limit result; use different cluster shapes/sizes when assessing
-finite-size trends.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -215,9 +196,6 @@ class RubyEDClusterSolver:
             counts += occ.astype(count_dtype)
         self.interaction_count = counts
 
-        # Cache per unordered site pair.  Each entry stores source basis indices
-        # with positive/negative fermion parity; destinations are reconstructed
-        # by XOR + the dense/searchsorted state lookup to save memory.
         self._pair_cache: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, np.uint64]] = {}
         self._operator_matrix_cache: dict[tuple[str, float, float], np.ndarray] = {}
 
@@ -306,15 +284,12 @@ class RubyEDClusterSolver:
         aij: complex,
         aji: complex,
     ) -> None:
-        """Apply off-diagonal one-body terms for one unordered site pair."""
         plus, minus, flipmask = self._pair_transition(i, j)
         for src, sgn in ((plus, 1.0), (minus, -1.0)):
             if src.size == 0:
                 continue
             states = self.basis[src]
             dst = self._state_indices(states ^ flipmask)
-            # If j is occupied the allowed bilinear is c_i^dag c_j (aij),
-            # otherwise c_j^dag c_i (aji).
             j_occ = ((states >> np.uint64(j)) & np.uint64(1)).astype(bool)
             amp = np.where(j_occ, complex(aij), complex(aji))
             y[dst] += sgn * amp * x[src]
@@ -354,6 +329,11 @@ class RubyEDClusterSolver:
                 dst = self._state_indices(self.basis[src] ^ flipmask)
                 y[dst] += (sgn * amp) * x[src]
         return y
+
+    def hamiltonian_trace(self, V: float) -> float:
+        """Exact many-body trace of H(V) in this fixed-N Hilbert space."""
+        diagonal = self._h_onsite_mb + float(V) * self.interaction_count
+        return float(np.sum(np.asarray(diagonal, dtype=float)))
 
     def hamiltonian_operator(self, V: float, *, complex_dtype: bool = False) -> LinearOperator:
         dtype = np.complex128 if complex_dtype else np.float64
