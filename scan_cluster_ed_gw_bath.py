@@ -64,7 +64,7 @@ def _scalar(z, key, default=np.nan):
     return a.reshape(()).item()
 
 
-def _run_one(args, nbath: int, work_out: Path) -> Path:
+def _run_one(args, nbath: int, work_out: Path, *, refresh_cache: bool = False) -> Path:
     cmd = [
         sys.executable,
         "run_cluster_ed_gw.py",
@@ -102,7 +102,7 @@ def _run_one(args, nbath: int, work_out: Path) -> Path:
         "--out", str(work_out),
         "--quiet-gw",
     ]
-    if args.refresh_cache:
+    if refresh_cache:
         cmd.append("--refresh-cache")
 
     print(f"\n=== nbath={nbath} ===", flush=True)
@@ -131,8 +131,13 @@ def main():
 
     rows = []
     saved_files = []
-    for nbath in nbaths:
-        produced = _run_one(args, nbath, work_out)
+    for idx, nbath in enumerate(nbaths):
+        produced = _run_one(
+            args,
+            nbath,
+            work_out,
+            refresh_cache=bool(args.refresh_cache and idx == 0),
+        )
         saved = args.out / (
             f"cluster_ed_gw_L{args.Lx}x{args.Ly}_V{args.V:.6g}_fill{args.filling:.6g}_nbath{nbath}.npz"
         )
