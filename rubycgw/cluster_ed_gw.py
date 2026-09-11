@@ -122,14 +122,21 @@ def bath_hybridization(
     energies: np.ndarray,
     couplings: np.ndarray,
 ) -> np.ndarray:
-    """Return Delta(iw)=V (iw+mu-eps)^(-1) V^dagger."""
+    """Return Delta_ab(iw)=sum_p t_bath[a,p] t_bath[b,p]^*/(iw+mu-eps_p).
+
+    ``couplings[a,p]`` is the one-particle cluster-bath hybridization amplitude
+    (often written as mathcal V_{ap}); it is unrelated to the physical density
+    interaction strength ``params.V`` of the Ruby model.
+    """
     w = np.asarray(omega, dtype=float).reshape(-1)
     eps = np.asarray(energies, dtype=float).reshape(-1)
-    V = np.asarray(couplings, dtype=complex)
-    if V.ndim != 2 or V.shape[1] != len(eps):
+    bath_hyb = np.asarray(couplings, dtype=complex)
+    if bath_hyb.ndim != 2 or bath_hyb.shape[1] != len(eps):
         raise ValueError("bath coupling shape mismatch")
     den = 1.0 / (1j * w[:, None] + float(mu) - eps[None, :])
-    return np.einsum("ap,np,bp->nab", V, den, V.conj(), optimize=True)
+    return np.einsum(
+        "ap,np,bp->nab", bath_hyb, den, bath_hyb.conj(), optimize=True
+    )
 
 
 def _initial_bath_guess(
@@ -141,8 +148,8 @@ def _initial_bath_guess(
 ) -> tuple[np.ndarray, np.ndarray]:
     norb = int(target_delta.shape[-1])
     eps = float(mu) + np.linspace(-float(energy_window), float(energy_window), nbath)
-    # i*w*Delta(iw) -> V V^dag at high frequency.  Use the largest available
-    # positive frequency to obtain a stable low-rank coupling seed.
+    # i*w*Delta(iw) -> t_bath t_bath^dag at high frequency.  Use the largest
+    # available positive frequency to obtain a stable low-rank hybridization seed.
     pos = np.flatnonzero(np.asarray(omega) > 0.0)
     idx = int(pos[np.argmax(np.asarray(omega)[pos])]) if pos.size else len(omega) - 1
     moment = (1j * float(omega[idx])) * np.asarray(target_delta[idx], dtype=complex)
@@ -151,12 +158,12 @@ def _initial_bath_guess(
     order = np.argsort(evals)[::-1]
     evals = np.maximum(evals[order], 1.0e-8)
     evecs = evecs[:, order]
-    V = np.zeros((norb, nbath), dtype=float)
+    bath_hyb = np.zeros((norb, nbath), dtype=float)
     rank = min(norb, nbath)
-    V[:, :rank] = evecs[:, :rank] * np.sqrt(evals[:rank])[None, :]
+    bath_hyb[:, :rank] = evecs[:, :rank] * np.sqrt(evals[:rank])[None, :]
     if nbath > rank:
-        V[:, rank:] = 1.0e-3
-    return eps, V
+        bath_hyb[:, rank:] = 1.0e-3
+    return eps, bath_hyb
 
 
 def fit_finite_bath(
@@ -194,17 +201,23 @@ def fit_finite_bath(
 
     if initial is not None:
         eps0 = np.asarray(initial.energies, dtype=float)
-        V0 = np.asarray(initial.couplings, dtype=float)
-        if eps0.shape != (nbath,) or V0.shape != (norb, nbath):
-            eps0, V0 = _initial_bath_guess(delta, w, mu, nbath, energy_window)
+        bath_hyb0 = np.asarray(initial.couplings, dtype=float)
+        if eps0.shape != (nbath,) or bath_hyb0.shape != (norb, nbath):
+            eps0, bath_hyb0 = _initial_bath_guess(
+                delta, w, mu, nbath, energy_window
+            )
     else:
-        eps0, V0 = _initial_bath_guess(delta, w, mu, nbath, energy_window)
+        eps0, bath_hyb0 = _initial_bath_guess(delta, w, mu, nbath, energy_window)
 
     lo_e = float(mu) - float(energy_window)
     hi_e = float(mu) + float(energy_window)
     eps0 = np.clip(eps0, lo_e + 1e-8, hi_e - 1e-8)
-    V0 = np.clip(V0, -float(coupling_bound) + 1e-8, float(coupling_bound) - 1e-8)
-    x0 = np.concatenate([eps0, V0.ravel()])
+    bath_hyb0 = np.clip(
+        bath_hyb0,
+        -float(coupling_bound) + 1e-8,
+        float(coupling_bound) - 1e-8,
+    )
+    x0 = np.concatenate([eps0, bath_hyb0.ravel()])
     lower = np.concatenate([
         np.full(nbath, lo_e),
         np.full(norb * nbath, -float(coupling_bound)),
@@ -218,8 +231,8 @@ def fit_finite_bath(
         return x[:nbath], x[nbath:].reshape(norb, nbath)
 
     def residual(x):
-        eps, V = unpack(x)
-        model = bath_hybridization(wfit, mu, eps, V)
+        eps, bath_hyb = unpack(x)
+        model = bath_hybridization(wfit, mu, eps, bath_hyb)
         diff = (model - dfit) * weights[:, None, None]
         return np.concatenate([diff.real.ravel(), diff.imag.ravel()])
 
@@ -232,14 +245,14 @@ def fit_finite_bath(
         ftol=float(xtol),
         gtol=float(xtol),
     )
-    eps, V = unpack(opt.x)
+    eps, bath_hyb = unpack(opt.x)
     order = np.argsort(eps)
     eps = np.asarray(eps[order], dtype=float)
-    V = np.asarray(V[:, order], dtype=float)
-    fit = bath_hybridization(wfit, mu, eps, V)
+    bath_hyb = np.asarray(bath_hyb[:, order], dtype=float)
+    fit = bath_hybridization(wfit, mu, eps, bath_hyb)
     den = max(float(np.linalg.norm(dfit.ravel())), 1e-300)
     err = float(np.linalg.norm((fit - dfit).ravel()) / den)
-    return BathParameters(eps, V, err, int(opt.nfev))
+    return BathParameters(eps, bath_hyb, err, int(opt.nfev))
 
 
 def build_impurity_one_body(
@@ -247,16 +260,16 @@ def build_impurity_one_body(
     bath: BathParameters,
 ) -> np.ndarray:
     h = np.asarray(h_cluster, dtype=complex)
-    V = np.asarray(bath.couplings, dtype=complex)
+    bath_hyb = np.asarray(bath.couplings, dtype=complex)
     eps = np.asarray(bath.energies, dtype=float)
     norb = int(h.shape[0])
     nbath = len(eps)
-    if h.shape != (norb, norb) or V.shape != (norb, nbath):
+    if h.shape != (norb, norb) or bath_hyb.shape != (norb, nbath):
         raise ValueError("cluster/bath shape mismatch")
     out = np.zeros((norb + nbath, norb + nbath), dtype=complex)
     out[:norb, :norb] = h
-    out[:norb, norb:] = V
-    out[norb:, :norb] = V.conj().T
+    out[:norb, norb:] = bath_hyb
+    out[norb:, :norb] = bath_hyb.conj().T
     out[norb:, norb:] = np.diag(eps)
     return 0.5 * (out + out.conj().T)
 
