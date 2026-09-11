@@ -26,6 +26,26 @@ def test_ruby_six_site_cluster_contains_all_interactions():
     assert all(abs(u - 1.7) < 1e-14 for _, _, u in terms)
 
 
+def test_finite_torus_local_block_is_k_average_not_strict_r0():
+    p = RubyParameters(ti=0.4, t1=0.2, t2=0.2, V=0.0)
+    h_r0 = build_intracell_h0(p)
+
+    # On a 2x1 torus, R=(0,-1) hoppings wrap back to the same primitive cell.
+    # They therefore belong to the local cluster one-body block.  The k-average
+    # captures this finite-size aliasing, while the strict R=0 block does not.
+    g21 = MatsubaraGrid(nk1=2, nk2=1, nw=2, nOmega=1, T=0.2)
+    h21 = build_h0(g21.kmesh(), p)
+    h_local_21 = np.mean(h21, axis=(0, 1))
+    assert np.max(np.abs(h_local_21 - h_r0)) > 1e-3
+
+    # Once both directions contain more than one cell, all nonzero primitive
+    # translations average away and the finite-torus local block reduces to R=0.
+    g22 = MatsubaraGrid(nk1=2, nk2=2, nw=2, nOmega=1, T=0.2)
+    h22 = build_h0(g22.kmesh(), p)
+    h_local_22 = np.mean(h22, axis=(0, 1))
+    assert np.max(np.abs(h_local_22 - h_r0)) < 1e-12
+
+
 def test_finite_bath_ed_is_exact_for_noninteracting_resolvent():
     h = np.array(
         [
@@ -61,9 +81,9 @@ def test_bath_fit_recovers_exact_seed_hybridization():
     omega = (2 * np.arange(-6, 6) + 1) * np.pi * T
     mu = 0.2
     eps = np.array([-0.7, 0.9])
-    V = np.array([[0.45, 0.12], [-0.18, 0.38]])
-    target = bath_hybridization(omega, mu, eps, V)
-    seed = BathParameters(eps.copy(), V.copy(), 0.0, 0)
+    bath_hyb = np.array([[0.45, 0.12], [-0.18, 0.38]])
+    target = bath_hybridization(omega, mu, eps, bath_hyb)
+    seed = BathParameters(eps.copy(), bath_hyb.copy(), 0.0, 0)
     fit = fit_finite_bath(
         target,
         omega,
