@@ -45,13 +45,16 @@ def main():
     current_means = []
     chi_uniform = []
     chi_alternating = []
-    prev = None
 
     u0 = canonical_ring_mode(0).real
     u3 = canonical_ring_mode(3).real
     for V in Vs:
-        spec = solver.solve(V, n_eigs=args.n_eigs, tol=args.tol, maxiter=args.maxiter, v0=prev)
-        prev = spec.eigenvectors[:, 0]
+        # Deliberately do not warm-start the zero-field eigensolver with the
+        # previous V ground state.  A symmetry-pure v0 can lock Lanczos into one
+        # C6 sector and then the reported excited-state gap is only a same-sector
+        # gap rather than the true low-energy spectrum across all sectors.
+        spec = solver.solve(V, n_eigs=args.n_eigs, tol=args.tol, maxiter=args.maxiter)
+        ground = spec.eigenvectors[:, 0]
         cur = solver.current_structure(spec)
         Sell = np.asarray([
             np.vdot(canonical_ring_mode(ell), cur.matrix @ canonical_ring_mode(ell)).real
@@ -70,11 +73,11 @@ def main():
         cu = np.nan
         ca = np.nan
         if args.source in {"uniform", "both"}:
-            ru = solver.source_response(V, u0, h=args.source_h, tol=args.tol, maxiter=args.maxiter, v0=prev)
+            ru = solver.source_response(V, u0, h=args.source_h, tol=args.tol, maxiter=args.maxiter, v0=ground)
             cu = float(ru["chi"])
             print(f"  chi_uniform(h={args.source_h:g})={cu:.8f}, M+={ru['M_plus']:+.6e}")
         if args.source in {"alternating", "both"}:
-            ra = solver.source_response(V, u3, h=args.source_h, tol=args.tol, maxiter=args.maxiter, v0=prev)
+            ra = solver.source_response(V, u3, h=args.source_h, tol=args.tol, maxiter=args.maxiter, v0=ground)
             ca = float(ra["chi"])
             print(f"  chi_alternating(h={args.source_h:g})={ca:.8f}, M+={ra['M_plus']:+.6e}")
 
