@@ -14,11 +14,16 @@ For each requested V this script
        z    : physical loop-current pseudospin (TR odd)
        rho  : triangle total density.
 
-The mode weights are
+The raw mode weights are
     w[n,alpha,ell] = |<n| O_{alpha,ell} |0>|^2,
 where O_{alpha,ell} = sum_m exp(i 2 pi ell m/6) O_{alpha,m}/sqrt(6).
 For ell != 0,3 the harmonic operator is complex/non-Hermitian; this is fine for
 spectral classification.  Conjugate ell and 6-ell sectors should pair by C6/TR.
+
+Because x/y span one E doublet and ell=1/5,2/4 are conjugate ring harmonics,
+the script additionally reports basis-insensitive grouped fingerprints such as
+"E_|ell|=2", obtained by summing x/y and the conjugate ell pair.  These grouped
+labels are the preferred way to identify a physical mode across parameter scans.
 """
 from __future__ import annotations
 
@@ -31,6 +36,28 @@ from rubycgw.ed18 import _manybody_onebody
 from rubycgw.hex18_ed import HEX_TRIANGLES, NTRI, Hex18Solver, canonical_ring_mode
 from rubycgw.model import RubyParameters
 from rubycgw.pseudospin import primitive_triangle_pseudospin_vertices
+
+
+COMPONENTS = np.asarray(["x", "y", "z", "rho"])
+
+# Group raw (component index, ell) channels into labels that do not depend on
+# choosing x versus y inside the E doublet or +ell versus -ell for conjugate
+# ring harmonics.  For ell=0 and 3 the harmonic is self-conjugate.
+GROUP_DEFINITIONS = (
+    ("E_ell=0", ((0, 0), (1, 0))),
+    ("E_|ell|=1", ((0, 1), (0, 5), (1, 1), (1, 5))),
+    ("E_|ell|=2", ((0, 2), (0, 4), (1, 2), (1, 4))),
+    ("E_ell=3", ((0, 3), (1, 3))),
+    ("z_ell=0", ((2, 0),)),
+    ("z_|ell|=1", ((2, 1), (2, 5))),
+    ("z_|ell|=2", ((2, 2), (2, 4))),
+    ("z_ell=3", ((2, 3),)),
+    ("rho_ell=0", ((3, 0),)),
+    ("rho_|ell|=1", ((3, 1), (3, 5))),
+    ("rho_|ell|=2", ((3, 2), (3, 4))),
+    ("rho_ell=3", ((3, 3),)),
+)
+GROUP_LABELS = np.asarray([x[0] for x in GROUP_DEFINITIONS])
 
 
 def _args():
@@ -87,7 +114,7 @@ def _harmonic_op(local_ops, ell: int):
 
 
 def _fingerprint(vecs: np.ndarray, families):
-    """Return weights shape (nstate,4,6) for transitions from ground state."""
+    """Return amplitudes/weights with shape (nstate,4,6), from ground state."""
     comps = ("x", "y", "z", "rho")
     psi0 = vecs[:, 0]
     nstate = vecs.shape[1]
@@ -101,6 +128,26 @@ def _fingerprint(vecs: np.ndarray, families):
             amplitudes[:, ia, ell] = amp
             weights[:, ia, ell] = np.abs(amp) ** 2
     return amplitudes, weights
+
+
+def _grouped_fingerprint(weights: np.ndarray) -> np.ndarray:
+    """Sum raw weights into basis-insensitive grouped channels.
+
+    Parameters
+    ----------
+    weights : ndarray, shape (..., 4, 6)
+        Raw spectral weights.
+
+    Returns
+    -------
+    grouped : ndarray, shape (..., n_groups)
+    """
+    weights = np.asarray(weights, dtype=float)
+    out = np.zeros(weights.shape[:-2] + (len(GROUP_DEFINITIONS),), dtype=float)
+    for ig, (_, members) in enumerate(GROUP_DEFINITIONS):
+        for ia, ell in members:
+            out[..., ig] += weights[..., ia, ell]
+    return out
 
 
 def _projected_chiral_states(energies, vecs, current_ops, M: int):
@@ -136,7 +183,6 @@ def main():
     params = RubyParameters(ti=args.ti, t1=args.t1, t2=args.t2, V=0.0)
     solver = Hex18Solver(params, primitive_filling=args.filling)
     families = _manybody_local_families(solver)
-    comps = np.asarray(["x", "y", "z", "rho"])
 
     Vs = np.asarray(args.V, dtype=float)
     ne = int(args.n_eigs)
@@ -146,10 +192,13 @@ def main():
 
     all_E = []
     all_weights = []
+    all_grouped_weights = []
     all_amp = []
     first_best_comp = []
     first_best_ell = []
     first_best_weight = []
+    first_best_group = []
+    first_best_group_weight = []
     proj_jmin = []
     proj_jmax = []
     proj_Emin = []
@@ -164,6 +213,7 @@ def main():
     print("=== Hex18 low-energy mode diagnostic ===")
     print(f"sites=18 N={solver.n_particles} dim={solver.dimension} n_eigs={ne}")
     print("operator families: x,y,z(loop current),rho(triangle density)")
+    print("preferred mode labels: grouped x/y E-doublet and conjugate +/-ell sectors")
 
     for V in Vs:
         # Intentionally no v0 from neighboring V: preserve access to all C6 sectors.
@@ -171,24 +221,32 @@ def main():
         E = np.asarray(spec.energies, dtype=float)
         vecs = np.asarray(spec.eigenvectors, dtype=complex)
         amp, weights = _fingerprint(vecs, families)
+        grouped = _grouped_fingerprint(weights)
 
-        # classify n=1 by largest weight over the supplied operator dictionary
+        # Raw classification is useful diagnostically, but the grouped label is
+        # the preferred invariant descriptor across V.
         flat = weights[1].reshape(-1)
         ib = int(np.argmax(flat))
         ia, ell = np.unravel_index(ib, weights[1].shape)
-        bcomp = str(comps[ia])
+        bcomp = str(COMPONENTS[ia])
         bw = float(weights[1, ia, ell])
+        igb = int(np.argmax(grouped[1]))
+        bgroup = str(GROUP_LABELS[igb])
+        bgw = float(grouped[1, igb])
 
         print(f"\nV={V:g}  E0={E[0]:+.10f}  gap1={E[1]-E[0]:.8e}")
-        print(f"  n=1 strongest fingerprint: {bcomp}, ell={ell}, weight={bw:.8e}")
+        print(f"  n=1 grouped fingerprint: {bgroup}, weight={bgw:.8e}")
+        print(f"      raw largest component: {bcomp}, ell={ell}, weight={bw:.8e}")
         nprint = min(int(args.print_states), len(E) - 1)
         for n in range(1, nprint + 1):
             flatn = weights[n].reshape(-1)
             ibn = int(np.argmax(flatn))
             ian, elln = np.unravel_index(ibn, weights[n].shape)
+            ign = int(np.argmax(grouped[n]))
             print(
                 f"  n={n:2d} gap={E[n]-E[0]:.8e}  "
-                f"best={comps[ian]} ell={elln} w={weights[n,ian,elln]:.6e}  "
+                f"group={GROUP_LABELS[ign]} W={grouped[n,ign]:.6e}  "
+                f"raw={COMPONENTS[ian]} ell={elln} w={weights[n,ian,elln]:.6e}  "
                 f"w_z0={weights[n,2,0]:.6e}"
             )
 
@@ -208,16 +266,19 @@ def main():
             pmns.append(pmin); pmxs.append(pmax)
             print(
                 f"  M={M:2d}: Jmin={rmin[0]:+.8f}, Jmax={rmax[0]:+.8f}, "
-                f"<H>+-E0=({rmin[1]-E[0]:.6e},{rmax[1]-E[0]:.6e}), "
+                f"<H>-E0=({rmin[1]-E[0]:.6e},{rmax[1]-E[0]:.6e}), "
                 f"sigmaE=({rmin[2]:.3e},{rmax[2]:.3e})"
             )
 
         all_E.append(E)
         all_weights.append(weights)
+        all_grouped_weights.append(grouped)
         all_amp.append(amp)
         first_best_comp.append(bcomp)
         first_best_ell.append(ell)
         first_best_weight.append(bw)
+        first_best_group.append(bgroup)
+        first_best_group_weight.append(bgw)
         proj_jmin.append(jmns); proj_jmax.append(jmxs)
         proj_Emin.append(emns); proj_Emax.append(emxs)
         proj_sigEmin.append(smns); proj_sigEmax.append(smxs)
@@ -231,12 +292,16 @@ def main():
         ti=float(args.ti), t1=float(args.t1), t2=float(args.t2), filling=float(args.filling),
         energies=np.asarray(all_E),
         gaps=np.asarray(all_E) - np.asarray(all_E)[:, :1],
-        components=comps,
+        components=COMPONENTS,
         spectral_amplitudes=np.asarray(all_amp),
         spectral_weights=np.asarray(all_weights),
+        group_labels=GROUP_LABELS,
+        grouped_spectral_weights=np.asarray(all_grouped_weights),
         first_best_component=np.asarray(first_best_comp),
         first_best_ell=np.asarray(first_best_ell, dtype=int),
         first_best_weight=np.asarray(first_best_weight, dtype=float),
+        first_best_group=np.asarray(first_best_group),
+        first_best_group_weight=np.asarray(first_best_group_weight, dtype=float),
         subspace_sizes=subspaces,
         projected_jmin=np.asarray(proj_jmin), projected_jmax=np.asarray(proj_jmax),
         projected_Emin=np.asarray(proj_Emin), projected_Emax=np.asarray(proj_Emax),
