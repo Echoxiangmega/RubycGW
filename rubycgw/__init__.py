@@ -114,6 +114,17 @@ from .magnetic_self_energy import (
     solve_checkpoint_uniform_B_self_energy_derivative,
 )
 
+# The cluster-ED+GW JF path must differentiate the same tail-subtracted density
+# map as the nonlinear production solver, and its impurity tangent must include
+# the explicit local source.  Install this compatibility layer package-wide so
+# validation and finite-q scan scripts use the corrected path automatically.
+from .cluster_ed_gw_jf_consistent import (
+    install_tail_consistent_cluster_jf as _install_tail_consistent_cluster_jf,
+)
+
+_install_tail_consistent_cluster_jf()
+del _install_tail_consistent_cluster_jf
+
 __all__ = [
     "RubyParameters", "MatsubaraGrid", "GWOptions", "GWResult",
     "NonInteractingResult", "VertexOptions", "VertexResult", "build_h0",
