@@ -13,6 +13,12 @@ linearly.
 The implementation below first normalizes the residual Gram block by its own
 scale and then applies a dimensionless regularizer.  Therefore the Pulay
 coefficients are invariant under an overall rescaling of all residuals.
+
+The package initializer installs this implementation into :mod:`rubycgw.gw` by
+default.  Consequently every solver that uses ``gw._mixed_self_energies`` gets
+the corrected Pulay behavior, including standalone validation/source scripts;
+no special launcher is required.  ``install_scale_invariant_pulay`` remains
+public as an idempotent compatibility helper for older launchers.
 """
 from __future__ import annotations
 
@@ -26,7 +32,7 @@ def scale_invariant_pulay_coefficients(history, regularization: float) -> np.nda
     ``(hout, gout, residual_h, residual_gw)``.
     """
     # Import lazily to avoid a circular import when this helper is installed
-    # before the production driver imports cluster_ed_gw_fast.
+    # while the package initializer is setting up the production GW module.
     from .gw import _residual_inner
 
     m = len(history)
@@ -69,8 +75,10 @@ def scale_invariant_pulay_coefficients(history, regularization: float) -> np.nda
 def install_scale_invariant_pulay():
     """Install the scale-invariant coefficient solver into ``rubycgw.gw``.
 
-    ``_mixed_self_energies`` resolves ``_pulay_coefficients`` from the GW module
-    at call time, so this also affects the already-imported cluster-ED+GW mixer.
+    The package initializer already calls this by default.  Keeping the helper
+    idempotent preserves compatibility with older launchers that install it
+    explicitly.  ``_mixed_self_energies`` resolves ``_pulay_coefficients`` from
+    the GW module at call time, so already-imported mixer aliases are covered.
     """
     from . import gw
 

@@ -166,6 +166,10 @@ def test_interacting_covariant_response_tracks_self_consistent_finite_difference
     metrics = compare_covariant_to_finite_difference(analytic, fd)
 
     assert metrics["G"]["rel_max"] < 3e-2
-    assert metrics["Sigma_H"]["rel_max"] < 3e-2
+    # A TR-odd loop-current source cannot induce a linear Hartree/density field
+    # on this unbroken background.  Both values are therefore symmetry-zero;
+    # a relative error is ill-defined once the improved Pulay solver reduces
+    # the finite-difference noise to ~1e-14.
+    assert metrics["Sigma_H"]["abs_max"] < 1e-10
     assert metrics["Sigma_GW"]["rel_max"] < 8e-2
     assert metrics["W"]["rel_max"] < 5e-2

@@ -8,6 +8,18 @@ from .gw import (
     NonInteractingResult,
     solve_noninteracting,
 )
+
+# Pulay/DIIS regularization must remain relative to the residual Gram scale.
+# Install the scale-invariant coefficient solver package-wide so every code
+# path that reuses gw._mixed_self_energies (ordinary GW, supercell GW/HF,
+# cluster ED+GW, source/validation solves, and weak-solver embeddings) gets the
+# same late-stage behavior.  The old accelerated launcher also calls this
+# installer explicitly; the operation is idempotent.
+from .pulay_accel import install_scale_invariant_pulay as _install_scale_invariant_pulay
+
+_install_scale_invariant_pulay()
+del _install_scale_invariant_pulay
+
 from .primitive_gw import solve_gw, rebuild_primitive_fixed_point
 from .gw_sox import GWSOXResult, solve_matrix_gw_sox, solve_primitive_gw_sox
 from .sox_covariant import SOXOptions
