@@ -8,6 +8,18 @@ from .gw import (
     NonInteractingResult,
     solve_noninteracting,
 )
+
+# Pulay/DIIS regularization must remain relative to the residual Gram scale.
+# Install the scale-invariant coefficient solver package-wide so every code
+# path that reuses gw._mixed_self_energies (ordinary GW, supercell GW/HF,
+# cluster ED+GW, source/validation solves, and weak-solver embeddings) gets the
+# same late-stage behavior.  The old accelerated launcher also calls this
+# installer explicitly; the operation is idempotent.
+from .pulay_accel import install_scale_invariant_pulay as _install_scale_invariant_pulay
+
+_install_scale_invariant_pulay()
+del _install_scale_invariant_pulay
+
 from .primitive_gw import solve_gw, rebuild_primitive_fixed_point
 from .gw_sox import GWSOXResult, solve_matrix_gw_sox, solve_primitive_gw_sox
 from .sox_covariant import SOXOptions
@@ -89,7 +101,7 @@ from .electromagnetic import (
 )
 from .bulk_orbital_magnetization import (
     BulkOrbitalMagnetizationResult,
-    analyze_checkpoint_bulk_orbital_magnetization,
+    analyze_checkpoint_bulk_orbital_moments,
     bulk_orbital_magnetization_from_arrays,
     spectral_cartesian_covariant_derivatives,
     supercell_h0_cartesian_derivatives,
@@ -137,7 +149,7 @@ __all__ = [
     "solve_electromagnetic_response", "finite_difference_electromagnetic_response",
     "compare_covariant_to_finite_difference",
     "BulkOrbitalMagnetizationResult",
-    "analyze_checkpoint_bulk_orbital_magnetization",
+    "analyze_checkpoint_bulk_orbital_moments",
     "bulk_orbital_magnetization_from_arrays",
     "spectral_cartesian_covariant_derivatives",
     "supercell_h0_cartesian_derivatives",
