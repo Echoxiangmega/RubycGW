@@ -16,6 +16,10 @@ A restart restores the expensive dynamic embedding state
 - chemical potential `mu`;
 - finite-bath energies and couplings.
 
+The saved bath is used as the initial guess for the first bath refit; it is not
+held fixed.  This matters for an unfinished checkpoint because the last saved
+bath can correspond to the pre-mixing state of the final outer iteration.
+
 The Pulay/DIIS history is intentionally **not** restored.  A restart therefore
 continues from the old physical fixed-point iterate but builds a fresh Pulay
 history using the current scale-invariant implementation.  This is important
