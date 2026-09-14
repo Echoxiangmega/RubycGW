@@ -7,6 +7,7 @@ from rubycgw import cluster_ed_weak_covariant
 from rubycgw import cluster_ed_weak_fast
 from rubycgw import cluster_ed_weak_warm
 from rubycgw import fierz_channel_gw
+from rubycgw import finite_box_gw
 from rubycgw import gf2
 from rubycgw import gw_dynamic_sosex
 from rubycgw import gw_sox
@@ -57,6 +58,7 @@ def test_all_shared_pulay_users_resolve_corrected_coefficients():
         cluster_ed_weak_fast,
         cluster_ed_weak_warm,
         fierz_channel_gw,
+        finite_box_gw,
         gf2,
         gw_dynamic_sosex,
         gw_sox,
