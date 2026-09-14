@@ -1,7 +1,7 @@
 # Restarting a cluster-ED+GW embedding
 
-Both `run_cluster_ed_gw.py` and `run_cluster_ed_gw_accel.py` support restarting
-from a previously saved cluster-ED+GW `.npz` result through
+`run_cluster_ed_gw_accel.py` supports restarting from a previously saved
+cluster-ED+GW `.npz` result through
 
 ```bash
 --restart-from PATH_TO_OLD_RESULT.npz
@@ -18,8 +18,8 @@ A restart restores the expensive dynamic embedding state
 
 The Pulay/DIIS history is intentionally **not** restored.  A restart therefore
 continues from the old physical fixed-point iterate but builds a fresh Pulay
-history using the current solver implementation.  This is important when the
-mixing algorithm or regularization has changed between runs.
+history using the current scale-invariant implementation.  This is important
+when the mixing algorithm or regularization has changed between runs.
 
 The restart loader requires the same physical problem and representation:
 `Lx`, `Ly`, `V`, `ti`, `t1`, `t2`, filling, temperature, Matsubara grids and
@@ -27,8 +27,7 @@ The restart loader requires the same physical problem and representation:
 `--embed-max`, `--embed-mixing`, Pulay settings and bath optimizer effort may be
 changed.
 
-For example, to continue an older calculation with the scale-invariant Pulay
-launcher and a tighter target tolerance,
+For example, to continue an older calculation with a tighter target tolerance,
 
 ```bash
 python run_cluster_ed_gw_accel.py \
@@ -39,6 +38,7 @@ python run_cluster_ed_gw_accel.py \
     --embed-tol 2e-5
 ```
 
-The saved output records the restart source path.  The new run starts its
-iteration counter at one; this counter refers only to the continuation segment,
-not the cumulative number of outer iterations across all runs.
+The new run starts its displayed outer-iteration counter at one; that counter
+refers only to the continuation segment, not the cumulative number of outer
+iterations across all runs.  The ordinary converged lattice-GW background is
+still retained as the reference background in the newly saved result.
