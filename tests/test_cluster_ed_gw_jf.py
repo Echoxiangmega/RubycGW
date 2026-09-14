@@ -3,6 +3,7 @@ import numpy as np
 from rubycgw.cluster_ed_gw import BathParameters, bath_hybridization
 from rubycgw.cluster_ed_gw_jf import (
     BathTangentModel,
+    BathTangentOptions,
     ClusterEmbeddedJacobian,
     ClusterJFOptions,
     _bath_from_theta,
@@ -10,8 +11,10 @@ from rubycgw.cluster_ed_gw_jf import (
     _complex_delta_derivatives,
     _pack_complex,
     _unpack_complex,
+    build_bath_tangent_model,
 )
 from rubycgw.grids import MatsubaraGrid
+from rubycgw.model import RubyParameters
 from rubycgw.pseudospin import primitive_pseudospin_vertex
 
 
@@ -71,6 +74,46 @@ def test_complex_delta_derivatives_match_centered_difference():
         dm = bath_hybridization(omega, mu, bm.energies, bm.couplings)
         numeric = (dp - dm) / (2.0 * h)
         assert np.allclose(deriv, numeric, rtol=3e-6, atol=3e-8)
+
+
+def test_small_impurity_bath_tangent_build_is_finite():
+    grid = MatsubaraGrid(nk1=1, nk2=1, nw=2, nOmega=1, T=0.5)
+    eye = np.eye(6, dtype=complex)
+    Gc = np.asarray([eye / (1j * w + 0.7) for w in grid.omega])
+    bath = BathParameters(
+        energies=np.array([0.25]),
+        couplings=np.array([[0.16], [0.10], [0.12], [0.14], [0.09], [0.11]], dtype=complex),
+        fit_error=0.0,
+        nfev=0,
+    )
+    params = RubyParameters(ti=0.4, t1=0.2, t2=0.2, V=0.15)
+    model = build_bath_tangent_model(
+        bath,
+        Gc,
+        np.zeros((6, 6), dtype=complex),
+        params,
+        grid,
+        mu=0.0,
+        opts=BathTangentOptions(
+            fit_metric="delta",
+            nfit=1,
+            svd_rcond=1e-8,
+            max_rank=2,
+            fd_step=2e-4,
+            fd_scheme="forward",
+            discard_weight_tol=1e-9,
+            verbose=False,
+        ),
+    )
+    assert 1 <= model.rank <= 2
+    assert np.all(np.isfinite(model.singular_values))
+    assert np.all(np.isfinite(model.sigma_modes))
+    assert np.isfinite(model.condition_number)
+    delta_gc = np.zeros_like(Gc)
+    delta_gc[:, 0, 0] = 1e-3 / (1.0 + grid.omega**2)
+    dsigma = model.impurity_sigma_from_delta_gc(delta_gc)
+    assert dsigma.shape == Gc.shape
+    assert np.all(np.isfinite(dsigma))
 
 
 def test_zero_kernel_jf_returns_bare_vertex_at_finite_q():
