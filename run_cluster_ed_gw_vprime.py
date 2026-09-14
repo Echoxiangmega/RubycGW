@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Run the isolated attractive-V' cluster ED+GW study.
+
+V' acts on all six inter-triangle bonds carrying t1/t2.  Negative V' is
+attractive.  The baseline rubycgw model is not modified; this launcher installs
+V-prime impurity hooks and writes results under a separate directory by default.
+"""
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import numpy as np
+
+from rubycgw.cluster_ed_gw_fast import ClusterEDGWFastOptions, solve_cluster_ed_gw_fast
+from rubycgw.grids import MatsubaraGrid
+from rubycgw.gw import GWOptions
+from rubycgw.model import build_h0
+from rubycgw.pulay_accel import install_scale_invariant_pulay
+from vprime_study.model import VPrimeParameters, build_vprime_interaction
+from vprime_study.patches import install_vprime_cluster_hooks
+
+
+install_scale_invariant_pulay()
+install_vprime_cluster_hooks()
+
+
+def _args():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--Lx", type=int, default=2)
+    p.add_argument("--Ly", type=int, default=2)
+    p.add_argument("--V", type=float, default=1.2, help="intra-triangle repulsion")
+    p.add_argument("--Vprime", "--Vp", dest="Vprime", type=float, default=-0.05,
+                   help="inter-triangle density interaction; negative is attractive")
+    p.add_argument("--ti", type=float, default=0.4)
+    p.add_argument("--t1", type=float, default=0.2)
+    p.add_argument("--t2", type=float, default=0.2)
+    p.add_argument("--filling", type=float, default=2.0)
+    p.add_argument("--T", type=float, default=0.08)
+    p.add_argument("--nw", type=int, default=55)
+    p.add_argument("--nomega", type=int, default=12)
+
+    p.add_argument("--gw-max", type=int, default=160)
+    p.add_argument("--gw-tol", type=float, default=1e-8)
+    p.add_argument("--gw-mixing", type=float, default=0.25)
+    p.add_argument("--gw-mixing-method", choices=("linear", "pulay"), default="pulay")
+
+    p.add_argument("--embed-max", type=int, default=100)
+    p.add_argument("--embed-tol", type=float, default=2e-5)
+    p.add_argument("--embed-mixing", type=float, default=0.80)
+    p.add_argument("--embed-mixing-method", choices=("linear", "pulay"), default="pulay")
+    p.add_argument("--embed-pulay-history", type=int, default=8)
+    p.add_argument("--embed-pulay-start", type=int, default=3)
+    p.add_argument("--embed-pulay-regularization", type=float, default=1e-7)
+    p.add_argument("--embed-pulay-step-cap", type=float, default=3.0)
+    p.add_argument("--impurity-mixing", type=float, default=1.0)
+
+    p.add_argument("--nbath", type=int, default=6)
+    p.add_argument("--bath-fit-nfreq", type=int, default=12)
+    p.add_argument("--bath-fit-max-nfev", type=int, default=300)
+    p.add_argument("--bath-energy-window", type=float, default=4.0)
+    p.add_argument("--bath-coupling-bound", type=float, default=4.0)
+    p.add_argument("--discard-weight-tol", type=float, default=1e-11)
+    p.add_argument("--quiet-gw", action="store_true")
+    p.add_argument("--quiet-embed", action="store_true")
+    p.add_argument("--out", type=Path, default=Path("results/vprime_cluster_bg"))
+    return p.parse_args()
+
+
+def _tag(x: float) -> str:
+    return f"{float(x):g}"
+
+
+def main():
+    args = _args()
+    if args.Lx < 1 or args.Ly < 1:
+        raise ValueError("Lx and Ly must be positive")
+
+    params = VPrimeParameters(
+        ti=float(args.ti), t1=float(args.t1), t2=float(args.t2),
+        V=float(args.V), Vprime=float(args.Vprime),
+    )
+    grid = MatsubaraGrid(
+        nk1=int(args.Lx), nk2=int(args.Ly), nw=int(args.nw),
+        nOmega=int(args.nomega), T=float(args.T),
+    )
+    h0 = build_h0(grid.kmesh(), params)
+    Vq = build_vprime_interaction(grid.qmesh(), params)
+
+    gw_opts = GWOptions(
+        target_filling=float(args.filling),
+        max_iter=int(args.gw_max), tol=float(args.gw_tol),
+        mixing=float(args.gw_mixing), mixing_method=str(args.gw_mixing_method),
+        verbose=not bool(args.quiet_gw), momentum_backend="fft",
+    )
+    embed_opts = ClusterEDGWFastOptions(
+        max_iter=int(args.embed_max), tol=float(args.embed_tol),
+        mixing=float(args.embed_mixing), mixing_method=str(args.embed_mixing_method),
+        pulay_history=int(args.embed_pulay_history),
+        pulay_start=int(args.embed_pulay_start),
+        pulay_regularization=float(args.embed_pulay_regularization),
+        pulay_step_cap=float(args.embed_pulay_step_cap),
+        impurity_mixing=float(args.impurity_mixing),
+        nbath=int(args.nbath), bath_fit_nfreq=int(args.bath_fit_nfreq),
+        bath_fit_max_nfev=int(args.bath_fit_max_nfev),
+        bath_energy_window=float(args.bath_energy_window),
+        bath_coupling_bound=float(args.bath_coupling_bound),
+        discard_weight_tol=float(args.discard_weight_tol),
+        verbose=not bool(args.quiet_embed),
+    )
+
+    print(
+        "=== Ruby V-prime cluster ED+GW ===\n"
+        f"L={args.Lx}x{args.Ly}, V={args.V:g}, V'={args.Vprime:g}, "
+        f"filling={args.filling:g}, T={args.T:g}\n"
+        "V' bond set: all six inter-triangle t1/t2 bonds; V'<0 is attractive",
+        flush=True,
+    )
+    result = solve_cluster_ed_gw_fast(
+        h0, Vq, params, grid, gw_opts=gw_opts, embed_opts=embed_opts
+    )
+
+    args.out.mkdir(parents=True, exist_ok=True)
+    outfile = args.out / (
+        f"cluster_ed_gw_vprime_L{args.Lx}x{args.Ly}_V{_tag(args.V)}_"
+        f"Vp{_tag(args.Vprime)}_fill{_tag(args.filling)}.npz"
+    )
+    np.savez_compressed(
+        outfile,
+        interaction_model=np.asarray("V_intra_plus_Vprime_intertriangle"),
+        cluster_projection=np.asarray("q0_primitive_cell_projection"),
+        Lx=int(args.Lx), Ly=int(args.Ly),
+        V=float(args.V), Vprime=float(args.Vprime), Vp=float(args.Vprime),
+        filling=float(args.filling), T=float(args.T),
+        ti=float(args.ti), t1=float(args.t1), t2=float(args.t2),
+        omega=np.asarray(grid.omega), Omega=np.asarray(grid.Omega),
+        converged=bool(result.converged), iterations=int(result.iterations),
+        final_error=float(result.final_error),
+        impurity_mismatch=float(result.impurity_mismatch),
+        bath_fit_error=float(result.bath_fit_error),
+        mixing_method=str(result.mixing_method),
+        pulay_fallbacks=int(result.pulay_fallbacks),
+        residual_history=np.asarray(result.residual_history),
+        impurity_residual_history=np.asarray(result.impurity_residual_history),
+        impurity_mismatch_history=np.asarray(result.impurity_mismatch_history),
+        bath_fit_history=np.asarray(result.bath_fit_history),
+        mu_history=np.asarray(result.mu_history),
+        bath_nfev_history=np.asarray(result.bath_nfev_history),
+        elapsed_history=np.asarray(result.elapsed_history),
+        mu=float(result.mu), density=np.asarray(result.density),
+        G=np.asarray(result.G), W=np.asarray(result.W), P=np.asarray(result.P),
+        Sigma_H=np.asarray(result.Sigma_H), Sigma_emb=np.asarray(result.Sigma_emb),
+        Sigma_GW_lattice=np.asarray(result.Sigma_GW_lattice),
+        Sigma_GW_cluster=np.asarray(result.Sigma_GW_cluster),
+        Sigma_ED_cluster=np.asarray(result.Sigma_ED_cluster),
+        G_cluster=np.asarray(result.G_cluster), G_impurity=np.asarray(result.G_impurity),
+        bath_energies=np.asarray(result.bath.energies),
+        bath_couplings=np.asarray(result.bath.couplings),
+        G_background=np.asarray(result.background.G),
+        mu_background=float(result.background.mu),
+    )
+    print(
+        f"saved {outfile}\n"
+        f"converged={result.converged}, residual={result.final_error:.3e}, "
+        f"bath={result.bath_fit_error:.3e}",
+        flush=True,
+    )
+
+
+if __name__ == "__main__":
+    main()
