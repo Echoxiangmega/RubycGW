@@ -1,0 +1,48 @@
+# Restarting a cluster-ED+GW embedding
+
+`run_cluster_ed_gw_accel.py` supports restarting from a previously saved
+cluster-ED+GW `.npz` result through
+
+```bash
+--restart-from PATH_TO_OLD_RESULT.npz
+```
+
+A restart restores the expensive dynamic embedding state
+
+- lattice Green function `G`;
+- Hartree self-energy `Sigma_H`;
+- embedded dynamic self-energy `Sigma_emb`;
+- impurity/ED cluster self-energy `Sigma_ED_cluster`;
+- chemical potential `mu`;
+- finite-bath energies and couplings.
+
+The saved bath is used as the initial guess for the first bath refit; it is not
+held fixed.  This matters for an unfinished checkpoint because the last saved
+bath can correspond to the pre-mixing state of the final outer iteration.
+
+The Pulay/DIIS history is intentionally **not** restored.  A restart therefore
+continues from the old physical fixed-point iterate but builds a fresh Pulay
+history using the current scale-invariant implementation.  This is important
+when the mixing algorithm or regularization has changed between runs.
+
+The restart loader requires the same physical problem and representation:
+`Lx`, `Ly`, `V`, `ti`, `t1`, `t2`, filling, temperature, Matsubara grids and
+`nbath` must match.  Convergence-control parameters such as `--embed-tol`,
+`--embed-max`, `--embed-mixing`, Pulay settings and bath optimizer effort may be
+changed.
+
+For example, to continue an older calculation with a tighter target tolerance,
+
+```bash
+python run_cluster_ed_gw_accel.py \
+    --Lx 6 --Ly 6 --V 2.0 --filling 2 --T 0.08 \
+    --nbath 6 \
+    --restart-from results/cluster_ed_gw/cluster_ed_gw_L6x6_V2_fill2.npz \
+    --embed-max 100 \
+    --embed-tol 2e-5
+```
+
+The new run starts its displayed outer-iteration counter at one; that counter
+refers only to the continuation segment, not the cumulative number of outer
+iterations across all runs.  The ordinary converged lattice-GW background is
+still retained as the reference background in the newly saved result.
