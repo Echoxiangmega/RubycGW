@@ -101,7 +101,7 @@ from .electromagnetic import (
 )
 from .bulk_orbital_magnetization import (
     BulkOrbitalMagnetizationResult,
-    analyze_checkpoint_bulk_orbital_moments,
+    analyze_checkpoint_bulk_orbital_magnetization,
     bulk_orbital_magnetization_from_arrays,
     spectral_cartesian_covariant_derivatives,
     supercell_h0_cartesian_derivatives,
@@ -149,7 +149,7 @@ __all__ = [
     "solve_electromagnetic_response", "finite_difference_electromagnetic_response",
     "compare_covariant_to_finite_difference",
     "BulkOrbitalMagnetizationResult",
-    "analyze_checkpoint_bulk_orbital_moments",
+    "analyze_checkpoint_bulk_orbital_magnetization",
     "bulk_orbital_magnetization_from_arrays",
     "spectral_cartesian_covariant_derivatives",
     "supercell_h0_cartesian_derivatives",
