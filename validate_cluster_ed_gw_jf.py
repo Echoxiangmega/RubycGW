@@ -14,8 +14,14 @@ JF derivative up to bath-tangent, Krylov and finite-h errors.
 Rank convergence can be evaluated without repeating the expensive impurity ED
 finite differences.  ``--bath-ranks 24 48 0`` builds the full SVD-retained
 bath tangent once (``0`` means full rank), then truncates that precomputed model
-to ranks 24, 48 and full for the Krylov response solves.  The finite-source
-reference is also computed only once.
+to ranks 24, 48 and full for the Krylov response solves.
+
+Finite-difference-step convergence can also be evaluated in one invocation.
+``--bath-fd-steps 4e-4 2e-4 1e-4`` rebuilds the bath/explicit-source tangent for
+each requested step, because those ED derivatives genuinely depend on the
+step, while reusing the same refined h=0 state and computing the nonlinear
+finite-source reference only once.  ``--bath-ranks`` and ``--bath-fd-steps``
+can be combined.
 
 Examples
 --------
@@ -27,6 +33,11 @@ Examples
     python validate_cluster_ed_gw_jf.py INPUT.npz \
         --channels Az --h 1e-3 5e-4 \
         --bath-ranks 24 48 0 --out results/jf_validation_Az_ranks.npz
+
+    python validate_cluster_ed_gw_jf.py INPUT.npz \
+        --channels Az --h 1e-3 5e-4 --bath-ranks 0 \
+        --bath-fd-steps 4e-4 2e-4 1e-4 \
+        --out results/jf_validation_Az_fd_steps.npz
 """
 from __future__ import annotations
 
@@ -89,7 +100,22 @@ def _args():
             "<=0 means the full SVD-retained rank and overrides --bath-rank"
         ),
     )
-    p.add_argument("--bath-fd-step", type=float, default=2e-4)
+    p.add_argument(
+        "--bath-fd-step",
+        type=float,
+        default=2e-4,
+        help="single bath/source finite-difference step",
+    )
+    p.add_argument(
+        "--bath-fd-steps",
+        nargs="+",
+        type=float,
+        default=None,
+        help=(
+            "finite-difference-step convergence list; each step rebuilds the "
+            "ED tangent, while h=0 refinement and finite-source reference are reused"
+        ),
+    )
     p.add_argument("--bath-fd-scheme", choices=("centered", "forward"), default="centered")
     p.add_argument("--discard-weight-tol", type=float, default=1e-11)
 
@@ -151,6 +177,23 @@ def _requested_bath_ranks(args) -> list[int]:
     return out
 
 
+def _requested_bath_fd_steps(args) -> list[float]:
+    raw = (
+        [float(args.bath_fd_step)]
+        if args.bath_fd_steps is None
+        else [float(x) for x in args.bath_fd_steps]
+    )
+    out = []
+    for step in raw:
+        if not np.isfinite(step) or step <= 0.0:
+            raise ValueError("bath finite-difference steps must be finite and positive")
+        if step not in out:
+            out.append(step)
+    if not out:
+        raise ValueError("at least one bath finite-difference step is required")
+    return out
+
+
 def _build_max_rank(requested: list[int]) -> int | None:
     # Any non-positive entry requests the full SVD-retained tangent.  Otherwise
     # only build the largest requested rank; all smaller ranks are cheap views.
@@ -167,6 +210,7 @@ def main():
     if hvalues.size == 0:
         raise ValueError("--h needs at least one nonzero magnitude")
     requested_ranks = _requested_bath_ranks(args)
+    requested_fd_steps = _requested_bath_fd_steps(args)
 
     with np.load(args.input, allow_pickle=False) as z:
         if "converged" in z and not bool(z["converged"]):
@@ -223,6 +267,19 @@ def main():
         discard_weight_tol=float(args.discard_weight_tol),
         verbose=not args.quiet,
     )
+    jf_opts = ClusterJFOptions(
+        solver=args.solver,
+        tol=float(args.jf_tol),
+        maxiter=int(args.jf_maxiter),
+        restart=int(args.krylov_m),
+        recycle_dim=int(args.recycle_k),
+        include_hartree=True,
+        include_fock=True,
+        include_mt=True,
+        include_al=(args.stage == "full"),
+        momentum_backend="fft",
+        verbose=not args.quiet,
+    )
 
     print("=== refine the common h=0 complex-bath fixed point ===", flush=True)
     zero = solve_cluster_source_warm(
@@ -240,83 +297,104 @@ def main():
 
     build_rank = _build_max_rank(requested_ranks)
     build_label = "full" if build_rank is None else str(build_rank)
+    ns = len(requested_fd_steps)
+    nr = len(requested_ranks)
+
+    chi_jf_raw_by_step_rank = np.empty((ns, nr, nc, nc), dtype=complex)
+    chi_jf_by_step_rank = np.empty((ns, nr, nc, nc), dtype=complex)
+    jf_iterations_by_step_rank = np.empty((ns, nr, nc), dtype=int)
+    jf_residuals_by_step_rank = np.empty((ns, nr, nc), dtype=float)
+    effective_ranks_by_step = np.empty((ns, nr), dtype=int)
+    tangent_conditions_by_step_rank = np.empty((ns, nr), dtype=float)
+    tangent_full_ranks = np.empty(ns, dtype=int)
+    tangent_build_seconds = np.empty(ns, dtype=float)
+    singular_values_reference = None
+    tangent_full_selected = None
+
     print(
-        f"=== build bath tangent once: requested={requested_ranks}, build-rank={build_label} ===",
+        f"=== JF finite-difference steps: {requested_fd_steps}; "
+        f"requested ranks={requested_ranks}, build-rank={build_label} ===",
         flush=True,
     )
-    jf, tangent_full = build_embedded_jacobian(
-        state.G,
-        Vq,
-        state.bath,
-        h_cluster,
-        params,
-        grid,
-        state.mu,
-        rho_c,
-        bath_opts=BathTangentOptions(
-            fit_metric=args.bath_metric,
-            nfit=int(args.bath_fit_nfreq),
-            svd_rcond=float(args.bath_svd_rcond),
-            max_rank=build_rank,
-            fd_step=float(args.bath_fd_step),
-            fd_scheme=args.bath_fd_scheme,
-            discard_weight_tol=float(args.discard_weight_tol),
-            verbose=not args.quiet,
-        ),
-        jf_opts=ClusterJFOptions(
-            solver=args.solver,
-            tol=float(args.jf_tol),
-            maxiter=int(args.jf_maxiter),
-            restart=int(args.krylov_m),
-            recycle_dim=int(args.recycle_k),
-            include_hartree=True,
-            include_fock=True,
-            include_mt=True,
-            include_al=(args.stage == "full"),
-            momentum_backend="fft",
-            verbose=not args.quiet,
-        ),
-    )
-
-    nr = len(requested_ranks)
-    chi_jf_raw_by_rank = np.empty((nr, nc, nc), dtype=complex)
-    chi_jf_by_rank = np.empty((nr, nc, nc), dtype=complex)
-    jf_iterations_by_rank = np.empty((nr, nc), dtype=int)
-    jf_residuals_by_rank = np.empty((nr, nc), dtype=float)
-    effective_ranks = np.empty(nr, dtype=int)
-    tangent_conditions = np.empty(nr, dtype=float)
-    previous_gammas = [None] * nc
-
-    print("\n=== JF bath-rank truncations from the common tangent ===", flush=True)
-    for ir, requested in enumerate(requested_ranks):
-        tangent = truncate_bath_tangent_model(tangent_full, requested)
-        jf.bath_tangent = tangent
-        effective_ranks[ir] = int(tangent.rank)
-        tangent_conditions[ir] = float(tangent.condition_number)
-        label = "full" if int(requested) <= 0 else str(int(requested))
+    for istep, fd_step in enumerate(requested_fd_steps):
         print(
-            f"--- requested rank={label}, effective rank={tangent.rank}, "
-            f"cond(I-M)={tangent.condition_number:.3e} ---",
+            f"\n=== build bath tangent for fd-step={fd_step:.6g}, "
+            f"build-rank={build_label} ===",
             flush=True,
         )
-        chi_raw, results = response_matrix(
-            jf,
-            K,
-            (0, 0),
-            initial_gammas=previous_gammas,
-            recycle=True,
+        jf, tangent_full = build_embedded_jacobian(
+            state.G,
+            Vq,
+            state.bath,
+            h_cluster,
+            params,
+            grid,
+            state.mu,
+            rho_c,
+            bath_opts=BathTangentOptions(
+                fit_metric=args.bath_metric,
+                nfit=int(args.bath_fit_nfreq),
+                svd_rcond=float(args.bath_svd_rcond),
+                max_rank=build_rank,
+                fd_step=float(fd_step),
+                fd_scheme=args.bath_fd_scheme,
+                discard_weight_tol=float(args.discard_weight_tol),
+                verbose=not args.quiet,
+            ),
+            jf_opts=jf_opts,
         )
-        chi = 0.5 * (chi_raw + chi_raw.conj().T)
-        chi_jf_raw_by_rank[ir] = chi_raw
-        chi_jf_by_rank[ir] = chi
-        jf_iterations_by_rank[ir] = np.asarray([r.iterations for r in results], dtype=int)
-        jf_residuals_by_rank[ir] = np.asarray([r.final_error for r in results], dtype=float)
-        previous_gammas = [np.asarray(r.Gamma) for r in results]
+        tangent_full_ranks[istep] = int(tangent_full.rank)
+        tangent_build_seconds[istep] = float(tangent_full.build_seconds)
+        if singular_values_reference is None:
+            singular_values_reference = np.asarray(tangent_full.singular_values).copy()
+        elif not np.allclose(
+            singular_values_reference,
+            np.asarray(tangent_full.singular_values),
+            rtol=1e-12,
+            atol=1e-14,
+        ):
+            raise RuntimeError(
+                "bath-fit singular spectrum changed across fd steps; "
+                "this should be independent of the ED finite-difference step"
+            )
+
+        previous_gammas = [None] * nc
+        print("=== JF bath-rank truncations for this fd step ===", flush=True)
+        for ir, requested in enumerate(requested_ranks):
+            tangent = truncate_bath_tangent_model(tangent_full, requested)
+            jf.bath_tangent = tangent
+            effective_ranks_by_step[istep, ir] = int(tangent.rank)
+            tangent_conditions_by_step_rank[istep, ir] = float(tangent.condition_number)
+            label = "full" if int(requested) <= 0 else str(int(requested))
+            print(
+                f"--- fd-step={fd_step:.6g}, requested rank={label}, "
+                f"effective rank={tangent.rank}, "
+                f"cond(I-M)={tangent.condition_number:.3e} ---",
+                flush=True,
+            )
+            chi_raw, results = response_matrix(
+                jf,
+                K,
+                (0, 0),
+                initial_gammas=previous_gammas,
+                recycle=True,
+            )
+            chi = 0.5 * (chi_raw + chi_raw.conj().T)
+            chi_jf_raw_by_step_rank[istep, ir] = chi_raw
+            chi_jf_by_step_rank[istep, ir] = chi
+            jf_iterations_by_step_rank[istep, ir] = np.asarray(
+                [r.iterations for r in results], dtype=int
+            )
+            jf_residuals_by_step_rank[istep, ir] = np.asarray(
+                [r.final_error for r in results], dtype=float
+            )
+            previous_gammas = [np.asarray(r.Gamma) for r in results]
+        tangent_full_selected = tangent_full
 
     chi_h = np.empty((len(hvalues), nc, nc), dtype=float)
     source_residual = np.empty((len(hvalues), nc, 2), dtype=float)
     source_iterations = np.empty((len(hvalues), nc, 2), dtype=int)
-    print("\n=== central finite-source derivatives ===", flush=True)
+    print("\n=== central finite-source derivatives (computed once) ===", flush=True)
     for b, ch in enumerate(channels):
         plus_seed = _copy_state(state)
         minus_seed = _copy_state(state)
@@ -353,30 +431,54 @@ def main():
 
     chi_fs_raw = _extrapolate_h2(hvalues, chi_h)
     chi_fs = 0.5 * (chi_fs_raw + chi_fs_raw.T)
-    matrix_relerr_by_rank = np.asarray(
-        [_relerr(chi_jf_by_rank[i], chi_fs) for i in range(nr)], dtype=float
-    )
+    matrix_relerr_by_step_rank = np.empty((ns, nr), dtype=float)
+    for istep in range(ns):
+        for ir in range(nr):
+            matrix_relerr_by_step_rank[istep, ir] = _relerr(
+                chi_jf_by_step_rank[istep, ir], chi_fs
+            )
 
     print("\nchannels:", channels, flush=True)
     print("finite-source chi(h->0):\n", np.array2string(chi_fs, precision=8), flush=True)
-    print("\n=== JF rank-convergence summary ===", flush=True)
-    for ir, requested in enumerate(requested_ranks):
-        label = "full" if int(requested) <= 0 else str(int(requested))
-        print(
-            f"rank {label} (effective {effective_ranks[ir]}): "
-            f"matrix relative difference = {matrix_relerr_by_rank[ir]:.6e}",
-            flush=True,
-        )
-        print(
-            np.array2string(chi_jf_by_rank[ir].real, precision=8),
-            flush=True,
-        )
+    print("\n=== JF fd-step / rank convergence summary ===", flush=True)
+    for istep, fd_step in enumerate(requested_fd_steps):
+        print(f"fd-step={fd_step:.6g}:", flush=True)
+        for ir, requested in enumerate(requested_ranks):
+            label = "full" if int(requested) <= 0 else str(int(requested))
+            print(
+                f"  rank {label} (effective {effective_ranks_by_step[istep, ir]}): "
+                f"matrix relative difference = "
+                f"{matrix_relerr_by_step_rank[istep, ir]:.6e}",
+                flush=True,
+            )
+            print(
+                np.array2string(chi_jf_by_step_rank[istep, ir].real, precision=8),
+                flush=True,
+            )
 
-    # Backward-compatible scalar/matrix keys point to the last requested rank.
-    selected = nr - 1
-    chi_jf_raw = chi_jf_raw_by_rank[selected]
-    chi_jf = chi_jf_by_rank[selected]
-    err = float(matrix_relerr_by_rank[selected])
+    # Backward-compatible keys point to the last requested fd step and rank.
+    selected_step = ns - 1
+    selected_rank = nr - 1
+    chi_jf_raw = chi_jf_raw_by_step_rank[selected_step, selected_rank]
+    chi_jf = chi_jf_by_step_rank[selected_step, selected_rank]
+    err = float(matrix_relerr_by_step_rank[selected_step, selected_rank])
+
+    # Previous rank-scan keys keep their historical shapes for the selected step.
+    chi_jf_raw_by_rank = chi_jf_raw_by_step_rank[selected_step]
+    chi_jf_by_rank = chi_jf_by_step_rank[selected_step]
+    jf_iterations_by_rank = jf_iterations_by_step_rank[selected_step]
+    jf_residuals_by_rank = jf_residuals_by_step_rank[selected_step]
+    effective_ranks = effective_ranks_by_step[selected_step]
+    tangent_conditions = tangent_conditions_by_step_rank[selected_step]
+    matrix_relerr_by_rank = matrix_relerr_by_step_rank[selected_step]
+
+    # Convenience step-scan keys follow the last requested rank across steps.
+    chi_jf_raw_by_fd_step = chi_jf_raw_by_step_rank[:, selected_rank]
+    chi_jf_by_fd_step = chi_jf_by_step_rank[:, selected_rank]
+    jf_iterations_by_fd_step = jf_iterations_by_step_rank[:, selected_rank]
+    jf_residuals_by_fd_step = jf_residuals_by_step_rank[:, selected_rank]
+    matrix_relerr_by_fd_step = matrix_relerr_by_step_rank[:, selected_rank]
+    tangent_condition_by_fd_step = tangent_conditions_by_step_rank[:, selected_rank]
 
     out = args.out.with_suffix(".npz") if args.out.suffix.lower() != ".npz" else args.out
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -389,28 +491,44 @@ def main():
         chi_jf=chi_jf,
         chi_jf_raw_by_rank=chi_jf_raw_by_rank,
         chi_jf_by_rank=chi_jf_by_rank,
+        chi_jf_raw_by_fd_step=chi_jf_raw_by_fd_step,
+        chi_jf_by_fd_step=chi_jf_by_fd_step,
+        chi_jf_raw_by_fd_step_rank=chi_jf_raw_by_step_rank,
+        chi_jf_by_fd_step_rank=chi_jf_by_step_rank,
         chi_finite_source_h=chi_h,
         chi_finite_source_raw_extrapolated=chi_fs_raw,
         chi_finite_source=chi_fs,
         matrix_relerr=float(err),
         matrix_relerr_by_rank=matrix_relerr_by_rank,
-        jf_iterations=jf_iterations_by_rank[selected],
-        jf_residuals=jf_residuals_by_rank[selected],
+        matrix_relerr_by_fd_step=matrix_relerr_by_fd_step,
+        matrix_relerr_by_fd_step_rank=matrix_relerr_by_step_rank,
+        jf_iterations=jf_iterations_by_step_rank[selected_step, selected_rank],
+        jf_residuals=jf_residuals_by_step_rank[selected_step, selected_rank],
         jf_iterations_by_rank=jf_iterations_by_rank,
         jf_residuals_by_rank=jf_residuals_by_rank,
+        jf_iterations_by_fd_step=jf_iterations_by_fd_step,
+        jf_residuals_by_fd_step=jf_residuals_by_fd_step,
+        jf_iterations_by_fd_step_rank=jf_iterations_by_step_rank,
+        jf_residuals_by_fd_step_rank=jf_residuals_by_step_rank,
         source_iterations=source_iterations,
         source_residuals=source_residual,
         zero_source_residual=float(zero.final_error),
         zero_source_bath_fit=float(zero.bath_fit_error),
         bath_ranks_requested=np.asarray(requested_ranks, dtype=int),
         bath_ranks_effective=effective_ranks,
-        bath_tangent_rank=int(effective_ranks[selected]),
-        bath_tangent_full_rank=int(tangent_full.rank),
-        bath_tangent_singular_values=tangent_full.singular_values,
-        bath_tangent_condition=float(tangent_conditions[selected]),
+        bath_ranks_effective_by_fd_step=effective_ranks_by_step,
+        bath_tangent_rank=int(effective_ranks[selected_rank]),
+        bath_tangent_full_rank=int(tangent_full_ranks[selected_step]),
+        bath_tangent_full_rank_by_fd_step=tangent_full_ranks,
+        bath_tangent_singular_values=np.asarray(singular_values_reference),
+        bath_tangent_condition=float(tangent_conditions[selected_rank]),
         bath_tangent_condition_by_rank=tangent_conditions,
-        bath_tangent_build_seconds=float(tangent_full.build_seconds),
-        bath_fd_step=float(tangent_full.fd_step),
+        bath_tangent_condition_by_fd_step=tangent_condition_by_fd_step,
+        bath_tangent_condition_by_fd_step_rank=tangent_conditions_by_step_rank,
+        bath_tangent_build_seconds=float(tangent_build_seconds[selected_step]),
+        bath_tangent_build_seconds_by_fd_step=tangent_build_seconds,
+        bath_fd_step=float(requested_fd_steps[selected_step]),
+        bath_fd_steps_requested=np.asarray(requested_fd_steps, dtype=float),
     )
     print(f"saved {out}", flush=True)
 
