@@ -95,6 +95,31 @@ def _maxabs(a: np.ndarray) -> float:
     return float(np.max(np.abs(np.asarray(a)), initial=0.0))
 
 
+def _krylov_relative_tol_for_maxabs(b: np.ndarray, maxabs_tol: float) -> float:
+    """Convert the requested max-abs residual tolerance to SciPy ``rtol``.
+
+    SciPy's GMRES/GCROT stopping test is based on the Euclidean residual norm,
+    while the embedded JF solver reports and accepts convergence using
+    ``max(abs(Ax-b))``.  Choosing ``rtol`` so that
+
+        rtol * ||b||_2 <= maxabs_tol
+
+    makes the SciPy stop criterion a sufficient condition for the final
+    max-absolute residual criterion because ``||r||_inf <= ||r||_2``.  This
+    also keeps the legacy SciPy ``tol=`` fallback consistent with the modern
+    ``rtol=`` API.
+    """
+    tol = float(maxabs_tol)
+    if not np.isfinite(tol) or tol <= 0.0:
+        raise ValueError("JF tolerance must be finite and positive")
+    bnorm = float(np.linalg.norm(np.asarray(b, dtype=float).ravel()))
+    if not np.isfinite(bnorm):
+        raise ValueError("JF right-hand side has a non-finite norm")
+    if bnorm <= np.finfo(float).tiny:
+        return 0.0
+    return min(1.0, tol / bnorm)
+
+
 def _bath_theta(bath: BathParameters) -> np.ndarray:
     eps = np.asarray(bath.energies, dtype=float).reshape(-1)
     hyb = np.asarray(bath.couplings, dtype=complex)
@@ -578,6 +603,7 @@ class ClusterEmbeddedJacobian:
         A = self.linear_operator(p)
         b = _pack_complex(Kfield)
         x0 = _pack_complex(gamma0)
+        krylov_rtol = _krylov_relative_tol_for_maxabs(b, float(self.opts.tol))
         count = [0]
 
         def callback(_):
@@ -596,9 +622,9 @@ class ClusterEmbeddedJacobian:
                 callback=callback,
             )
             try:
-                x, info = gcrotmk(A, b, rtol=float(self.opts.tol), **kwargs)
+                x, info = gcrotmk(A, b, rtol=krylov_rtol, **kwargs)
             except TypeError:
-                x, info = gcrotmk(A, b, tol=float(self.opts.tol), **kwargs)
+                x, info = gcrotmk(A, b, tol=krylov_rtol, **kwargs)
         elif solver == "gmres":
             kwargs = dict(
                 x0=x0,
@@ -609,17 +635,17 @@ class ClusterEmbeddedJacobian:
             )
             try:
                 x, info = gmres(
-                    A, b, rtol=float(self.opts.tol), callback_type="pr_norm", **kwargs
+                    A, b, rtol=krylov_rtol, callback_type="pr_norm", **kwargs
                 )
             except TypeError:
-                x, info = gmres(A, b, tol=float(self.opts.tol), **kwargs)
+                x, info = gmres(A, b, tol=krylov_rtol, **kwargs)
         else:
             raise ValueError("solver must be 'gcrotmk' or 'gmres'")
 
         Gamma = _unpack_complex(x, self.G.shape)
         residual = self.apply_A(Gamma, p) - Kfield
         err = _maxabs(residual)
-        converged = bool(int(info) == 0 and np.isfinite(err) and err < float(self.opts.tol))
+        converged = bool(int(info) == 0 and np.isfinite(err) and err <= float(self.opts.tol))
         if self.opts.verbose:
             print(
                 f"[cluster-JF] q={p}, solver={solver}, it={count[0]}, "
