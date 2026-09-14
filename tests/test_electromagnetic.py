@@ -164,6 +164,12 @@ def test_interacting_covariant_response_tracks_self_consistent_finite_difference
         gw_options=opts,
     )
     metrics = compare_covariant_to_finite_difference(analytic, fd)
+    print(
+        "Hartree diagnostic:",
+        "analytic_max=", np.max(np.abs(analytic.Sigma_H_phi)),
+        "fd_max=", np.max(np.abs(fd.Sigma_H_phi)),
+        "metric=", metrics["Sigma_H"],
+    )
 
     assert metrics["G"]["rel_max"] < 3e-2
     assert metrics["Sigma_H"]["rel_max"] < 3e-2
