@@ -2,12 +2,17 @@ import numpy as np
 
 from rubycgw.cluster_ed_gw import BathParameters, bath_hybridization
 from rubycgw.cluster_ed_gw_jf import (
+    BathTangentModel,
+    ClusterEmbeddedJacobian,
+    ClusterJFOptions,
     _bath_from_theta,
     _bath_theta,
     _complex_delta_derivatives,
     _pack_complex,
     _unpack_complex,
 )
+from rubycgw.grids import MatsubaraGrid
+from rubycgw.pseudospin import primitive_pseudospin_vertex
 
 
 def test_real_pack_roundtrip():
@@ -66,3 +71,63 @@ def test_complex_delta_derivatives_match_centered_difference():
         dm = bath_hybridization(omega, mu, bm.energies, bm.couplings)
         numeric = (dp - dm) / (2.0 * h)
         assert np.allclose(deriv, numeric, rtol=3e-6, atol=3e-8)
+
+
+def test_zero_kernel_jf_returns_bare_vertex_at_finite_q():
+    grid = MatsubaraGrid(nk1=2, nk2=2, nw=2, nOmega=1, T=0.2)
+    eye = np.eye(6, dtype=complex)
+    G = np.empty((grid.nf, grid.nk1, grid.nk2, 6, 6), dtype=complex)
+    for n, w in enumerate(grid.omega):
+        G[n] = eye[None, None] / (1j * w - 0.3)
+    Gc = np.mean(G, axis=(1, 2))
+    zeros_w = np.zeros((grid.nb, grid.nk1, grid.nk2, 6, 6), dtype=complex)
+    zeros_v = np.zeros((grid.nk1, grid.nk2, 6, 6), dtype=complex)
+    zeros_wc = np.zeros((grid.nb, 6, 6), dtype=complex)
+
+    pos = np.flatnonzero(grid.omega > 0)[:1]
+    target_size = 2 * len(pos) * 6 * 6
+    tangent = BathTangentModel(
+        theta0=np.zeros(1),
+        mode_vectors=np.zeros((1, 1)),
+        singular_values=np.ones(1),
+        Ufit=np.zeros((target_size, 1)),
+        sigma_modes=np.zeros((1, grid.nf, 6, 6), dtype=complex),
+        inner_matrix=np.eye(1),
+        fit_indices=pos,
+        fit_weights=np.ones(len(pos)),
+        fit_metric="delta",
+        model_g0_fit=np.broadcast_to(eye, (len(pos), 6, 6)).copy(),
+        Gc_inv=np.linalg.inv(Gc),
+        rank=1,
+        condition_number=1.0,
+        build_seconds=0.0,
+        fd_step=1e-4,
+    )
+    opts = ClusterJFOptions(
+        solver="gcrotmk",
+        tol=1e-10,
+        maxiter=10,
+        restart=4,
+        recycle_dim=2,
+        include_hartree=False,
+        include_fock=False,
+        include_mt=False,
+        include_al=False,
+        verbose=False,
+    )
+    op = ClusterEmbeddedJacobian(
+        G,
+        zeros_w,
+        zeros_v,
+        Gc,
+        zeros_wc,
+        np.zeros((6, 6), dtype=complex),
+        grid,
+        tangent,
+        opts,
+    )
+    K = primitive_pseudospin_vertex("Ax")
+    result = op.solve(K, (1, 0))
+    assert result.converged
+    assert result.final_error < 1e-10
+    assert np.allclose(result.Gamma, np.broadcast_to(K, G.shape), rtol=1e-10, atol=1e-10)
