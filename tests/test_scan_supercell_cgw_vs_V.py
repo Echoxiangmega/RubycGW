@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from scan_supercell_cgw_vs_V import (
+from research.scan_supercell_cgw_vs_V import (
     _bridge_midpoint,
     _curvature_fields,
     _normal_breaking_scale,
