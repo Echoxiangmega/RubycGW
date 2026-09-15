@@ -67,7 +67,9 @@ def _constrain_hartree(sigma_h: np.ndarray) -> np.ndarray:
     """Project the diagonal Hartree field onto equal A/B triangle densities."""
     s = np.asarray(sigma_h, dtype=complex)
     out = np.zeros_like(s)
-    d = np.real(np.diag(s))
+    # np.diag/np.real may return a read-only view with recent NumPy versions.
+    # Make an explicit writable copy before enforcing the triangle averages.
+    d = np.real(np.diag(s)).copy()
     d[:3] = np.mean(d[:3])
     d[3:] = np.mean(d[3:])
     out[np.diag_indices(NSUB)] = d
