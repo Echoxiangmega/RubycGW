@@ -4,7 +4,8 @@
 The command-line interface is the same as ``scan_cluster_ed_gw_jf_q.py``.  The
 input NPZ must have been produced by ``run_cluster_ed_gw_vprime.py`` and contain
 ``Vprime`` (or ``Vp``).  The six-channel response then determines q, Pauli
-character and A/B parity without preselecting a current pattern.
+character and A/B parity without preselecting a current pattern.  Final and
+partial checkpoint files both retain the V-prime metadata.
 """
 from __future__ import annotations
 
@@ -66,15 +67,23 @@ def main():
     _driver.RubyParameters = _params_factory
     _driver.build_interaction = build_vprime_interaction
     try:
-        _driver.main()
+        try:
+            _driver.main()
+        except BaseException:
+            partial = _driver._partial_path(Path(args.out))
+            if partial.exists():
+                _append_metadata(partial, vp)
+                print(
+                    f"V-prime metadata appended to partial checkpoint: V'={vp:g}",
+                    flush=True,
+                )
+            raise
     finally:
         _driver._args = original_args
         _driver.RubyParameters = original_params
         _driver.build_interaction = original_build_interaction
 
-    out = Path(args.out)
-    if out.suffix.lower() != ".npz":
-        out = out.with_suffix(".npz")
+    out = _driver._normalise_out(Path(args.out))
     _append_metadata(out, vp)
     print(f"V-prime metadata appended: V'={vp:g}", flush=True)
 
