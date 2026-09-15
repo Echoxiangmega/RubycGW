@@ -1,32 +1,38 @@
-# RubycGW Documentation
+# RubycGW documentation
 
-这一目录是 RubycGW 的长期维护文档。代码中的 docstring 只说明局部接口；这里记录模型约定、方程来源、数值实现、模块/函数功能以及完整使用流程。
+This directory describes the maintained, modular interface of RubycGW.  The repository was reorganized so that end users no longer need to navigate the large collection of development-time drivers that historically lived in the project root.
 
-## 文档导航
+## Start here
 
-- [getting_started.md](getting_started.md)：安装、测试、第一次运行以及如何修改参数。
-- [model_and_conventions.md](model_and_conventions.md)：Ruby lattice 的六子晶格编号、12 条 hopping bond、Fourier convention、`eta_A/B` 与 same/opposite 标签。
-- [gw_theory.md](gw_theory.md)：self-consistent GW 的方程、每个数组的含义以及代码中的对应实现。
-- [cgw_theory.md](cgw_theory.md)：为什么对外源求导会得到 Hartree、Fock、MT、AL1、AL2，以及 q=(0,0) 版本在代码中的实现。
-- [tail_consistent_cgw.md](tail_consistent_cgw.md)：production SC-GW 的 analytic Matsubara tail 与 cGW H/F functional derivative 如何严格一致；包含 static、finite-Ω、finite-q 新生产路径以及 finite-source FDT 验证。
-- [ed12_order2_ledger.md](ed12_order2_ledger.md)：12-site Gamma current 的弱耦合 `O(V^2)` response ledger，把 cGW 二阶响应拆成 H(1)、F(1) dressing、F(2) repeated feedback、MT(1)、AL(1)，并与 exact ED vertex coefficient 做闭合检查。
-- [ed12_sox_order2.md](ed12_sox_order2.md)：在 V=0 自由背景上直接计算 bare second-order exchange (SOX) 自能的 covariant derivative，并与 `exact-cGW` 缺失的二阶 current-response coefficient 做定量比较；同时用严格二阶 MT+AL 做符号/归一化交叉检查。
-- [gw_sox_covariant.md](gw_sox_covariant.md)：把 strict `O(V^2)` SOX 推广到一般周期 GW 背景：SOX 自能、三条 Green-function 线的 covariant derivative、正/负 `tau` 路由、reference-tail derivative、自洽 GW+SOX，以及后续 `GG / cGW / cGW+SOX / ED` 比较接口和中强耦合适用范围。
-- [post_gw.md](post_gw.md)：post-GW 的完整 orbital density `chi_nn(q,iOmega)` 定义、`W_post = V - V chi_cov V` 的仓库符号、finite-transfer H/F/MT/AL/SOX response、GW 与 GW+SOX 共用的 one-shot post 接口，以及 ED Green-function benchmark 设计。
-- [primitive_gw_cgw.md](primitive_gw_cgw.md)：production 6-site 原胞路径：static-Fock + `W-V` SC-GW、固定 filling 的快速 `mu` 求解、H/F/MT/AL q=0 cGW、matrix-free GMRES，以及它与 finite-q 扩展的关系。
-- [finite_q_cgw.md](finite_q_cgw.md)：真正的 primitive-cell finite-q cGW：`G(k+q) Gamma(k;q) G(k)`、finite-q H/F/MT/AL 动量路由、离散 q-mesh、FFT/direct 验证以及全 BZ susceptibility scan。
-- [pseudospin_susceptibility.md](pseudospin_susceptibility.md)：统一的 chirality-pseudospin 响应：TR-even `tau_x/tau_y` intra-triangle charge/orbital order、TR-odd `tau_z` loop chirality、A/B even/odd channels，以及 `chi_xx/chi_yy/chi_zz` 的 cGW 计算脚本。
-- [orbital_moment.md](orbital_moment.md)：从 checkpoint 重建 `G`，计算 bond current 与局域 plaquette orbital moment。
-- [electromagnetic_response.md](electromagnetic_response.md)：Peierls-flux electromagnetic covariant response、固定 filling 的 `dmu/dphi` 以及与 `+/-delta_phi` 完整 GW 有限差分的验证。
-- [bulk_orbital_magnetization.md](bulk_orbital_magnetization.md)：Nourafkan bulk orbital magnetization、带 orbital embedding 的物理 `k` 导数，以及非局域 GW 中 `dSigma^(B)/dB` 第二项的处理。
-- [uniform_B_self_energy_derivation.md](uniform_B_self_energy_derivation.md)：从 Nourafkan Eq. (A13) 出发，完整推导 `G_B = Y_B + G Sigma_B G`、仓库记号 `C_GW[delta G]`、Hartree/Fock/MT/AL 线性化、自洽方程 `(I-L)Sigma_B=C_GW[Y_B]`、GMRES 实现以及第二项 `M2` 的代码对应关系；含参考文献和实现 caveat。
-- [api_reference.md](api_reference.md)：模块、类和主要函数的接口、输入输出 shape 和用途。
-- [numerics_and_validation.md](numerics_and_validation.md)：Matsubara cutoff、mixing、收敛测试、V=0 极限、时间反演检查和结果可信度判断。
-- [convergence_scan.md](convergence_scan.md)：自动 `nw/nOmega/nk` convergence scan、fast MT 模式和 continuation。
-- [performance_and_reuse.md](performance_and_reuse.md)：性能瓶颈、warm start、参数扫描时哪些量可以复用，以及推荐的两级扫描策略。
-- [tutorial.md](tutorial.md)：将理论与主程序串起来的完整教程，也是 PDF manual 的主体源文件。
-- [maintenance.md](maintenance.md)：以后修改代码时需要同步更新哪些文档，以及 PDF 如何自动生成。
+1. [Getting started](getting_started.md) — installation, first background run, first effective-model run, and CLI entry points.
+2. [Model and conventions](model_and_conventions.md) — Ruby lattice, hopping/interactions, `Vprime`/`Vcross`, momentum convention, and current-channel naming.
+3. [Public API reference](api_reference.md) — the stable imports intended for notebooks, scripts, and a future GUI.
+4. [Cluster ED+GW](cluster_ed_gw.md) — embedding equation, finite bath, self-consistency, continuation, and method limitations.
+5. [Jacobian-free response](jf_response.md) — finite-q soft-mode calculations, bath tangent, solver options, and interpretation.
+6. [Effective pseudospin ED](effective_pseudospin.md) — leading strong-coupling model and finite-size quantum ED.
+7. [Cluster-orientation ensemble](orientation_ensemble.md) — why a single six-site cluster has an orientation bias and how the three-gauge diagnostic is used.
+8. [Checkpoints and continuation](checkpoints.md) — saved backgrounds, restart versus continuation, and reproducibility.
+9. [Numerics and validation](numerics_and_validation.md) — convergence requirements and validation philosophy.
+10. [Repository layout](repository_layout.md) and [developer guide](developer.md) — where new functionality belongs and how to keep the public API stable.
 
-## 文档维护原则
+The original [GW theory](gw_theory.md) and [cGW theory](cgw_theory.md) notes remain part of the maintained documentation because they describe the numerical kernels still used by the modular workflows.
 
-`docs/tutorial.md` 是完整理论教程的主体源文件；独立的数值与方法章节用于快速查阅。PDF 不手工编辑，而是由 GitHub Actions 从维护中的 Markdown 文档自动构建，以避免代码和 PDF 版本不一致。
+## Public versus research interfaces
+
+The supported user-facing layers are:
+
+```text
+rubycgw.api
+rubycgw.models
+rubycgw.solvers
+rubycgw.workflows
+rubycgw.analysis
+rubycgw.io
+scripts/
+```
+
+The `research/` directory contains historical scans, benchmarks, diagnostics, plotting scripts, and paper-specific drivers.  They are retained for reproducibility but are not treated as stable API.  Specialized historical documentation is stored under [research_notes/](research_notes/).
+
+## Generated guide
+
+GitHub Actions builds a PDF user guide from the maintained files in this directory.  The PDF is intended to reflect the current package layout rather than the historical development tree.
