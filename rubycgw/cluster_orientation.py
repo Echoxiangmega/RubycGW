@@ -39,6 +39,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .c3_constraint import rotate_lattice_c3
+
 NSUB = 6
 
 ORIENTATION_B_SHIFTS = np.asarray(
@@ -60,7 +62,7 @@ def orientation_b_shift(orientation: int) -> np.ndarray:
 
 
 def relative_b_shift(source_orientation: int, target_orientation: int) -> np.ndarray:
-    """Return the gauge shift that maps source-orientation fields to target."""
+    """Return the pure gauge shift that maps source fields to target gauge."""
     return orientation_b_shift(target_orientation) - orientation_b_shift(source_orientation)
 
 
@@ -98,11 +100,75 @@ def transform_between_orientations(
     source_orientation: int,
     target_orientation: int,
 ) -> np.ndarray:
-    """Gauge-transform a lattice field between two cluster orientations."""
+    """Pure-gauge transform of the *same physical state* between orientations."""
     return gauge_transform_lattice(
         field,
         relative_b_shift(source_orientation, target_orientation),
     )
+
+
+def rotate_solution_between_orientations(
+    field: np.ndarray,
+    source_orientation: int,
+    target_orientation: int,
+) -> np.ndarray:
+    """Map an oriented solution to its C3-related partner in another gauge.
+
+    This differs from :func:`transform_between_orientations`, which keeps the
+    physical state fixed.  Here we first return the source field to orientation
+    0 gauge, actively rotate the physical state by the number of C3 steps that
+    takes the source cluster cut into the target cut, and finally express the
+    rotated state in the target gauge.  This is the appropriate warm start for
+    the corresponding symmetry-related cluster solution.
+    """
+    src = int(source_orientation)
+    dst = int(target_orientation)
+    orientation_b_shift(src)
+    orientation_b_shift(dst)
+    x0 = gauge_transform_lattice(field, -orientation_b_shift(src))
+    steps = (dst - src) % 3
+    xr = np.asarray(x0, dtype=complex)
+    for _ in range(steps):
+        xr = rotate_lattice_c3(xr)
+    return gauge_transform_lattice(xr, orientation_b_shift(dst))
+
+
+def rotate_local_between_orientations(
+    field: np.ndarray,
+    source_orientation: int,
+    target_orientation: int,
+    *,
+    nk1: int,
+    nk2: int,
+) -> np.ndarray:
+    """Rotate a k-independent cluster matrix into the target cluster frame.
+
+    A local matrix is broadcast over a reciprocal mesh, mapped with
+    :func:`rotate_solution_between_orientations`, and then averaged.  For the
+    three C3-related cluster frames the mapped field is k independent up to
+    roundoff, so this provides a robust way to transform impurity self-energies
+    or other local matrices without hard-coding a separate orbital permutation.
+    """
+    x = np.asarray(field, dtype=complex)
+    if x.ndim < 2 or x.shape[-2:] != (NSUB, NSUB):
+        raise ValueError("local field must end in (...,6,6)")
+    lead = x.shape[:-2]
+    lattice = np.broadcast_to(
+        x.reshape(lead + (1, 1, NSUB, NSUB)),
+        lead + (int(nk1), int(nk2), NSUB, NSUB),
+    ).copy()
+    mapped = rotate_solution_between_orientations(
+        lattice, source_orientation, target_orientation
+    )
+    local = np.mean(mapped, axis=(-4, -3))
+    ref = local.reshape(lead + (1, 1, NSUB, NSUB))
+    spread = float(np.max(np.abs(mapped - ref), initial=0.0))
+    if spread > 1.0e-10:
+        raise RuntimeError(
+            "C3-related local cluster matrix did not remain local under frame map: "
+            f"max spread={spread:.3e}"
+        )
+    return local
 
 
 def build_oriented_lattice_fields(
@@ -129,6 +195,8 @@ __all__ = [
     "relative_b_shift",
     "gauge_transform_lattice",
     "transform_between_orientations",
+    "rotate_solution_between_orientations",
+    "rotate_local_between_orientations",
     "build_oriented_lattice_fields",
     "intracell_block",
 ]

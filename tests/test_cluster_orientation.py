@@ -5,6 +5,8 @@ from rubycgw.cluster_orientation import (
     gauge_transform_lattice,
     intracell_block,
     orientation_b_shift,
+    rotate_local_between_orientations,
+    rotate_solution_between_orientations,
     transform_between_orientations,
 )
 from rubycgw.grids import MatsubaraGrid
@@ -76,6 +78,29 @@ def test_orientation_change_is_unitary_at_each_k_and_q0_interaction_unchanged():
         hr, vr = build_oriented_lattice_fields(h0, Vq, r)
         assert np.max(np.abs(np.linalg.eigvalsh(hr) - eig0)) < 1e-12
         assert np.max(np.abs(vr[0, 0] - Vq[0, 0])) < 1e-12
+
+
+def test_physical_c3_maps_one_oriented_hamiltonian_to_the_next_frame():
+    grid = MatsubaraGrid(nk1=6, nk2=6, nw=2, nOmega=1, T=0.1)
+    params = VPrimeCrossParameters(ti=0.4, t1=0.2, t2=0.2, V=1.8, Vprime=-0.1, Vcross=-0.07)
+    h0 = build_h0(grid.kmesh(), params)
+    Vq = build_vprime_vcross_interaction(grid.qmesh(), params)
+    hs = [build_oriented_lattice_fields(h0, Vq, r)[0] for r in (0, 1, 2)]
+    for src in (0, 1, 2):
+        dst = (src + 1) % 3
+        mapped = rotate_solution_between_orientations(hs[src], src, dst)
+        assert np.max(np.abs(mapped - hs[dst])) < 1e-12
+
+
+def test_c3_related_local_cluster_matrix_remains_local_in_target_frame():
+    rng = np.random.default_rng(789)
+    x = rng.normal(size=(3, 6, 6)) + 1j * rng.normal(size=(3, 6, 6))
+    for src in (0, 1, 2):
+        for dst in (0, 1, 2):
+            y = rotate_local_between_orientations(
+                x, src, dst, nk1=3, nk2=3
+            )
+            assert y.shape == x.shape
 
 
 def test_diagonal_translation_invariant_density_is_gauge_invariant():
