@@ -93,3 +93,58 @@ The summary follows the quantities that were useful in the V'=0 calculation:
 The final L2x2 step is only a qualitative comparison because it samples four q
 points.  Once the trend with V' is clear, repeat the same workflow on an L6x6
 background to resolve the ordering wavevector.
+
+## Crossed interaction Vx
+
+The Vx extension keeps the original Ruby hopping unchanged.  For each
+neighboring A/B triangle pair, the existing V' interaction lies on the same two
+links as the inter-triangle hopping, while Vx lies on the two crossed density
+links of that *same* pair.  For the reference orientation,
+
+```text
+straight V' : A1-B1, A2-B2
+crossed  Vx : A1-B2, A2-B1
+```
+
+The other two orientations are related by the Ruby C3 geometry and include the
+appropriate primitive-cell offsets.  No long same-cell A0-B0 bond is added.
+The explicit crossed bond list is in `vprime_study/cross_model.py`.
+
+At leading strong coupling for `t1=t2=t`, the reference-bond coefficients are
+
+\[
+J_n=\frac{5t^2}{9V}+\frac{V'+V_x}{18},\qquad
+J_m=-\frac{t^2}{3V}+\frac{-V'+V_x}{6},\qquad
+J_z=-\frac{t^2}{3V}.
+\]
+
+This diagnostic is printed by the launcher, but the ED+GW/JF calculation uses
+the full microscopic interaction rather than these formulas.
+
+A useful starting point for the current parameters is `V=1.8`, `V'=-0.10`,
+`Vx=-0.05`:
+
+```bat
+python run_cluster_ed_gw_vprime_vcross.py ^
+    --Lx 2 --Ly 2 ^
+    --V 1.8 --Vp -0.10 --Vx -0.05 ^
+    --filling 2 --T 0.08 ^
+    --continue-from results\vprime_cluster_bg\cluster_ed_gw_vprime_L2x2_V1.8_Vp-0.1_fill2.npz
+```
+
+Then run the robust all-q JF scanner, normally with RHS recycle disabled for the
+current soft-channel problem:
+
+```bat
+python scan_cluster_ed_gw_jf_q_vprime_vcross.py ^
+    results\vprime_vcross_cluster_bg\cluster_ed_gw_vprime_vcross_L2x2_V1.8_Vp-0.1_Vx-0.05_fill2.npz ^
+    --all-q --bath-rank 0 --bath-fd-step 2e-4 --stage full ^
+    --no-rhs-recycle
+```
+
+Compare several Vx values with
+
+```bat
+python analyze_vprime_vcross_jf.py results\vprime_vcross_response\*.npz ^
+    --csv results\vprime_vcross_response\summary.csv
+```

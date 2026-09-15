@@ -1,4 +1,4 @@
-"""Post-processing helpers for V-prime all-q JF response files."""
+"""Post-processing helpers for V-prime and V-prime+V-cross JF response files."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -62,6 +62,12 @@ def summarize_response(path: str | Path) -> dict:
             vp = float(np.asarray(z["Vp"]).reshape(()))
         else:
             vp = 0.0
+        if "Vcross" in z:
+            vx = float(np.asarray(z["Vcross"]).reshape(()))
+        elif "Vx" in z:
+            vx = float(np.asarray(z["Vx"]).reshape(()))
+        else:
+            vx = 0.0
 
     lead = eigvals[:, 0]
     ig = int(np.argmax(lead))
@@ -89,6 +95,7 @@ def summarize_response(path: str | Path) -> dict:
         "file": str(path),
         "V": V,
         "Vprime": vp,
+        "Vcross": vx,
         "filling": filling,
         "T": T,
         "global_lambda": float(lead[ig]),
