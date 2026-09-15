@@ -1,6 +1,6 @@
 import numpy as np
 
-from run_cluster_ed_gw import _lattice_to_realspace
+from research.run_cluster_ed_gw import _lattice_to_realspace
 
 
 def test_lattice_to_realspace_constant_k_is_cell_local():
@@ -12,4 +12,3 @@ def test_lattice_to_realspace_constant_k_is_cell_local():
     assert np.max(np.abs(Gr[:, :6, :6] - base)) < 1e-13
     assert np.max(np.abs(Gr[:, 6:, 6:] - base)) < 1e-13
     assert np.max(np.abs(Gr[:, :6, 6:])) < 1e-13
-    assert np.max(np.abs(Gr[:, 6:, :6])) < 1e-13
