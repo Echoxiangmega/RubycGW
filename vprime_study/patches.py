@@ -15,6 +15,7 @@ from .model import vprime_cluster_interactions
 _PATCH_MODULES = (
     "rubycgw.cluster_ed_gw",
     "rubycgw.cluster_ed_gw_fast",
+    "rubycgw.cluster_ed_gw_c3_constrained",
     "rubycgw.cluster_ed_gw_covariant",
     "rubycgw.cluster_ed_gw_jf",
     "rubycgw.cluster_ed_gw_jf_consistent",
