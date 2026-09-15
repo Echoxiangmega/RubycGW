@@ -1,46 +1,22 @@
 #!/usr/bin/env python3
 """Scan the Jacobian-free cluster-ED+GW pseudospin response over momentum q.
 
-This driver starts from a converged ``run_cluster_ed_gw.py`` NPZ.  The expensive
-zero-field embedding is therefore not repeated.  It builds one low-rank
-finite-bath impurity tangent and reuses it for every external q and every
-pseudospin channel.
+The expensive zero-field embedding and finite-bath tangent are built once.  The
+six local Pauli-normalized channels ``Ax Ay Az Bx By Bz`` are then solved at
+each external q, so the leading Pauli character, A/B parity and ordering
+momentum are selected by the response itself.
 
-The default basis is the six local Pauli-normalized pseudospins
-
-    Ax Ay Az Bx By Bz,
-
-rather than preselecting same/opposite combinations.  Diagonalizing the full
-6x6 static response at each q therefore lets the calculation choose
-
-* tau_x / tau_y / tau_z character,
-* the relative A/B phase (even or odd), and
-* the ordering momentum q
-
-simultaneously.  For z, even/odd are the physical same/opposite loop-current
-patterns used elsewhere in this repository.
-
-The full q mesh is traversed in a serpentine path so the previous-q vertex is a
-good warm start.  At each q GCROT(m,k) recycles a Krylov subspace across the six
-right-hand sides.  This is substantially faster than six independent restarted
-GMRES solves when the response becomes soft.
-
-Example
--------
-
-    python scan_cluster_ed_gw_jf_q.py \
-        results/cluster_ed_gw/cluster_ed_gw_L6x6_V2_fill2.npz \
-        --all-q --solver gcrotmk --out results/jf_V2.npz
-
-For a quick coarse search, use a lower bath tangent rank, then repeat only the
-leading q points with a larger rank::
-
-    python scan_cluster_ed_gw_jf_q.py INPUT.npz --all-q --bath-rank 12
-    python scan_cluster_ed_gw_jf_q.py INPUT.npz --q-index IQ1 IQ2 --bath-rank 32
+Long all-q scans are deliberately fault tolerant.  A failed Krylov solve is
+retried from a fresh vertex with a larger Krylov space, followed (for GCROT) by
+a GMRES fallback.  Every completed q is written to ``*.partial.npz`` by
+default, so a later soft-mode failure or interruption does not discard earlier
+q points.  A successful scan writes the requested output and removes the
+partial checkpoint.
 """
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -69,6 +45,9 @@ from rubycgw.supercell_gw_split import one_body_density_matrix_tail
 
 
 DEFAULT_CHANNELS = ("Ax", "Ay", "Az", "Bx", "By", "Bz")
+PROJECTED_NAMES = np.asarray(
+    ["x_even", "x_odd", "y_even", "y_odd", "z_even", "z_odd"]
+)
 
 
 def _args():
@@ -117,6 +96,37 @@ def _args():
     p.add_argument("--no-rhs-recycle", action="store_true")
     p.add_argument("--quiet", action="store_true")
 
+    # Automatic soft-mode retry.  The retry deliberately throws away q/RHS
+    # recycled vectors so a poisoned Krylov subspace cannot make the diagnosis
+    # ambiguous.
+    p.add_argument(
+        "--retry-maxiter",
+        type=int,
+        default=300,
+        help="maximum iterations for the fresh retry/fallback solve",
+    )
+    p.add_argument(
+        "--retry-krylov-m",
+        type=int,
+        default=48,
+        help="Krylov restart dimension for the fresh retry/fallback solve",
+    )
+    p.add_argument("--no-auto-retry", action="store_true")
+    p.add_argument(
+        "--no-gmres-fallback",
+        action="store_true",
+        help="after a failed GCROT retry, do not try fresh GMRES",
+    )
+
+    # Crash/interruption-safe partial output.
+    p.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=1,
+        help="write the partial NPZ after this many newly completed q points",
+    )
+    p.add_argument("--no-partial-checkpoint", action="store_true")
+
     p.add_argument(
         "--max-background-residual",
         type=float,
@@ -149,8 +159,7 @@ def _load_background(path: Path):
         missing = [k for k in required if k not in z]
         if missing:
             raise KeyError(f"input NPZ is missing keys: {missing}")
-        data = {k: np.asarray(z[k]).copy() for k in z.files}
-    return data
+        return {k: np.asarray(z[k]).copy() for k in z.files}
 
 
 def _grid_from_saved(d) -> MatsubaraGrid:
@@ -227,7 +236,6 @@ def _sorted_eigensystem(mat):
 
 
 def _local_to_even_odd(vec, channels):
-    """Return Pauli component weights and A/B parity amplitudes when available."""
     c = {ch: complex(vec[i]) for i, ch in enumerate(channels)}
     out = {}
     for comp in "xyz":
@@ -256,6 +264,210 @@ def _mode_summary(vec, channels):
     return dominant[0], dominant[1], parity, eo
 
 
+def _normalise_out(path: Path) -> Path:
+    path = Path(path)
+    return path if path.suffix.lower() == ".npz" else path.with_suffix(".npz")
+
+
+def _partial_path(path: Path) -> Path:
+    out = _normalise_out(path)
+    return out.with_name(out.stem + ".partial.npz")
+
+
+def _analyse_completed(chi_raw, completed_q, q_points, grid, channels):
+    """Build reciprocal/Hermitian analysis without treating missing q as zero."""
+    chi_raw = np.asarray(chi_raw, dtype=complex)
+    completed_q = np.asarray(completed_q, dtype=bool)
+    nq, nc, _ = chi_raw.shape
+    nan_c = np.nan + 1j * np.nan
+    chi_herm = np.full_like(chi_raw, nan_c)
+    pair_complete = np.zeros(nq, dtype=bool)
+    q_to_pos = {tuple(q): i for i, q in enumerate(q_points)}
+
+    for i, qidx in enumerate(q_points):
+        if not completed_q[i]:
+            continue
+        qm = negative_q_index(qidx, grid)
+        j = q_to_pos.get(qm)
+        if j is not None and completed_q[j]:
+            chi_herm[i] = hermitianize_q_pair(chi_raw[i], chi_raw[j])
+            pair_complete[i] = True
+        else:
+            # Still useful in a partial checkpoint, but explicitly marked as
+            # missing its reciprocity partner when q != -q.
+            chi_herm[i] = 0.5 * (chi_raw[i] + chi_raw[i].conj().T)
+
+    eigenvalues = np.full((nq, nc), np.nan, dtype=float)
+    eigenvectors = np.full((nq, nc, nc), nan_c, dtype=complex)
+    for i in np.flatnonzero(completed_q):
+        eigenvalues[i], eigenvectors[i] = _sorted_eigensystem(chi_herm[i])
+    leading = eigenvalues[:, 0]
+
+    projected = np.full((nq, 6), nan_c, dtype=complex)
+    if all(ch in channels for ch in DEFAULT_CHANNELS):
+        for i in np.flatnonzero(completed_q):
+            _, _, _, eo = _mode_summary(eigenvectors[i, :, 0], channels)
+            projected[i] = np.asarray([eo[name] for name in PROJECTED_NAMES])
+    return chi_herm, pair_complete, eigenvalues, eigenvectors, leading, projected
+
+
+def _atomic_savez(path: Path, **payload) -> None:
+    path = _normalise_out(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp.npz")
+    np.savez_compressed(tmp, **payload)
+    tmp.replace(path)
+
+
+def _save_scan(
+    path,
+    *,
+    args,
+    d,
+    params,
+    grid,
+    bath,
+    tangent,
+    channels,
+    q_points,
+    chi_raw,
+    completed_q,
+    iterations,
+    response_residuals,
+    retry_counts,
+    solver_used,
+    scan_complete,
+    failed_q_index=(-1, -1),
+    failure_message="",
+):
+    chi_herm, pair_complete, eigenvalues, eigenvectors, leading, projected = (
+        _analyse_completed(chi_raw, completed_q, q_points, grid, channels)
+    )
+    _atomic_savez(
+        Path(path),
+        source_file=str(args.input),
+        V=float(params.V),
+        filling=float(np.asarray(d["filling"]).reshape(())),
+        T=float(grid.T),
+        nk1=int(grid.nk1),
+        nk2=int(grid.nk2),
+        nw=int(grid.nw),
+        nOmega=int(grid.nOmega),
+        channels=np.asarray(channels),
+        q_indices=np.asarray(q_points, dtype=int),
+        q_reduced=np.asarray([q_reduced_from_index(q, grid) for q in q_points]),
+        q_centered=np.asarray([_centered_q(q, grid) for q in q_points]),
+        completed_q=np.asarray(completed_q, dtype=bool),
+        completed_q_count=int(np.count_nonzero(completed_q)),
+        scan_complete=np.asarray(bool(scan_complete)),
+        failed_q_index=np.asarray(failed_q_index, dtype=int),
+        failure_message=np.asarray(str(failure_message)),
+        chi_raw=np.asarray(chi_raw),
+        chi_hermitian=chi_herm,
+        q_pair_complete=pair_complete,
+        eigenvalues=eigenvalues,
+        eigenvectors=eigenvectors,
+        lambda_max=leading,
+        leading_projection_names=PROJECTED_NAMES,
+        leading_projection=projected,
+        iterations=np.asarray(iterations),
+        response_residuals=np.asarray(response_residuals),
+        retry_counts=np.asarray(retry_counts, dtype=int),
+        solver_used=np.asarray(solver_used),
+        solver=str(args.solver),
+        stage=str(args.stage),
+        jf_maxiter=int(args.jf_maxiter),
+        krylov_m=int(args.krylov_m),
+        retry_maxiter=int(args.retry_maxiter),
+        retry_krylov_m=int(args.retry_krylov_m),
+        auto_retry=np.asarray(not bool(args.no_auto_retry)),
+        gmres_fallback=np.asarray(not bool(args.no_gmres_fallback)),
+        background_residual=float(np.asarray(d.get("final_error", np.nan)).reshape(())),
+        background_bath_fit_error=float(bath.fit_error),
+        bath_metric=str(args.bath_metric),
+        bath_tangent_rank=int(tangent.rank),
+        bath_tangent_singular_values=np.asarray(tangent.singular_values),
+        bath_tangent_condition=float(tangent.condition_number),
+        bath_tangent_build_seconds=float(tangent.build_seconds),
+        bath_fd_step=float(tangent.fd_step),
+        bath_fit_nfreq=int(args.bath_fit_nfreq),
+        bath_svd_rcond=float(args.bath_svd_rcond),
+        z_is_pauli_normalized=np.asarray(True),
+    )
+    return leading, eigenvectors
+
+
+def _solve_q_with_retry(op, vertices, qidx, initial, args):
+    """Solve one q, retrying the whole six-RHS block only after failure."""
+    original_opts = op.opts
+    recycle = not bool(args.no_rhs_recycle)
+    try:
+        try:
+            chi, results = response_matrix(
+                op,
+                vertices,
+                qidx,
+                initial_gammas=initial,
+                recycle=recycle,
+            )
+            return chi, results, 0, str(original_opts.solver)
+        except RuntimeError as first_error:
+            if args.no_auto_retry:
+                raise
+            retry_max = max(int(args.retry_maxiter), int(original_opts.maxiter))
+            retry_m = max(int(args.retry_krylov_m), int(original_opts.restart))
+            retry_opts = replace(
+                original_opts,
+                maxiter=retry_max,
+                restart=retry_m,
+            )
+            op.opts = retry_opts
+            print(
+                f"[JF retry] q={qidx}: primary solve failed ({first_error}); "
+                f"fresh {retry_opts.solver} with maxiter={retry_max}, m={retry_m}",
+                flush=True,
+            )
+            try:
+                chi, results = response_matrix(
+                    op,
+                    vertices,
+                    qidx,
+                    initial_gammas=[None] * len(vertices),
+                    recycle=False,
+                )
+                return chi, results, 1, str(retry_opts.solver)
+            except RuntimeError as retry_error:
+                if str(original_opts.solver).lower() != "gcrotmk" or args.no_gmres_fallback:
+                    raise RuntimeError(
+                        f"JF q={qidx} failed primary and fresh retry; "
+                        f"last error: {retry_error}"
+                    ) from retry_error
+
+                gmres_opts = replace(retry_opts, solver="gmres")
+                op.opts = gmres_opts
+                print(
+                    f"[JF retry] q={qidx}: enlarged GCROT failed ({retry_error}); "
+                    f"fresh GMRES fallback with maxiter={retry_max}, restart={retry_m}",
+                    flush=True,
+                )
+                try:
+                    chi, results = response_matrix(
+                        op,
+                        vertices,
+                        qidx,
+                        initial_gammas=[None] * len(vertices),
+                        recycle=False,
+                    )
+                    return chi, results, 2, "gmres"
+                except RuntimeError as gmres_error:
+                    raise RuntimeError(
+                        f"JF q={qidx} failed primary, enlarged GCROT, and GMRES; "
+                        f"last error: {gmres_error}"
+                    ) from gmres_error
+    finally:
+        op.opts = original_opts
+
+
 def main():
     args = _args()
     if args.list_channels:
@@ -263,6 +475,10 @@ def main():
         return
     if not args.input.exists():
         raise FileNotFoundError(args.input)
+    if int(args.checkpoint_every) < 1:
+        raise ValueError("--checkpoint-every must be >= 1")
+    if int(args.retry_maxiter) < 1 or int(args.retry_krylov_m) < 1:
+        raise ValueError("retry iteration/Krylov sizes must be positive")
 
     d = _load_background(args.input)
     converged = bool(np.asarray(d.get("converged", True)).reshape(()))
@@ -335,7 +551,9 @@ def main():
         f"channels={channels}\n"
         f"q-points={len(q_points)}, solver={args.solver}, stage={args.stage}\n"
         f"nbath={len(bath.energies)}, bath_metric={args.bath_metric}, "
-        f"bath_rank={'all' if max_rank is None else max_rank}, fd={args.bath_fd_scheme}",
+        f"bath_rank={'all' if max_rank is None else max_rank}, fd={args.bath_fd_scheme}\n"
+        f"retry={'off' if args.no_auto_retry else f'{args.retry_maxiter}/{args.retry_krylov_m}'}; "
+        f"partial-checkpoint={'off' if args.no_partial_checkpoint else f'every {args.checkpoint_every} q'}",
         flush=True,
     )
 
@@ -354,10 +572,17 @@ def main():
 
     nq = len(q_points)
     nc = len(channels)
-    chi_raw = np.zeros((nq, nc, nc), dtype=complex)
-    iterations = np.zeros((nq, nc), dtype=int)
-    response_residuals = np.zeros((nq, nc), dtype=float)
+    nan_c = np.nan + 1j * np.nan
+    chi_raw = np.full((nq, nc, nc), nan_c, dtype=complex)
+    iterations = np.full((nq, nc), -1, dtype=int)
+    response_residuals = np.full((nq, nc), np.nan, dtype=float)
+    retry_counts = np.full(nq, -1, dtype=int)
+    solver_used = np.full(nq, "", dtype="U16")
+    completed_q = np.zeros(nq, dtype=bool)
     previous = [None] * nc
+
+    out = _normalise_out(args.out)
+    partial = _partial_path(out)
 
     for iq, qidx in enumerate(q_points):
         print(
@@ -366,103 +591,118 @@ def main():
             flush=True,
         )
         initial = [None] * nc if args.no_q_warm_start else previous
-        chi, results = response_matrix(
-            op,
-            vertices,
-            qidx,
-            initial_gammas=initial,
-            recycle=not args.no_rhs_recycle,
-        )
+        try:
+            chi, results, nretry, used_solver = _solve_q_with_retry(
+                op, vertices, qidx, initial, args
+            )
+        except BaseException as exc:
+            if not args.no_partial_checkpoint:
+                _save_scan(
+                    partial,
+                    args=args,
+                    d=d,
+                    params=params,
+                    grid=grid,
+                    bath=bath,
+                    tangent=tangent,
+                    channels=channels,
+                    q_points=q_points,
+                    chi_raw=chi_raw,
+                    completed_q=completed_q,
+                    iterations=iterations,
+                    response_residuals=response_residuals,
+                    retry_counts=retry_counts,
+                    solver_used=solver_used,
+                    scan_complete=False,
+                    failed_q_index=qidx,
+                    failure_message=str(exc) or exc.__class__.__name__,
+                )
+                print(
+                    f"[checkpoint] failure/interruption saved to {partial} "
+                    f"({np.count_nonzero(completed_q)}/{nq} q complete)",
+                    flush=True,
+                )
+            raise
+
         chi_raw[iq] = chi
+        completed_q[iq] = True
+        retry_counts[iq] = int(nretry)
+        solver_used[iq] = str(used_solver)
         for j, result in enumerate(results):
             iterations[iq, j] = int(result.iterations)
             response_residuals[iq, j] = float(result.final_error)
             previous[j] = result.Gamma
 
-    # Equilibrium reciprocity is chi_ab(q)=chi_ba(-q)^*.  Hermitianize using the
-    # explicitly computed q/-q pair whenever available.
-    q_to_pos = {tuple(q): i for i, q in enumerate(q_points)}
-    chi_herm = np.empty_like(chi_raw)
-    pair_complete = np.zeros(nq, dtype=bool)
-    for i, qidx in enumerate(q_points):
-        qm = negative_q_index(qidx, grid)
-        if qm in q_to_pos:
-            chi_herm[i] = hermitianize_q_pair(chi_raw[i], chi_raw[q_to_pos[qm]])
-            pair_complete[i] = True
-        else:
-            chi_herm[i] = 0.5 * (chi_raw[i] + chi_raw[i].conj().T)
+        if (
+            not args.no_partial_checkpoint
+            and ((int(np.count_nonzero(completed_q)) % int(args.checkpoint_every) == 0) or iq == nq - 1)
+        ):
+            _save_scan(
+                partial,
+                args=args,
+                d=d,
+                params=params,
+                grid=grid,
+                bath=bath,
+                tangent=tangent,
+                channels=channels,
+                q_points=q_points,
+                chi_raw=chi_raw,
+                completed_q=completed_q,
+                iterations=iterations,
+                response_residuals=response_residuals,
+                retry_counts=retry_counts,
+                solver_used=solver_used,
+                scan_complete=False,
+            )
+            print(
+                f"[checkpoint] saved {partial} "
+                f"({np.count_nonzero(completed_q)}/{nq} q complete)",
+                flush=True,
+            )
 
-    eigenvalues = np.zeros((nq, nc), dtype=float)
-    eigenvectors = np.zeros((nq, nc, nc), dtype=complex)
-    for i in range(nq):
-        eigenvalues[i], eigenvectors[i] = _sorted_eigensystem(chi_herm[i])
+    leading, eigenvectors = _save_scan(
+        out,
+        args=args,
+        d=d,
+        params=params,
+        grid=grid,
+        bath=bath,
+        tangent=tangent,
+        channels=channels,
+        q_points=q_points,
+        chi_raw=chi_raw,
+        completed_q=completed_q,
+        iterations=iterations,
+        response_residuals=response_residuals,
+        retry_counts=retry_counts,
+        solver_used=solver_used,
+        scan_complete=True,
+    )
 
-    leading = eigenvalues[:, 0]
     order = np.argsort(leading)[::-1]
     print("\n=== leading pseudospin modes over q ===", flush=True)
-    for rank, pos in enumerate(order[: max(int(args.top), 1)], start=1):
+    shown = 0
+    for pos in order:
+        if not np.isfinite(leading[pos]):
+            continue
         vec = eigenvectors[pos, :, 0]
         comp, weight, parity, _ = _mode_summary(vec, channels)
+        shown += 1
         print(
-            f"{rank:2d}: q={_centered_q(q_points[pos], grid)}, "
+            f"{shown:2d}: q={_centered_q(q_points[pos], grid)}, "
             f"lambda={leading[pos]:+.10e}, tau_{comp} weight={weight:.4f}, "
             f"A/B={parity}",
             flush=True,
         )
+        if shown >= max(int(args.top), 1):
+            break
 
-    # Store even/odd projections of every leading mode when the full local basis
-    # is present.  This makes z_same/z_opposite and x/y parity immediately visible.
-    projected_names = np.asarray(
-        ["x_even", "x_odd", "y_even", "y_odd", "z_even", "z_odd"]
-    )
-    projected = np.full((nq, 6), np.nan + 1j * np.nan, dtype=complex)
-    if all(ch in channels for ch in DEFAULT_CHANNELS):
-        for i in range(nq):
-            _, _, _, eo = _mode_summary(eigenvectors[i, :, 0], channels)
-            projected[i] = np.asarray([eo[name] for name in projected_names])
-
-    out = args.out
-    if out.suffix.lower() != ".npz":
-        out = out.with_suffix(".npz")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        out,
-        source_file=str(args.input),
-        V=float(params.V),
-        filling=float(np.asarray(d["filling"]).reshape(())),
-        T=float(grid.T),
-        nk1=int(grid.nk1),
-        nk2=int(grid.nk2),
-        nw=int(grid.nw),
-        nOmega=int(grid.nOmega),
-        channels=np.asarray(channels),
-        q_indices=np.asarray(q_points, dtype=int),
-        q_reduced=np.asarray([q_reduced_from_index(q, grid) for q in q_points]),
-        q_centered=np.asarray([_centered_q(q, grid) for q in q_points]),
-        chi_raw=chi_raw,
-        chi_hermitian=chi_herm,
-        q_pair_complete=pair_complete,
-        eigenvalues=eigenvalues,
-        eigenvectors=eigenvectors,
-        lambda_max=leading,
-        leading_projection_names=projected_names,
-        leading_projection=projected,
-        iterations=iterations,
-        response_residuals=response_residuals,
-        solver=str(args.solver),
-        stage=str(args.stage),
-        background_residual=float(residual),
-        background_bath_fit_error=float(bath.fit_error),
-        bath_metric=str(args.bath_metric),
-        bath_tangent_rank=int(tangent.rank),
-        bath_tangent_singular_values=np.asarray(tangent.singular_values),
-        bath_tangent_condition=float(tangent.condition_number),
-        bath_tangent_build_seconds=float(tangent.build_seconds),
-        bath_fd_step=float(tangent.fd_step),
-        bath_fit_nfreq=int(args.bath_fit_nfreq),
-        bath_svd_rcond=float(args.bath_svd_rcond),
-        z_is_pauli_normalized=np.asarray(True),
-    )
+    if partial.exists():
+        try:
+            partial.unlink()
+        except OSError:
+            pass
     print(f"\nsaved {out}", flush=True)
 
 
