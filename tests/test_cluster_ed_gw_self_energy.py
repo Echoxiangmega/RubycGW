@@ -1,6 +1,6 @@
 import numpy as np
 
-from analyze_cluster_ed_gw_self_energy import (
+from rubycgw.analysis import (
     decompose_kernel,
     dyson_kernel,
     k_to_realspace,

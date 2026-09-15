@@ -1,25 +1,25 @@
-name: build tutorial PDF
+name: build user guide PDF
 
 on:
   push:
     paths:
       - 'docs/**'
       - 'rubycgw/**'
-      - 'run_ruby_cgw.py'
-      - 'convergence_scan.py'
-      - 'filling_scan.py'
-      - 'requirements.txt'
+      - 'scripts/**'
+      - 'vprime_study/**'
       - 'README.md'
+      - 'pyproject.toml'
+      - 'requirements.txt'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
       - 'docs/**'
       - 'rubycgw/**'
-      - 'run_ruby_cgw.py'
-      - 'convergence_scan.py'
-      - 'filling_scan.py'
-      - 'requirements.txt'
+      - 'scripts/**'
+      - 'vprime_study/**'
       - 'README.md'
+      - 'pyproject.toml'
+      - 'requirements.txt'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -29,36 +29,61 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Pandoc, XeLaTeX, and CJK fonts
+      - name: Install Pandoc, XeLaTeX, fonts, and PDF tools
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             pandoc \
             texlive-xetex \
+            texlive-latex-extra \
             texlive-lang-chinese \
-            fonts-noto-cjk
+            fonts-noto-cjk \
+            fonts-dejavu-core \
+            poppler-utils
 
-      - name: Build tutorial PDF
+      - name: Build RubycGW user guide
         run: |
           mkdir -p build
           pandoc \
-            docs/tutorial.md \
-            docs/convergence_scan.md \
-            docs/performance_and_reuse.md \
-            docs/filling_scan.md \
-            --from=markdown+tex_math_dollars \
+            docs/getting_started.md \
+            docs/model_and_conventions.md \
+            docs/cluster_ed_gw.md \
+            docs/jf_response.md \
+            docs/effective_pseudospin.md \
+            docs/orientation_ensemble.md \
+            docs/checkpoints.md \
+            docs/numerics_and_validation.md \
+            docs/api_reference.md \
+            docs/repository_layout.md \
+            docs/developer.md \
+            --from=markdown+tex_math_dollars+tex_math_single_backslash \
+            --resource-path=.:docs \
             --toc \
+            --toc-depth=3 \
             --number-sections \
+            --highlight-style=tango \
             --pdf-engine=xelatex \
+            --metadata title='RubycGW User Guide' \
+            --metadata subtitle='Ruby-lattice GW, cluster ED+GW, Jacobian-free response, and effective pseudospin workflows' \
             -V CJKmainfont='Noto Sans CJK SC' \
             -V mainfont='DejaVu Serif' \
+            -V sansfont='DejaVu Sans' \
             -V monofont='DejaVu Sans Mono' \
-            -V geometry:margin=1in \
-            -o build/RubycGW_Tutorial.pdf
+            -V fontsize=10pt \
+            -V geometry:margin=0.85in \
+            -V colorlinks=true \
+            -V linkcolor=blue \
+            -V urlcolor=blue \
+            -o build/RubycGW_User_Guide.pdf
 
-      - name: Upload tutorial PDF
+      - name: Verify generated PDF
+        run: |
+          test -s build/RubycGW_User_Guide.pdf
+          pdfinfo build/RubycGW_User_Guide.pdf | grep -E '^(Pages|File size):'
+
+      - name: Upload user guide PDF
         uses: actions/upload-artifact@v4
         with:
-          name: RubycGW-Tutorial-PDF
-          path: build/RubycGW_Tutorial.pdf
+          name: RubycGW-User-Guide-PDF
+          path: build/RubycGW_User_Guide.pdf
           if-no-files-found: error

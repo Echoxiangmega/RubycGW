@@ -1,89 +1,150 @@
-# Getting Started
+# Getting started
 
-## 1. 本地安装
+## Installation
 
-推荐使用独立的 conda 环境：
-
-```bash
-conda create -n rubycgw python=3.11
-conda activate rubycgw
-python -m pip install -r requirements.txt
-```
-
-在仓库根目录先运行测试：
+RubycGW requires Python 3.10 or newer.  For development or reproducible use from a cloned repository, install it in editable mode:
 
 ```bash
+python -m pip install -e '.[dev]'
 python -m pytest -q
 ```
 
-然后运行参考计算：
+The core dependencies are NumPy, SciPy, and Matplotlib. Editable installation is recommended even when running archived scripts because it makes the `rubycgw` package available independently of the current working directory.
+
+## First cluster ED+GW background
+
+The preferred Python entry point is `rubycgw.api`:
+
+```python
+from rubycgw.api import (
+    RubyModel,
+    GridConfig,
+    BackgroundConfig,
+    run_cluster_background,
+    save_background,
+)
+
+model = RubyModel(
+    ti=0.4,
+    t1=0.2,
+    t2=0.2,
+    V=1.8,
+    Vprime=-0.1,
+    Vcross=-0.05,
+)
+
+config = BackgroundConfig(
+    filling=2.0,
+    grid=GridConfig(
+        Lx=3,
+        Ly=3,
+        nw=55,
+        nOmega=12,
+        T=0.08,
+    ),
+)
+
+run = run_cluster_background(model, config)
+print("converged =", run.result.converged)
+print("mu        =", run.result.mu)
+print("density   =", run.result.density)
+
+save_background("results/background.npz", run)
+```
+
+The equivalent maintained CLI is:
 
 ```bash
-python run_ruby_cgw.py
+python scripts/run_background.py \
+  --Lx 3 --Ly 3 \
+  --V 1.8 --Vp -0.1 --Vx -0.05 \
+  --filling 2 --T 0.08 \
+  --out results/background.npz
 ```
 
-## 2. 默认计算做了什么
+On Windows `cmd.exe`, replace the trailing backslashes with `^`.
 
-`run_ruby_cgw.py` 当前按同一个目标 filling 依次计算：
+## Restart and continuation
 
-1. `G0G0 (bare)`：非相互作用 Green's function 和 bare eta vertex；
-2. `GG`：self-consistent GW 后的 dressed Green's function，但 vertex 仍取 bare `K_eta`；
-3. `GW + MT`：在 converged GW 背景上解 Hartree + MT vertex equation；
-4. `full cGW`：进一步加入 AL1 和 AL2。
-
-最终分别输出
-
-\[
-\chi_+\equiv\chi_{\rm opposite},\qquad
-\chi_-\equiv\chi_{\rm same},
-\]
-
-以及
-
-\[
-\Delta\chi=\chi_{\rm same}-\chi_{\rm opposite}.
-\]
-
-正的 `same-opposite` 表示当前参数下 same-current channel 的 susceptibility 更大。
-
-## 3. 最常修改的参数
-
-主程序开头有
+A saved cluster background can be loaded through the public workflow:
 
 ```python
-params = RubyParameters(ti=0.4, t1=0.2, t2=0.2, V=0.10)
-grid = MatsubaraGrid(nk1=4, nk2=4, nw=16, nOmega=6, T=0.05)
-target_filling = 2.0
+from rubycgw.api import load_restart_for_run, run_cluster_background
+
+restart = load_restart_for_run("results/old.npz", model, config)
+
+# Same physical parameter point:
+run = run_cluster_background(model, config, restart=restart, restart_mode="restart")
+
+# New V, Vprime, or Vcross with the same structural setup:
+run = run_cluster_background(model, config, restart=restart, restart_mode="continuation")
 ```
 
-其中：
+`restart` is for continuing the same point. `continuation` intentionally allows interaction parameters to change while requiring compatible lattice size, temperature, frequency grids, filling, hoppings, and bath size.
 
-- `ti`：两个三角形内部 hopping；
-- `t1`, `t2`：其余两类最近邻 hopping；
-- `V`：所有 12 条 NN density-density interaction 的强度；
-- `nk1`, `nk2`：二维 reduced Brillouin-zone 网格；
-- `nw`：fermionic Matsubara index 使用 `n=-nw,...,nw-1`；
-- `nOmega`：bosonic index 使用 `m=-nOmega,...,+nOmega`；
-- `T`：温度；
-- `target_filling`：每个六-site unit cell 的总粒子数。
-
-## 4. 为什么 bare 和 GW 的 chemical potential 不一样
-
-如果固定 filling，非相互作用和 interacting GW 体系通常需要不同的 chemical potential。因此代码先调用
+## First effective pseudospin calculation
 
 ```python
-bare = solve_noninteracting(..., target_filling=target_filling)
+from rubycgw.api import EffectiveEDConfig, run_effective_ed
+
+ed = run_effective_ed(
+    model,
+    EffectiveEDConfig(Lx=3, Ly=3, nev=4),
+)
+
+print("Jn,Jm,Jz =", ed.Jn, ed.Jm, ed.Jz)
+print("E0       =", ed.ground_energy)
+print("gap      =", ed.gap)
+print("z_same   =", ed.z_same)
 ```
 
-得到 `mu0`，再独立求 self-consistent GW 的 `mu_GW`。这样 `G0G0`、`GG`、`GW+MT`、`full cGW` 的比较才是在同一 filling 下进行。
+CLI:
 
-## 5. 第一次得到结果后不要立刻当成最终物理结果
+```bash
+python scripts/run_effective_ed.py --Lx 3 --Ly 3 --V 1.8 --Vp -0.1 --Vx -0.05
+```
 
-默认 `4x4`, `nw=16`, `nOmega=6` 是 debug 网格。建议先确认：
+The present direct ED implementation is intended for small pseudospin tori. A 3x3 triangle-center torus contains 18 pseudospins and is the practical production scale of the current parity-resolved sparse solver.
 
-- 所有 solver 显示 `converged: True`；
-- static susceptibility 的 imaginary part 只在数值误差量级；
-- `max |Gamma_H|` 在 eta 的 q=(0,0) 正常态中接近机器精度；
-- 增大 `nw`, `nOmega`, `nk1`, `nk2` 后结果稳定。
+## Jacobian-free response
 
-详细的收敛流程见 [numerics_and_validation.md](numerics_and_validation.md)。
+For the extended background created above, use:
+
+```bash
+python scripts/run_jf_extended.py results/background.npz \
+  --all-q \
+  --bath-rank 0 \
+  --bath-fd-step 2e-4 \
+  --stage full \
+  --no-rhs-recycle
+```
+
+`run_jf_extended.py` reads `Vprime` and `Vcross` from the checkpoint and reuses the same production JF kernel with the canonical extended interaction. For a baseline checkpoint with `Vprime=Vcross=0`, `scripts/run_jf.py` is the direct driver.
+
+The lower-level response objects are available from `rubycgw.solvers.response`; a fully configuration-driven high-level JF Python workflow is still being consolidated.
+
+## Primitive GW/cGW driver
+
+The historical primitive-cell driver is retained as a maintained CLI entry point:
+
+```bash
+python scripts/run_primitive_cgw.py --help
+```
+
+New notebooks should prefer the package imports under `rubycgw.solvers` rather than importing command-line drivers.
+
+## Where old scripts went
+
+Development-time scripts that used to fill the repository root were moved to `research/`. They were archived rather than deleted. If an old note says
+
+```bash
+python scan_supercell_cgw_vs_V.py ...
+```
+
+its archived equivalent is generally
+
+```bash
+python research/scan_supercell_cgw_vs_V.py ...
+```
+
+Current documentation does not rely on those scripts unless the workflow is explicitly described as research/legacy.

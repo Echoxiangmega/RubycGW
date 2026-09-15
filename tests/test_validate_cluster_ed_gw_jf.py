@@ -4,7 +4,7 @@ import sys
 
 def test_validate_cluster_ed_gw_jf_help_smoke():
     proc = subprocess.run(
-        [sys.executable, "validate_cluster_ed_gw_jf.py", "--help"],
+        [sys.executable, "research/validate_cluster_ed_gw_jf.py", "--help"],
         check=True,
         capture_output=True,
         text=True,
