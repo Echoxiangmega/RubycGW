@@ -1,6 +1,6 @@
 import numpy as np
 
-from diagnose_nomega_seam import _expected_seam_abs_omega, _seam_distance
+from research.diagnose_nomega_seam import _expected_seam_abs_omega, _seam_distance
 
 
 def test_expected_seam_frequency_matches_fermionic_index_definition():
