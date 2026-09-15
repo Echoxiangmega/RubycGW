@@ -40,11 +40,11 @@ print(ed.ground_energy, ed.gap)
 ```bash
 python scripts/run_background.py --Lx 3 --Ly 3 --V 1.8 --Vp -0.1 --Vx -0.05 --out results/background.npz
 python scripts/run_effective_ed.py --Lx 3 --Ly 3 --V 1.8 --Vp -0.1 --Vx -0.05
-python scripts/run_jf.py results/background.npz --all-q --bath-rank 0 --bath-fd-step 2e-4 --stage full --no-rhs-recycle
+python scripts/run_jf_extended.py results/background.npz --all-q --bath-rank 0 --bath-fd-step 2e-4 --stage full --no-rhs-recycle
 python scripts/run_primitive_cgw.py --help
 ```
 
-`run_jf.py` is the maintained baseline JF driver. Historical V-prime/V-cross wrappers and specialized validation drivers are preserved under `research/` while the high-level response workflow is being consolidated.
+For a baseline `Vprime=Vcross=0` checkpoint, `scripts/run_jf.py` is the direct JF driver. `scripts/run_jf_extended.py` reads `Vprime`/`Vcross` from a saved background and applies the canonical extended interaction while reusing the same production JF kernel.
 
 ## Repository layout
 
