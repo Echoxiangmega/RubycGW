@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import validate_cluster_ed_gw_jf as validator
+from research import validate_cluster_ed_gw_jf as validator
 
 
 def test_legacy_single_rank_is_preserved():
