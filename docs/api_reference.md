@@ -1,277 +1,227 @@
-# API Reference
+# Public API reference
 
-这一页按模块说明当前公开类和主要函数。shape 中 `Nf=2*nw`, `Nb=2*nOmega+1`, `Nk1=nk1`, `Nk2=nk2`。
+RubycGW now has a deliberately small public surface.  New notebooks, maintained scripts, and future graphical interfaces should start from `rubycgw.api` rather than importing internal research modules directly.
 
-## `rubycgw.model`
+## `rubycgw.api`
 
-### `RubyParameters`
-
-```python
-RubyParameters(ti=0.4, t1=0.2, t2=0.2, V=0.2)
-```
-
-保存 Ruby hopping 和 NN interaction 参数。
-
-### `build_h0(kpts, params)`
-
-输入：`kpts` shape `(...,2)`；输出：`(...,6,6)` 的 `h0(k)`。
-
-### `build_interaction(qpts, params)`
-
-输入：`qpts` shape `(...,2)`；输出：`(...,6,6)` 的 `V_ab(q)`。
-
-### `eta_vertices()`
-
-返回 `K_A, K_B, K_plus, K_minus`。`K_plus` 是 physical opposite，`K_minus` 是 physical same。
-
-## `rubycgw.grids`
-
-### `MatsubaraGrid`
+The public module exports:
 
 ```python
-MatsubaraGrid(nk1=4, nk2=4, nw=16, nOmega=8, T=0.05)
+RubyParameters
+ExtendedRubyParameters
+RubyModel
+
+GridConfig
+GWConfig
+ClusterConfig
+BackgroundConfig
+BackgroundRun
+load_restart_for_run
+run_cluster_background
+save_background
+background_metadata
+
+EffectiveEDConfig
+EffectiveEDResult
+run_effective_ed
 ```
 
-主要属性：`n_values`, `m_values`, `omega`, `Omega`, `nk`, `nf`, `nb`。
+### `RubyModel`
 
-### `frequency_shift_slices(nf, m)`
-
-返回 `(src,dst)` 两个 slice，对应 `omega -> omega + Omega_m` 的有效 Matsubara window。
-
-### `roll_spatial(field, dq1, dq2)`
-
-只对两个 momentum axes 做 periodic `k -> k+q` shift。
-
-### `shift_fermion_field(field, dq1, dq2, m)`
-
-返回完整 shape 的 `F(k+Q)`；超出 fermion box 的 frequency 设为零。
-
-## `rubycgw.gw`
-
-### `GWOptions`
-
-主要参数：
-
-```text
-mu
-target_filling
-max_iter
-tol
-mixing
-mixing_method          # "linear" or "pulay"
-pulay_history          # default 6
-pulay_start            # default 3
-pulay_regularization   # default 1e-10
-mu_tol
-mu_max_iter
-verbose
-momentum_backend       # "fft" or "direct"
+```python
+RubyModel(
+    ti=0.4,
+    t1=0.2,
+    t2=0.2,
+    V=0.2,
+    Vprime=0.0,
+    Vcross=0.0,
+)
 ```
 
-`mixing_method="linear"` 使用普通 under-relaxation。
+Important methods:
 
-`mixing_method="pulay"` 使用 recent residual history 做 Pulay/DIIS extrapolation；`mixing` 此时表示对 extrapolated self-energy 的 damping。Pulay 只改变 self-consistency 的数值求解路径，不改变 GW 方程。
+```python
+model.parameters()                 # ExtendedRubyParameters
+model.build_h0(kpts)               # (...,6,6)
+model.build_interaction(qpts)      # (...,6,6)
+model.cluster_interactions()       # q=0 impurity projection
+model.effective_couplings()        # (Jn,Jm,Jz), requires t1=t2
+```
 
-### `NonInteractingResult`
+## Background workflow
 
-字段：`G0`, `mu`, `density`。
+### `GridConfig`
 
-### `GWResult`
+```python
+GridConfig(
+    Lx=3,
+    Ly=3,
+    nw=55,
+    nOmega=12,
+    T=0.08,
+)
+```
 
-字段：
+`Lx` and `Ly` are the primitive-cell momentum-grid dimensions.  `nw` is the number of positive fermionic Matsubara indices stored on each side of zero; `nOmega` is the corresponding bosonic cutoff parameter used by `MatsubaraGrid`.
+
+### `GWConfig`
+
+Controls the standalone lattice GW initializer:
+
+```python
+GWConfig(
+    max_iter=160,
+    tol=1e-8,
+    mixing=0.25,
+    mixing_method="pulay",
+    pulay_history=6,
+    pulay_start=3,
+    pulay_regularization=1e-10,
+    momentum_backend="fft",
+    verbose=True,
+)
+```
+
+### `ClusterConfig`
+
+Controls the coupled cluster-ED+GW embedding:
+
+```python
+ClusterConfig(
+    max_iter=200,
+    tol=2e-5,
+    mixing=0.80,
+    mixing_method="pulay",
+    pulay_history=8,
+    pulay_start=3,
+    pulay_regularization=1e-7,
+    pulay_step_cap=3.0,
+    impurity_mixing=1.0,
+    nbath=6,
+    bath_fit_nfreq=12,
+    bath_fit_max_nfev=300,
+    bath_energy_window=4.0,
+    bath_coupling_bound=4.0,
+    bath_fit_xtol=1e-9,
+    discard_weight_tol=1e-11,
+    verbose=True,
+)
+```
+
+### `BackgroundConfig`
+
+Combines filling and the three numerical configuration groups:
+
+```python
+BackgroundConfig(
+    filling=2.0,
+    grid=GridConfig(...),
+    gw=GWConfig(...),
+    cluster=ClusterConfig(...),
+)
+```
+
+### `run_cluster_background`
+
+```python
+run = run_cluster_background(
+    model,
+    config,
+    restart=None,
+    restart_mode="continuation",
+)
+```
+
+`restart_mode` accepts:
+
+- `fresh`: ignore restart data and solve a new background;
+- `restart`: continue the same physical parameter point;
+- `continuation`: reuse a converged embedded state while changing allowed interaction parameters.
+
+The returned `BackgroundRun` contains the model/configuration, grid, `h0`, `Vq`, numerical result, and restart metadata.
+
+The main solver result includes at least
 
 ```text
-G
-W
-P
+G, W, P
 Sigma_H
-Sigma_GW
+Sigma_emb
+Sigma_GW_lattice
+Sigma_GW_cluster
+Sigma_ED_cluster
+G_cluster
+G_impurity
 mu
 density
+bath
 converged
 iterations
 final_error
-mixing_method
-min_screening_singular_value
-min_screening_m
-min_screening_Omega
-min_screening_q1
-min_screening_q2
-min_screening_mode
-min_density_mode
-min_density_mode_residual
+impurity_mismatch
+bath_fit_error
+residual histories
 ```
 
-`final_error` 是未乘 mixing 的 raw self-energy fixed-point residual：
+## Effective pseudospin ED
 
-\[
-\max\left(
-\|\Sigma_H^{out}-\Sigma_H\|_\infty,
-\|\Sigma_{GW}^{out}-\Sigma_{GW}\|_\infty
-\right).
-\]
+### `EffectiveEDConfig`
 
-因此不同 mixing/method 的 `final_error` 可以直接比较；若 `converged=True`，应满足 `final_error < opts.tol`。
-
-screening fields 对应
-
-\[
-s_{\min}=\min_Q\sigma_{\min}[I-V(\mathbf q)P(Q)]
-\]
-
-以及该最小值出现的 bosonic index/frequency 和 reduced momentum。
-
-`min_screening_mode` 是该 Q 上 `I-VP` 的 unit-normalized right singular vector。`min_density_mode` 定义为归一化的
-
-\[
-P(Q_*)\,v_{\rm scr},
-\]
-
-它更适合解释为 density soft direction，因为
-
-\[
-(I-PV)P v_{\rm scr}=P(I-VP)v_{\rm scr}.
-\]
-
-两组 mode 都固定整体复相位：绝对值最大的分量被旋到实且为正。`min_density_mode_residual` 是同一 Q 上
-
-\[
-\|(I-PV)v_n\|_\infty.
-\]
-
-### `build_g0_inverse(h0, grid, mu)`
-
-返回 shape `(Nf,Nk1,Nk2,6,6)` 的 `G0^{-1}`。
-
-### `density_from_G(...)`
-
-固定 filling 的内部调用采用 analytic reference-Green-function tail subtraction；noninteracting 情况由 Fermi occupation 精确给出。
-
-### `compute_polarization(G, grid, backend="fft")`
-
-返回 `(Nb,Nk1,Nk2,6,6)` 的 `P(Q)`。另保留 `compute_polarization_direct/fft` 用于回归。
-
-### `compute_screened_interaction(P, Vq, grid)`
-
-批量求解
-
-\[
-[I-VP]W=V.
-\]
-
-### `screening_diagnostic(P, Vq, grid)`
-
-返回 `I-VP` 的全 Q 最小奇异值及其 `(m, Omega, q1, q2)` 位置。保留该接口用于只需要标量诊断的代码。
-
-### `screening_soft_modes(P, Vq, grid)`
-
-返回
-
-```text
-s_min, m, Omega, q1, q2,
-screening_mode,
-density_mode,
-density_mode_residual
+```python
+EffectiveEDConfig(
+    Lx=3,
+    Ly=3,
+    nev=4,
+    tol=1e-10,
+    maxiter=None,
+    degeneracy_tol=1e-7,
+)
 ```
 
-其中 `screening_mode` 与 `density_mode` 均为 shape `(6,)` 的归一化 complex vectors。
+### `run_effective_ed`
 
-### `compute_sigma_gw(G, W, grid, backend="fft")`
-
-返回 `(Nf,Nk1,Nk2,6,6)` 的 `Sigma_GW`。另保留 direct/FFT reference functions。
-
-### `solve_noninteracting(params, grid, mu=0.0, target_filling=None, ...)`
-
-构造 noninteracting reference；固定 filling 时独立求 `mu0`。
-
-### `solve_gw(params, grid, opts, initial=None)`
-
-执行 self-consistent GW。`initial` 可传上一参数点的 `GWResult`；若 shape 相同，则复用 `Sigma_H`, `Sigma_GW`, `mu` 作为初值。
-
-未收敛时返回的 `G` 与 `Sigma` 保持同一 iterate 的一致性，不再用 raw map output 覆盖 `Sigma`；这对 continuation/retry 更安全。
-
-## `rubycgw.cgw`
-
-### `VertexOptions`
-
-字段：
-
-```text
-max_iter
-tol
-mixing
-include_hartree
-include_mt
-include_al
-verbose
-momentum_backend
+```python
+result = run_effective_ed(model, EffectiveEDConfig(Lx=3, Ly=3))
 ```
 
-### `VertexResult`
+The result contains the projected couplings `Jn,Jm,Jz`, ground-state energy, gap, low levels in both parity sectors, allowed q points, the full 6x6 equal-time pseudospin structure factor, leading eigenmodes, and the projected `z_same`, `z_opposite`, and `xy_max` diagnostics.
 
-字段：`Gamma`, `Gamma_H`, `Gamma_MT`, `Gamma_AL1`, `Gamma_AL2`, `converged`, `iterations`。
+## Response solver façade
 
-### `gamma_h_q0`, `gamma_mt_q0`, `gamma_al_q0`
+`rubycgw.solvers.response` provides stable imports for the lower-level JF machinery:
 
-分别计算 q=0 Hartree、MT 与 AL corrections。
+```python
+from rubycgw.solvers.response import (
+    BathTangentOptions,
+    ClusterJFOptions,
+    build_embedded_jacobian,
+    response_matrix,
+)
+```
 
-### `solve_vertex_q0(...)`
+The end-to-end q-scan CLI is currently `scripts/run_jf.py`.  A fully consolidated high-level `JFConfig/run_jf` workflow is intentionally not advertised yet; extended-model wrappers remain in `research/` until that API is stabilized.
 
-解 q=0 vertex fixed-point equation；`initial_gamma` 可使用前一参数点或已收敛 MT vertex。
+## Analysis helpers
 
-## `rubycgw.susceptibility`
+Reusable self-energy analysis is available through `rubycgw.analysis`:
 
-### `chi_eta(G, K_left, grid, q1=0, q2=0, m=0, Gamma=None)`
+```python
+from rubycgw.analysis import (
+    realspace_to_k,
+    k_to_realspace,
+    dyson_kernel,
+    decompose_kernel,
+    green_from_kernel,
+)
+```
 
-计算
+The gauge-insensitive Dyson kernel used by these helpers is
 
 \[
--\frac{T}{N_k}\sum_k\mathrm{Tr}[K_{left}G(k+q)\Gamma(k,q)G(k)].
+K(k,i\omega)=\Sigma(k,i\omega)-\mu I
+=i\omega I-h_0(k)-G^{-1}(k,i\omega).
 \]
 
-若 `Gamma=None`，右 vertex 使用 bare `K_left`。
+## Internal modules
 
-## Driver scripts
-
-### `run_ruby_cgw.py`
-
-完整 staged reference run，默认 FFT momentum backend。
-
-### `convergence_scan.py`
-
-支持 `mt/full/both` vertex stage、continuation 与 split timings。
-
-### `filling_scan.py`
-
-固定 V 扫描 filling，画
-
-\[
-r_{\rm opposite}^{\rm eff}=\chi_{\rm opposite}^{-1},\qquad
-r_{\rm same}^{\rm eff}=\chi_{\rm same}^{-1}.
-\]
-
-默认 `V=3`, `T=0.05`, filling `0.05...5.95` 共 241 点。强耦合默认采用：
-
-```text
-anchor near filling=3
-interaction V-ramp
-GW attempts: linear:0.20 -> linear:0.10 -> pulay:0.70
-two filling continuation branches
-```
-
-相关参数：
-
-```bash
---gw-mixing 0.20
---gw-retry-mixings 0.10
---gw-pulay-mixing 0.70
---gw-pulay-history 6
---gw-pulay-start 3
---no-gw-pulay
-```
-
-每一个 V-ramp attempt 写入 `v_ramp.csv`，包含 method/mixing、iterations、raw `final_error`、chemical potential、actual filling，以及 `min_screening_singular_value` 和其 Q 位置。
-
-此外，每一个**收敛的** V-ramp 点写入 `screening_mode.csv`，保存 `screening_mode` 和更适合作为 charge-order seed 的 `density_mode` 六子格复振幅、模长和 phase。
-
-若所有 GW attempts 都失败，该 filling 跳过 vertex 并把 response 写成 NaN。
+Modules under the top level of `rubycgw/` still contain the validated numerical kernels and remain importable.  They are not guaranteed to keep their file-level API stable.  Code meant for reuse should prefer the façade modules under `models/`, `solvers/`, `workflows/`, `analysis/`, `io/`, and `symmetry/`.
