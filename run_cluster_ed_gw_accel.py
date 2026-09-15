@@ -95,7 +95,7 @@ def main() -> None:
     if "--help" in cleaned_argv or "-h" in cleaned_argv:
         print(
             "extra accelerated-launcher options:\n"
-            "  --restart-from PATH    restart the same physical point\n"
+            "  --restart-from PATH    continue from a saved cluster-ED+GW .npz state (same physical point)\n"
             "  --continue-from PATH   continue to a new V without standalone SC-GW\n"
         )
 
