@@ -2,13 +2,18 @@
 
 The production runner saves all expensive dynamic variables needed to continue
 an embedding solve.  This module validates a saved ``.npz`` checkpoint against
-the requested physical problem and reconstructs the warm-start state used by
-:func:`rubycgw.cluster_ed_gw_fast.solve_cluster_ed_gw_fast`.
+the requested problem and reconstructs the warm-start state used by the cluster
+ED+GW continuation wrappers.
+
+There are two intentionally different validation modes:
+
+* an ordinary restart requires the same physical parameters, including ``V``;
+* a parameter continuation may change the interaction strength while keeping
+  the lattice geometry, hopping, filling, temperature, Matsubara grids and bath
+  size fixed.
 
 Solver-control parameters such as the embedding tolerance, Pulay history length,
-or maximum iteration count are deliberately *not* required to match.  A restart
-is intended precisely for continuing the same physical calculation with tighter
-or improved convergence settings.
+or maximum iteration count are deliberately *not* required to match.
 """
 from __future__ import annotations
 
@@ -33,6 +38,7 @@ class ClusterEDGWRestartState:
     mu: float
     bath: BathParameters
     source_path: str = ""
+    source_V: float = np.nan
 
 
 def _scalar(z, key: str, cast=float):
@@ -58,12 +64,15 @@ def load_cluster_ed_gw_restart(
     params: RubyParameters,
     grid: MatsubaraGrid,
     nbath: int,
+    allow_interaction_change: bool = False,
 ) -> ClusterEDGWRestartState:
-    """Load and validate a saved cluster-ED+GW result for continuation.
+    """Load and validate a saved cluster-ED+GW result.
 
-    The physical lattice, interaction parameters, filling, temperature,
-    Matsubara grids and bath size must match.  Numerical convergence settings
-    may be changed freely after restart.
+    By default this is a strict restart: lattice size, ``V``, hoppings, filling,
+    temperature, Matsubara grids and bath size must match.  With
+    ``allow_interaction_change=True`` the saved ``V`` is allowed to differ and
+    the checkpoint is interpreted only as an initial embedded state for a new
+    interaction point.  All structural and one-body parameters remain strict.
     """
     p = Path(path)
     if not p.exists():
@@ -76,7 +85,9 @@ def load_cluster_ed_gw_restart(
                 f"checkpoint is {_scalar(z, 'Lx', int)}x{_scalar(z, 'Ly', int)}, "
                 f"requested {int(Lx)}x{int(Ly)}"
             )
-        _require_close("V", _scalar(z, "V"), float(params.V))
+        source_V = _scalar(z, "V")
+        if not bool(allow_interaction_change):
+            _require_close("V", source_V, float(params.V))
         _require_close("ti", _scalar(z, "ti"), float(params.ti))
         _require_close("t1", _scalar(z, "t1"), float(params.t1))
         _require_close("t2", _scalar(z, "t2"), float(params.t2))
@@ -160,4 +171,5 @@ def load_cluster_ed_gw_restart(
         mu=float(mu),
         bath=bath,
         source_path=str(p),
+        source_V=float(source_V),
     )
