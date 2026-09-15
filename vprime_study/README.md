@@ -25,10 +25,40 @@ same `V(q=0)` matrix.  The lattice GW and JF response still use the full
 momentum-dependent interaction.  This is the deliberate cluster approximation
 for the V' study.
 
+## Preferred continuation workflow
+
+For an interaction scan, do **not** solve a new standalone SC-GW background at
+every point.  Start from one converged embedded solution and use
+`--continue-from`.  This restores the previous embedded `G`, `Sigma_H`,
+`Sigma_emb`, impurity self-energy, chemical potential and bath, rebuilds Pulay
+history, and enters the coupled ED+GW map directly with the new `V`/`V'`.
+
+A baseline V-only checkpoint is interpreted as `V'=0`, so the first attractive
+point can be continued directly from the existing result:
+
+```bat
+python run_cluster_ed_gw_vprime.py ^
+    --Lx 2 --Ly 2 ^
+    --V 1.2 --Vp -0.01 --filling 2 --T 0.08 ^
+    --continue-from results\cluster_bg\cluster_ed_gw_L2x2_V1.2_fill2.npz
+```
+
+Then continue along the same embedded branch:
+
+```bat
+python run_cluster_ed_gw_vprime.py ^
+    --Lx 2 --Ly 2 ^
+    --V 1.2 --Vp -0.05 --filling 2 --T 0.08 ^
+    --continue-from results\vprime_cluster_bg\cluster_ed_gw_vprime_L2x2_V1.2_Vp-0.01_fill2.npz
+```
+
+The continuation loader still requires the same `Lx/Ly`, hopping parameters,
+filling, temperature, Matsubara grids and bath size.  Only the interaction
+strength is intentionally allowed to change.
+
 ## Minimal L2x2 comparison
 
-First make a converged V' background, for example the previously interesting
-small attraction `V'=-0.05`:
+A fresh V' point can still be computed with the historical SC-GW initializer:
 
 ```bat
 python run_cluster_ed_gw_vprime.py ^
@@ -45,7 +75,7 @@ python scan_cluster_ed_gw_jf_q_vprime.py ^
     --all-q --bath-rank 0 --bath-fd-step 2e-4 --stage full
 ```
 
-For a small V' scan, repeat the background + response for e.g.
+For a small V' scan, repeat the continuation + response for e.g.
 `V'=0,-0.01,-0.05,-0.10`, then compare the response files with
 
 ```bat
