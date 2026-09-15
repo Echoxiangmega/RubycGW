@@ -1,227 +1,80 @@
 # RubycGW
 
-Reference implementation of self-consistent `GW` and covariant `GW` (cGW)
-for the spinless six-sublattice Ruby-lattice density-interaction model.
-
-The repository contains both a maintained **public package layer** and a larger
-set of research/validation scripts accumulated during method development.  New
-code should use the public package API under `rubycgw.api`; historical root-level
-scripts remain available for reproducibility and will be migrated gradually.
+RubycGW is a research codebase for interacting spinless fermions on the Ruby lattice. The maintained interface focuses on four workflows: model construction, self-consistent cluster ED+GW backgrounds, Jacobian-free response calculations, and the strong-coupling effective pseudospin ED model.
 
 ## Install
 
-For development or normal local use:
-
 ```bash
-python -m pip install -e .
+python -m pip install -e '.[dev]'
 python -m pytest -q
 ```
 
-The old `python -m pip install -r requirements.txt` workflow is still supported.
-
 ## Public Python API
 
-The intended entry point for notebooks, reusable scripts, and future graphical
-frontends is:
-
 ```python
-from rubycgw.api import (
-    RubyModel,
-    GridConfig,
-    BackgroundConfig,
-    run_cluster_background,
-    save_background,
-)
+from rubycgw.api import RubyModel, GridConfig, BackgroundConfig, run_cluster_background
 
 model = RubyModel(
-    ti=0.4,
-    t1=0.2,
-    t2=0.2,
-    V=1.8,
-    Vprime=-0.10,
-    Vcross=-0.05,
+    ti=0.4, t1=0.2, t2=0.2,
+    V=1.8, Vprime=-0.1, Vcross=-0.05,
 )
-
 config = BackgroundConfig(
     filling=2.0,
     grid=GridConfig(Lx=3, Ly=3, T=0.08),
 )
-
 run = run_cluster_background(model, config)
-save_background("results/background.npz", run)
+print(run.result.mu, run.result.density)
 ```
 
-The strong-coupling pseudospin ED has the same model object:
+For the leading strong-coupling pseudospin model:
 
 ```python
 from rubycgw.api import EffectiveEDConfig, run_effective_ed
 
-result = run_effective_ed(
-    model,
-    EffectiveEDConfig(Lx=3, Ly=3),
-)
+ed = run_effective_ed(model, EffectiveEDConfig(Lx=3, Ly=3))
+print(ed.ground_energy, ed.gap)
 ```
 
-Clean command-line frontends using this API live in `scripts/`, for example:
+## Maintained command-line entry points
 
 ```bash
-python scripts/run_background.py \
-  --Lx 3 --Ly 3 --V 1.8 --Vp -0.1 --Vx -0.05 \
-  --out results/background.npz
-
-python scripts/run_effective_ed.py \
-  --Lx 3 --Ly 3 --V 1.8 --Vp -0.1 --Vx -0.05
+python scripts/run_background.py --Lx 3 --Ly 3 --V 1.8 --Vp -0.1 --Vx -0.05 --out results/background.npz
+python scripts/run_effective_ed.py --Lx 3 --Ly 3 --V 1.8 --Vp -0.1 --Vx -0.05
+python scripts/run_jf.py results/background.npz --all-q --bath-rank 0 --bath-fd-step 2e-4 --stage full --no-rhs-recycle
+python scripts/run_primitive_cgw.py --help
 ```
 
-## Maintained module layout
+`run_jf.py` is the maintained baseline JF driver. Historical V-prime/V-cross wrappers and specialized validation drivers are preserved under `research/` while the high-level response workflow is being consolidated.
 
-The new public layout separates physical models, numerical solvers, workflows,
-symmetry, IO, and post-processing:
+## Repository layout
 
 ```text
-rubycgw/
-  api.py                 stable small public surface
-  models/                Ruby model and interaction definitions
-  solvers/               GW, cluster ED+GW, JF, effective ED facades
-  workflows/             app/notebook-ready high-level calculations
-  symmetry/              C3 and cluster-orientation utilities
-  io/                    checkpoint serialization
-  analysis/              reusable result summaries
+rubycgw/        installable package and numerical kernels
+scripts/        maintained user-facing command-line entry points
+docs/           current user and developer documentation
+tests/          regression and numerical tests
+research/       historical scans, diagnostics, benchmarks, and paper workflows
+vprime_study/   compatibility layer for older V-prime/V-cross calculations
 ```
 
-The original modules such as `rubycgw/gw.py`, `rubycgw/cluster_ed_gw_fast.py`,
-and the root-level research scripts are deliberately retained so numerical
-results and old commands remain reproducible.  The public layer calls those
-validated kernels instead of duplicating their physics.
+The development-time `run_*`, `scan_*`, `benchmark_*`, `diagnose_*`, `plot_*`, and `validate_*` scripts are intentionally kept out of the repository root. They remain available in `research/` for reproducibility but are not part of the stable public interface.
 
 ## Documentation
 
-The maintained documentation lives in [`docs/`](docs/README.md). In particular:
+Start with [`docs/README.md`](docs/README.md). The maintained documents cover installation, model conventions, the public API, cluster ED+GW, JF response, effective pseudospin ED, cluster-orientation diagnostics, checkpoints, numerics, and repository development.
 
-- [`docs/getting_started.md`](docs/getting_started.md): installation and first run;
-- [`docs/model_and_conventions.md`](docs/model_and_conventions.md): Ruby lattice and eta conventions;
-- [`docs/gw_theory.md`](docs/gw_theory.md): self-consistent GW equations;
-- [`docs/cgw_theory.md`](docs/cgw_theory.md): Hartree, MT, AL1, AL2 and the cGW vertex equation;
-- [`docs/api_reference.md`](docs/api_reference.md): modules, classes, functions, inputs/outputs and array shapes;
-- [`docs/numerics_and_validation.md`](docs/numerics_and_validation.md): convergence and validation checks;
-- [`docs/convergence_scan.md`](docs/convergence_scan.md): automated `nw`, `nOmega`, and `nk` scans, continuation and fast MT mode;
-- [`docs/performance_and_reuse.md`](docs/performance_and_reuse.md): performance bottlenecks and what can be reused between scan points;
-- [`docs/orbital_moment.md`](docs/orbital_moment.md): checkpoint-to-bond-current and local plaquette orbital-moment post-processing;
-- [`docs/electromagnetic_response.md`](docs/electromagnetic_response.md): Peierls-flux covariant response and finite-difference validation;
-- [`docs/bulk_orbital_magnetization.md`](docs/bulk_orbital_magnetization.md): Nourafkan bulk-orbital-magnetization formula and complete `M1+M2` workflow;
-- [`docs/uniform_B_self_energy_derivation.md`](docs/uniform_B_self_energy_derivation.md): detailed derivation of the uniform-`B` Green-function/self-energy response, the repository `C_GW` Jacobian-vector notation, Hartree/Fock/MT/AL decomposition, self-consistent `Sigma_B` equation, GMRES implementation, caveats, and references;
-- [`docs/tutorial.md`](docs/tutorial.md): complete theory tutorial and main PDF source.
+Specialized derivations and historical validation notes are retained under [`docs/research_notes/`](docs/research_notes/).
 
-The GitHub Actions workflow `build tutorial PDF` automatically regenerates
-`RubycGW_Tutorial.pdf` from the maintained Markdown files whenever relevant code
-or documentation changes.
+## Scope and caveats
 
-## Conventions
-
-This repository preserves the earlier Ruby calculation conventions:
-
-- sites are `0,1,2,3,4,5`;
-- reduced reciprocal coordinates use `exp(2 pi i k.R)`;
-- the hopping list is the previous `ti/t1/t2` 12-bond list;
-- density interaction `V` acts on the six intra-triangle bonds only;
-- `eta_A` uses `0 -> 1 -> 2 -> 0`;
-- `eta_B` uses `3 -> 4 -> 5 -> 3`;
-- `eta_plus = (eta_A + eta_B)/sqrt(2)` = **physical opposite circulation**;
-- `eta_minus = (eta_A - eta_B)/sqrt(2)` = **physical same circulation**.
-
-The public `RubyModel` additionally supports the current short-range extensions
-`Vprime` (straight neighbouring-triangle links) and `Vcross` (crossed links in
-the same neighbouring-triangle pair).  Setting both to zero recovers the
-baseline interaction.
-
-## Equations implemented
+The cluster embedding uses
 
 ```text
-G^{-1} = G0^{-1} - Sigma_H - Sigma_GW
-P_ab(Q) = (T/Nk) sum_k G_ab(k+Q) G_ba(k)
-W(Q) = V(Q) + V(Q) P(Q) W(Q)
-Sigma_GW = Sigma_F + Sigma_c
-Sigma_c,ab(k) = -(T/Nk) sum_Q G_ab(k+Q) [W(Q)-V(Q)]_ba
+Sigma_emb(k,iw) = Sigma_GW^lat(k,iw)
+                - Sigma_GW^cluster(iw)
+                + Sigma_ED^cluster(iw)
 ```
 
-The supercell cGW layer uses the decomposition
+with a finite-bath six-site impurity. The polarization remains the lattice GW bubble, so this is a self-energy embedding diagnostic rather than a full GW+EDMFT implementation. JF eigenmodes diagnose continuous soft modes of the chosen self-consistent background; they are not by themselves a free-energy comparison of competing ordered states.
 
-```text
-Gamma = K + Gamma_H + Gamma_F + Gamma_MT,c + Gamma_AL1 + Gamma_AL2
-```
-
-and the electromagnetic module applies the same functional derivative to a
-periodic Peierls-flux source. At fixed filling it also includes `dmu/dphi` by
-solving the additional chemical-potential vertex `K_mu=-I`.
-
-## Research implementation map
-
-Important lower-level modules retained for validation and backwards compatibility:
-
-- `rubycgw/model.py`: baseline Ruby hopping, interaction matrix, eta vertices.
-- `rubycgw/grids.py`: momentum/Matsubara grids and allocation-light `k+Q` shifts.
-- `rubycgw/gw.py`: noninteracting reference plus self-consistent Hartree + GW solver.
-- `rubycgw/cluster_ed_gw_fast.py`: production accelerated six-site cluster ED+GW embedding.
-- `rubycgw/cluster_ed_gw_jf.py`: matrix-free Jacobian-free cluster response.
-- `rubycgw/cgw.py`: primitive-cell q=0 cGW response.
-- `rubycgw/supercell_cgw.py`: 18-site Hartree/Fock/MT/AL covariant response.
-- `rubycgw/orbital_moment.py`: checkpoint Green function, bond currents, local plaquette moments.
-- `rubycgw/electromagnetic.py`: Peierls source and covariant electromagnetic response.
-- `rubycgw/bulk_orbital_magnetization.py`: physical momentum derivatives and Nourafkan `M1+M2` evaluation.
-- `rubycgw/magnetic_self_energy.py`: gauge-invariant uniform-`B` self-energy derivative.
-- `vprime_study/`: compatibility namespace for the earlier `Vprime/Vcross` study; new model code should import `rubycgw.models` instead.
-- `tests/`: numerical conventions, regression tests, and public-API tests.
-
-## Historical command-line workflows
-
-Existing root-level research scripts remain usable.  For example:
-
-```bash
-python run_ruby_cgw.py
-```
-
-Local orbital moments from a converged zero-source 18-site GW checkpoint:
-
-```bash
-python analyze_orbital_moment.py checkpoints/example.npz \
-  --csv orbital_moment.csv \
-  --json orbital_moment.json
-```
-
-Electromagnetic covariant response from the same kind of checkpoint:
-
-```bash
-python analyze_em_response.py checkpoints/example.npz \
-  --channel same \
-  --npz em_same.npz
-```
-
-Validate it against two fully self-consistent GW calculations at `+/-delta_phi`:
-
-```bash
-python analyze_em_response.py checkpoints/example.npz \
-  --channel same \
-  --finite-difference 1e-4 \
-  --json em_same_validation.json
-```
-
-Full staged convergence scan:
-
-```bash
-python convergence_scan.py --scan nomega --vertex-stage both
-```
-
-Fast exploratory scan without AL1/AL2:
-
-```bash
-python convergence_scan.py --scan nk \
-  --vertex-stage mt \
-  --base-nw 64 --base-nomega 16 \
-  --nk-values 4 6 8
-```
-
-Compatible scans use continuation by default. Add `--no-continuation` to force every point to restart from the bare initial guess.
-
-## Numerical note
-
-The stored fermion Matsubara box is finite. Values of `G(i omega+i Omega)` outside the stored box are zero. Production results require explicit `nw`, `nOmega`, and `nk` convergence tests. For electromagnetic validation, decrease `delta_phi` until the finite-difference error stops improving; if it plateaus, increase `nw` before interpreting the mismatch as a vertex error.
+For the extended model, `Vprime` acts on the straight inter-triangle links and `Vcross` on the crossed links of the same neighboring triangle pairs. Setting both to zero reproduces the baseline Ruby model.
