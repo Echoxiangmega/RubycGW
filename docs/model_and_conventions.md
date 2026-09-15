@@ -1,167 +1,131 @@
-# Ruby Model and Conventions
+# Ruby model and conventions
 
-## 1. 六子晶格与 hopping
+## Primitive cell
 
-RubycGW 保留之前 Ruby selection-rule 代码的编号：每个 unit cell 有六个 site，编号 `0,1,2,3,4,5`。两个三角形分别由 `(0,1,2)` 和 `(3,4,5)` 构成。
-
-代码中 `_base_bonds()` 存放 12 条 undirected hopping bond：
-
-```text
-(0,1,0,0)  ti
-(0,2,0,0)  ti
-(2,1,0,0)  ti
-(3,4,0,0)  ti
-(3,5,0,0)  ti
-(4,5,0,0)  ti
-(1,4,0,0)  t1
-(5,0,0,-1) t1
-(2,3,-1,0) t1
-(3,1,0,-1) t2
-(2,5,0,0)  t2
-(0,4,-1,0) t2
-```
-
-这里 cell offset `R=(R1,R2)` 表示从当前原胞中的第一个 site 指向平移后原胞中的第二个 site。
-
-## 2. Fourier convention
-
-使用 reduced reciprocal coordinates：
+RubycGW uses a six-site primitive cell with orbitals `0,...,5`.  Sites `0,1,2` form triangle A and sites `3,4,5` form triangle B.  Reduced reciprocal coordinates are used throughout:
 
 \[
-c_{Ra}=\frac{1}{\sqrt N}\sum_k e^{2\pi i k\cdot R}c_{ka}.
+k=(k_1,k_2),\qquad e^{2\pi i k\cdot R}.
 \]
 
-因此 hopping matrix 为
-
-\[
-[h_0(k)]_{ab}=\sum_R t_{ab}(R)e^{2\pi i k\cdot R}.
-\]
-
-注意 phase 只含 Bravais-lattice cell vector `R`，不额外包含 intracell position `r_a`。这也是为什么当前两个 intracell triangle 的 eta bare vertex 可以写成与 k 无关的常数 6x6 矩阵。
-
-## 3. Density interaction
-
-**V 只放在两个三角形内部的六条 bond 上，不放在 t1/t2 bond 上。**
-
-原胞中的 interacting bonds 是
-
-```text
-triangle A: (0,1), (0,2), (1,2)
-triangle B: (3,4), (3,5), (4,5)
-```
-
-因此实空间相互作用为
-
-\[
-H_V=V\sum_R\bigl[
- n_{R0}n_{R1}+n_{R0}n_{R2}+n_{R1}n_{R2}
-+n_{R3}n_{R4}+n_{R3}n_{R5}+n_{R4}n_{R5}
-\bigr].
-\]
-
-Fourier 形式写作
-
-\[
-H_V=\frac{1}{2N}\sum_q n_a(q)V_{ab}(q)n_b(-q).
-\]
-
-由于所有 interacting bonds 都是 intracell，`V(q)` 与 q 无关，并且显式为
-
-\[
-V(q)=V\begin{pmatrix}
-0&1&1&0&0&0\\
-1&0&1&0&0&0\\
-1&1&0&0&0&0\\
-0&0&0&0&1&1\\
-0&0&0&1&0&1\\
-0&0&0&1&1&0
-\end{pmatrix}.
-\]
-
-所以 hopping coordination 是 4，但 interaction coordination 是
-
-\[
-z_V=2.
-\]
-
-这一区分必须始终保留。`build_interaction(qpts, params)` 和 18-site 的 `build_supercell_interaction(...)` 都遵循这一 convention。
-
-## 4. eta bond operator
-
-有向 bond `a -> b` 的反对称双线性仍沿用之前 HS 推导中的记号：
-
-\[
-\eta_{ab}=i\left(\bar\psi_a\psi_b-\bar\psi_b\psi_a\right).
-\]
-
-没有额外的 `1/2`。
-
-三角形 A 采用
-
-\[
-0\to1\to2\to0,
-\]
-
-因此
-
-\[
-\eta_A=\eta_{01}+\eta_{12}+\eta_{20}.
-\]
-
-三角形 B 采用
-
-\[
-3\to4\to5\to3.
-\]
-
-代码中 `eta_vertices()` 返回
+The public immutable model description is
 
 ```python
-K_A, K_B, K_plus, K_minus
+from rubycgw.api import RubyModel
+
+model = RubyModel(
+    ti=0.4,
+    t1=0.2,
+    t2=0.2,
+    V=1.8,
+    Vprime=-0.1,
+    Vcross=-0.05,
+)
 ```
 
-使得
+Setting `Vprime=Vcross=0` reproduces the baseline model.
 
-\[
-\eta_\lambda=\bar\psi K^\lambda\psi.
-\]
+## Hopping convention
 
-## 5. plus/minus 与物理 same/opposite 的标签
+`ti` is the hopping inside each elementary triangle.  `t1` and `t2` are the two inter-triangle hopping families.  The complete real-space hopping list is still defined by the validated historical `rubycgw.model` kernel; the new `RubyModel` is a public wrapper around the same convention rather than a new Hamiltonian implementation.
 
-由于两个代数箭头环在实际 Ruby 几何中的 handedness 相反，当前 convention 下
+## Density interactions
 
-\[
-K^+=\frac{K^A+K^B}{\sqrt2}
-\]
+The extended public model contains three short-range density interactions.
 
-对应 **physical opposite circulation**，而
+### Intra-triangle interaction `V`
 
-\[
-K^-=\frac{K^A-K^B}{\sqrt2}
-\]
-
-对应 **physical same circulation**。
-
-这是整个项目最容易混淆的标签之一。程序输出始终明确写成：
+`V` acts on the six bonds
 
 ```text
-opposite (+)
-same (-)
+A: (0,1), (0,2), (1,2)
+B: (3,4), (3,5), (4,5)
 ```
 
-不要把代数 `+/-` 直接解释成物理 same/opposite。
+These bonds are intracell.
 
-## 6. 有限外部动量 q 时 bare eta vertex
+### Straight inter-triangle interaction `Vprime`
 
-一般外源定义为
+`Vprime` acts on the same six inter-triangle links used by the `t1/t2` hopping graph.  The real-space offsets are retained in the lattice interaction `V(q)`, so the interaction is momentum dependent when `Vprime != 0`.
+
+### Crossed inter-triangle interaction `Vcross`
+
+`Vcross` acts on the two crossed density links inside each of the same three neighboring A/B triangle pairs.  It does **not** add a long same-cell `A0-B0` bond.  In the six-orbital impurity projection, primitive-cell offsets are dropped and repeated projected pairs are summed; the six physical crossed bonds therefore project onto three orbital pairs with coupling `2*Vcross` each.
+
+## Six-site cluster interaction
+
+The lattice keeps the full real-space offsets.  The finite six-site impurity cannot retain those offsets independently, so its density interaction is the `q=0` six-orbital projection of the extended lattice interaction.  The cluster-GW subtraction and impurity ED use the same projected interaction so the local double-counting construction is internally consistent.
+
+This distinction matters when interpreting large nonlocal `Vprime` or `Vcross`: the lattice and impurity are not identical spatial representations of the interaction.
+
+## Current and pseudospin channels
+
+For the original eta convention,
+
+```text
+triangle A loop: 0 -> 1 -> 2 -> 0
+triangle B loop: 3 -> 4 -> 5 -> 3
+```
+
+the two drawn loops have opposite geometric handedness.  As a result, the old algebraic eta labels and the physical circulation labels are not the same:
+
+```text
+eta_plus  = physical opposite circulation
+eta_minus = physical same circulation
+```
+
+The newer response layer uses `Ax Ay Az Bx By Bz`.  For user-facing A/B parity projections:
+
+```text
+z_even = same physical circulation on A and B
+z_odd  = opposite physical circulation on A and B
+```
+
+This is the naming that should be used when discussing loop-current competition.
+
+## Strong-coupling pseudospin couplings
+
+For `t1=t2=t`, the leading projected model used by the effective ED workflow has
 
 \[
-\eta_\lambda(q)=\sum_k\bar\psi(k+q)K^\lambda(k,q)\psi(k).
+H_{\rm eff}=\sum_{\langle ij\rangle_\gamma}
+\left[
+J_n\tau_i^{n_\gamma}\tau_j^{n_\gamma}
++J_m\tau_i^{m_\gamma}\tau_j^{m_\gamma}
++J_z\tau_i^z\tau_j^z
+\right].
 \]
 
-对于当前完全位于同一 unit cell 内的 triangle eta，`K^lambda` 不依赖 k 和 q，有限 q 只体现在 fermion 从 `k` 变成 `k+q`。如果以后把跨原胞 bond 也纳入 eta operator，则 bare vertex 会获得 Bloch phase，例如对 `(R,a)->(R+delta,b)`：
+With
 
 \[
-K_{ab}(k,q)=ie^{2\pi i k\cdot\delta},\qquad
-K_{ba}(k,q)=-ie^{-2\pi i (k+q)\cdot\delta}.
+s=t^2/V,
 \]
+
+the current implementation uses
+
+\[
+J_n=\frac{5s}{9}+\frac{V'+V_\times}{18},
+\]
+
+\[
+J_m=-\frac{s}{3}+\frac{-V'+V_\times}{6},
+\]
+
+\[
+J_z=-\frac{s}{3}.
+\]
+
+The public method
+
+```python
+Jn, Jm, Jz = model.effective_couplings()
+```
+
+returns these leading-order coefficients.  They are a strong-coupling diagnostic, not an exact replacement for the microscopic fermion model.
+
+## Momentum meshes
+
+`Lx` and `Ly` in the lattice GW/cluster-ED+GW workflows specify the periodic momentum mesh of primitive cells.  They do not enlarge the impurity cluster: the impurity remains six correlated orbitals plus a finite bath.
+
+For the effective pseudospin ED workflow, by contrast, `Lx x Ly` is the actual finite triangle-center quantum cluster with two pseudospins per primitive cell.
