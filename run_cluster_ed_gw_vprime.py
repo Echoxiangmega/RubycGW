@@ -4,6 +4,10 @@
 V' acts on all six inter-triangle bonds carrying t1/t2.  Negative V' is
 attractive.  The baseline rubycgw model is not modified; this launcher installs
 V-prime impurity hooks and writes results under a separate directory by default.
+
+Use ``--continue-from`` to follow a converged embedded branch in V and/or V'.
+That mode restores the previous embedded G/Sigma/mu/bath and deliberately skips
+the standalone SC-GW background solve.
 """
 from __future__ import annotations
 
@@ -13,6 +17,8 @@ from pathlib import Path
 import numpy as np
 
 from rubycgw.cluster_ed_gw_fast import ClusterEDGWFastOptions, solve_cluster_ed_gw_fast
+from rubycgw.cluster_restart import load_cluster_ed_gw_restart
+from rubycgw.cluster_restart_solver import solve_cluster_ed_gw_fast_continued
 from rubycgw.grids import MatsubaraGrid
 from rubycgw.gw import GWOptions
 from rubycgw.model import build_h0
@@ -63,12 +69,28 @@ def _args():
     p.add_argument("--discard-weight-tol", type=float, default=1e-11)
     p.add_argument("--quiet-gw", action="store_true")
     p.add_argument("--quiet-embed", action="store_true")
+    p.add_argument(
+        "--continue-from",
+        type=Path,
+        default=None,
+        help="reuse a converged embedded checkpoint while changing V and/or V'; skips standalone SC-GW",
+    )
     p.add_argument("--out", type=Path, default=Path("results/vprime_cluster_bg"))
     return p.parse_args()
 
 
 def _tag(x: float) -> str:
     return f"{float(x):g}"
+
+
+def _saved_vprime(path: Path) -> float:
+    """Return source V'; baseline V-only checkpoints are interpreted as V'=0."""
+    with np.load(path, allow_pickle=False) as z:
+        if "Vprime" in z:
+            return float(np.asarray(z["Vprime"]).reshape(()))
+        if "Vp" in z:
+            return float(np.asarray(z["Vp"]).reshape(()))
+    return 0.0
 
 
 def main():
@@ -116,9 +138,43 @@ def main():
         "V' bond set: all six inter-triangle t1/t2 bonds; V'<0 is attractive",
         flush=True,
     )
-    result = solve_cluster_ed_gw_fast(
-        h0, Vq, params, grid, gw_opts=gw_opts, embed_opts=embed_opts
-    )
+
+    continuation_source = ""
+    source_V = np.nan
+    source_Vprime = np.nan
+    if args.continue_from is None:
+        result = solve_cluster_ed_gw_fast(
+            h0, Vq, params, grid, gw_opts=gw_opts, embed_opts=embed_opts
+        )
+    else:
+        restart = load_cluster_ed_gw_restart(
+            args.continue_from,
+            Lx=int(args.Lx),
+            Ly=int(args.Ly),
+            filling=float(args.filling),
+            T=float(args.T),
+            params=params,
+            grid=grid,
+            nbath=int(args.nbath),
+            allow_interaction_change=True,
+        )
+        continuation_source = str(args.continue_from)
+        source_V = float(restart.source_V)
+        source_Vprime = _saved_vprime(args.continue_from)
+        print(
+            f"[cluster-ED+GW] continue interactions: "
+            f"(V,V')=({source_V:g},{source_Vprime:g}) -> ({args.V:g},{args.Vprime:g})",
+            flush=True,
+        )
+        result = solve_cluster_ed_gw_fast_continued(
+            h0,
+            Vq,
+            params,
+            grid,
+            gw_opts=gw_opts,
+            embed_opts=embed_opts,
+            restart=restart,
+        )
 
     args.out.mkdir(parents=True, exist_ok=True)
     outfile = args.out / (
@@ -129,6 +185,12 @@ def main():
         outfile,
         interaction_model=np.asarray("V_intra_plus_Vprime_intertriangle"),
         cluster_projection=np.asarray("q0_primitive_cell_projection"),
+        continuation_source=np.asarray(continuation_source),
+        continuation_source_V=float(source_V),
+        continuation_source_Vprime=float(source_Vprime),
+        background_kind=np.asarray(
+            "parameter_continuation_seed" if args.continue_from is not None else "standalone_scgw"
+        ),
         Lx=int(args.Lx), Ly=int(args.Ly),
         V=float(args.V), Vprime=float(args.Vprime), Vp=float(args.Vprime),
         filling=float(args.filling), T=float(args.T),
@@ -162,7 +224,7 @@ def main():
     print(
         f"saved {outfile}\n"
         f"converged={result.converged}, residual={result.final_error:.3e}, "
-        f"bath={result.bath_fit_error:.3e}",
+        f"bath={result.bath_fit_error:.3e}, mu={result.mu:+.10f}",
         flush=True,
     )
 
