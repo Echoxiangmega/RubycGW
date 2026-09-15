@@ -4,7 +4,7 @@ import sys
 
 def test_run_cluster_ed_gw_accel_restart_help():
     proc = subprocess.run(
-        [sys.executable, "run_cluster_ed_gw_accel.py", "--help"],
+        [sys.executable, "research/run_cluster_ed_gw_accel.py", "--help"],
         check=True,
         capture_output=True,
         text=True,
