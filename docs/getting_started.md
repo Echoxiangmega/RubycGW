@@ -9,7 +9,7 @@ python -m pip install -e '.[dev]'
 python -m pytest -q
 ```
 
-The core dependencies are NumPy, SciPy, and Matplotlib.  Editable installation is recommended even when running archived scripts because it makes the `rubycgw` package available independently of the current working directory.
+The core dependencies are NumPy, SciPy, and Matplotlib. Editable installation is recommended even when running archived scripts because it makes the `rubycgw` package available independently of the current working directory.
 
 ## First cluster ED+GW background
 
@@ -104,14 +104,14 @@ CLI:
 python scripts/run_effective_ed.py --Lx 3 --Ly 3 --V 1.8 --Vp -0.1 --Vx -0.05
 ```
 
-The present direct ED implementation is intended for small pseudospin tori.  A 3x3 triangle-center torus contains 18 pseudospins and is the practical production scale of the current parity-resolved sparse solver.
+The present direct ED implementation is intended for small pseudospin tori. A 3x3 triangle-center torus contains 18 pseudospins and is the practical production scale of the current parity-resolved sparse solver.
 
 ## Jacobian-free response
 
-For a converged baseline background:
+For the extended background created above, use:
 
 ```bash
-python scripts/run_jf.py results/background.npz \
+python scripts/run_jf_extended.py results/background.npz \
   --all-q \
   --bath-rank 0 \
   --bath-fd-step 2e-4 \
@@ -119,7 +119,9 @@ python scripts/run_jf.py results/background.npz \
   --no-rhs-recycle
 ```
 
-The historical extended-model JF wrappers are currently in `research/`.  They remain usable for reproducibility, but the public response workflow is still being consolidated into the new API layer.
+`run_jf_extended.py` reads `Vprime` and `Vcross` from the checkpoint and reuses the same production JF kernel with the canonical extended interaction. For a baseline checkpoint with `Vprime=Vcross=0`, `scripts/run_jf.py` is the direct driver.
+
+The lower-level response objects are available from `rubycgw.solvers.response`; a fully configuration-driven high-level JF Python workflow is still being consolidated.
 
 ## Primitive GW/cGW driver
 
@@ -133,7 +135,7 @@ New notebooks should prefer the package imports under `rubycgw.solvers` rather t
 
 ## Where old scripts went
 
-Development-time scripts that used to fill the repository root were moved to `research/`.  They were archived rather than deleted.  If an old note says
+Development-time scripts that used to fill the repository root were moved to `research/`. They were archived rather than deleted. If an old note says
 
 ```bash
 python scan_supercell_cgw_vs_V.py ...
