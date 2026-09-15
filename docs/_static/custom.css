@@ -1,0 +1,28 @@
+:root {
+  --rubycgw-radius: 0.8rem;
+}
+
+.bd-main .bd-content .bd-article-container {
+  max-width: 58rem;
+}
+
+.sd-card {
+  border-radius: var(--rubycgw-radius);
+}
+
+.sd-card-title {
+  font-weight: 650;
+}
+
+article.bd-article > h1:first-child {
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+code.literal {
+  border-radius: 0.25rem;
+}
+
+div.highlight pre {
+  border-radius: 0.55rem;
+}

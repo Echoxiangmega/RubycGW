@@ -1,21 +1,46 @@
 # RubycGW documentation
 
-This directory describes the maintained, modular interface of RubycGW.  The repository was reorganized so that end users no longer need to navigate the large collection of development-time drivers that historically lived in the project root.
+This directory contains the maintained user documentation for RubycGW. It is used in two forms:
+
+- a Sphinx/HTML website intended for Read the Docs;
+- the PDF user guide built by GitHub Actions.
+
+The HTML site uses the same PyData Sphinx theme family and general documentation structure as modern scientific-Python projects such as PythTB: a landing page, task-oriented tutorials, theory/method pages, and generated API documentation.
 
 ## Start here
 
-1. [Getting started](getting_started.md) — installation, first background run, first effective-model run, and CLI entry points.
-2. [Model and conventions](model_and_conventions.md) — Ruby lattice, hopping/interactions, `Vprime`/`Vcross`, momentum convention, and current-channel naming.
-3. [Public API reference](api_reference.md) — the stable imports intended for notebooks, scripts, and a future GUI.
-4. [Cluster ED+GW](cluster_ed_gw.md) — embedding equation, finite bath, self-consistency, continuation, and method limitations.
-5. [Jacobian-free response](jf_response.md) — finite-q soft-mode calculations, bath tangent, solver options, and interpretation.
-6. [Effective pseudospin ED](effective_pseudospin.md) — leading strong-coupling model and finite-size quantum ED.
-7. [Cluster-orientation ensemble](orientation_ensemble.md) — why a single six-site cluster has an orientation bias and how the three-gauge diagnostic is used.
-8. [Checkpoints and continuation](checkpoints.md) — saved backgrounds, restart versus continuation, and reproducibility.
-9. [Numerics and validation](numerics_and_validation.md) — convergence requirements and validation philosophy.
-10. [Repository layout](repository_layout.md) and [developer guide](developer.md) — where new functionality belongs and how to keep the public API stable.
+1. [Website home](index.md) — landing page and quick example.
+2. [Getting started](getting_started.md) — installation, first background run, first effective-model run, and CLI entry points.
+3. [Tutorials](tutorials.md) — worked examples for the main maintained workflows.
+4. [Model and conventions](model_and_conventions.md) — Ruby lattice, hopping/interactions, `Vprime`/`Vcross`, momentum convention, and current-channel naming.
+5. [Public API reference](api_reference.md) — the stable imports intended for notebooks and scripts.
+6. [Generated API documentation](generated_api.md) — Sphinx autodoc output from the maintained façade modules.
+7. [Cluster ED+GW](cluster_ed_gw.md) — embedding equation, finite bath, self-consistency, continuation, and method limitations.
+8. [Jacobian-free response](jf_response.md) — finite-q soft-mode calculations, bath tangent, solver options, and interpretation.
+9. [Effective pseudospin ED](effective_pseudospin.md) — leading strong-coupling model and finite-size quantum ED.
+10. [Cluster-orientation ensemble](orientation_ensemble.md), [checkpoints](checkpoints.md), and [numerics](numerics_and_validation.md) — diagnostics and reproducibility.
 
 The original [GW theory](gw_theory.md) and [cGW theory](cgw_theory.md) notes remain part of the maintained documentation because they describe the numerical kernels still used by the modular workflows.
+
+## Build the website locally
+
+Install the package and documentation dependencies:
+
+```bash
+python -m pip install -e ".[docs]"
+```
+
+Build HTML:
+
+```bash
+sphinx-build -W --keep-going -b html docs docs/_build/html
+```
+
+Then open `docs/_build/html/index.html` in a browser.
+
+## Read the Docs
+
+The repository includes `.readthedocs.yaml`. After the GitHub repository is imported once into Read the Docs, builds are automatic and use `docs/conf.py` as the Sphinx configuration.
 
 ## Public versus research interfaces
 
@@ -31,8 +56,4 @@ rubycgw.io
 scripts/
 ```
 
-The `research/` directory contains historical scans, benchmarks, diagnostics, plotting scripts, and paper-specific drivers.  They are retained for reproducibility but are not treated as stable API.  Specialized historical documentation is stored under [research_notes/](research_notes/).
-
-## Generated guide
-
-GitHub Actions builds a PDF user guide from the maintained files in this directory.  The PDF is intended to reflect the current package layout rather than the historical development tree.
+The `research/` directory contains historical scans, benchmarks, diagnostics, plotting scripts, and paper-specific drivers. They are retained for reproducibility but are not treated as stable API. Specialized historical documentation is stored under `research_notes/` and is intentionally excluded from the public Sphinx navigation.
