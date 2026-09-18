@@ -12,7 +12,13 @@ from rubycgw.cluster_ed_gw import (
     ruby_cluster_interactions,
     solve_cluster_ed_gw,
 )
-from rubycgw.cluster_ed_gw_fast import _pack_dynamic, _unpack_dynamic
+from rubycgw.cluster_ed_gw_fast import (
+    _LimitedMemoryBroyden,
+    _pack_broyden_state,
+    _pack_dynamic,
+    _unpack_broyden_state,
+    _unpack_dynamic,
+)
 from rubycgw.grids import MatsubaraGrid
 from rubycgw.gw import GWOptions
 from rubycgw.impurity_ed import FiniteBathImpurityED
@@ -174,6 +180,39 @@ def test_cluster_gw_double_counting_vanishes_at_zero_interaction():
     assert np.max(np.abs(sigma)) < 1e-14
     assert np.max(np.abs(W)) < 1e-14
     assert np.all(np.isfinite(P))
+
+
+def test_broyden_state_pack_roundtrip():
+    rng = np.random.default_rng(17)
+    h = rng.normal(size=(6, 6)) + 1j * rng.normal(size=(6, 6))
+    dyn = rng.normal(size=211) + 1j * rng.normal(size=211)
+    packed, scale = _pack_broyden_state(h, dyn)
+    h2, dyn2 = _unpack_broyden_state(packed, h.shape, dyn.shape, scale)
+    assert np.max(np.abs(h2 - h)) < 1e-12
+    assert np.max(np.abs(dyn2 - dyn)) < 1e-12
+
+
+def test_limited_memory_broyden_accelerates_linear_fixed_point():
+    # F(x)=A x+b with a slow eigenvalue 0.98.  Linear mixing with alpha=0.5
+    # decays that mode only by 0.99 per iteration, whereas inverse Broyden
+    # should learn the secant and nearly eliminate it after a few steps.
+    A = np.diag([0.98, 0.4])
+    b = np.array([0.02, -0.3])
+    root = np.linalg.solve(np.eye(2) - A, b)
+
+    mixer = _LimitedMemoryBroyden(alpha=0.5, history=4, regularization=1e-12)
+    x = np.array([4.0, 2.0])
+    for _ in range(6):
+        fout = A @ x + b
+        q = x - fout
+        x = mixer.propose(x, q)
+
+    xlin = np.array([4.0, 2.0])
+    for _ in range(6):
+        fout = A @ xlin + b
+        xlin = xlin + 0.5 * (fout - xlin)
+
+    assert np.linalg.norm(x - root) < 0.2 * np.linalg.norm(xlin - root)
 
 
 def test_nonredundant_pulay_pack_roundtrip():
