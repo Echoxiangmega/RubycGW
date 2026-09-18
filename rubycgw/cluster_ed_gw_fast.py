@@ -75,6 +75,7 @@ class ClusterEDGWFastOptions:
     bath_energy_window: float = 4.0
     bath_coupling_bound: float = 4.0
     bath_fit_xtol: float = 1.0e-9
+    bath_fit_metric: str = "delta"  # "delta" or "g0"
     discard_weight_tol: float = 1.0e-11
     verbose: bool = True
 
@@ -299,11 +300,13 @@ def solve_cluster_ed_gw_fast(
             coupling_bound=float(embed_opts.bath_coupling_bound),
             xtol=float(embed_opts.bath_fit_xtol),
             initial=bath,
+            metric=str(embed_opts.bath_fit_metric),
+            one_body=h_impurity,
         )
         if embed_opts.verbose:
             print(
-                f"[cluster-ED+GW] outer {it:02d}: bath relerr={bath.fit_error:.3e}, "
-                f"static={_maxabs(static_shift):.3e}, "
+                f"[cluster-ED+GW] outer {it:02d}: bath({embed_opts.bath_fit_metric}) "
+                f"relerr={bath.fit_error:.3e}, static={_maxabs(static_shift):.3e}, "
                 f"nfev={bath.nfev}; diagonalize impurity ...",
                 flush=True,
             )
