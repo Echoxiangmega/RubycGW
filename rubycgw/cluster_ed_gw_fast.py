@@ -330,8 +330,19 @@ def solve_cluster_ed_gw_fast(
 
         res_h = _maxabs(sigma_h_out - sigma_h)
         res_emb = _maxabs(sigma_emb_out - sigma_emb)
-        res_imp = _maxabs(sigma_imp_out - sigma_imp)
+        imp_residual = sigma_imp_out - sigma_imp
+        res_imp = _maxabs(imp_residual)
         err = max(res_h, res_emb, res_imp)
+
+        iw_low = int(np.argmin(np.abs(grid.omega)))
+        iw_high = int(np.argmax(np.abs(grid.omega)))
+        imp_low = _maxabs(imp_residual[iw_low])
+        imp_high = _maxabs(imp_residual[iw_high])
+        hi_common = abs(np.trace(imp_residual[iw_high]) / float(NSUB))
+        max_idx = np.unravel_index(
+            int(np.argmax(np.abs(imp_residual))), imp_residual.shape
+        )
+        max_iw, max_a, max_b = (int(max_idx[0]), int(max_idx[1]), int(max_idx[2]))
         mismatch = _relative_error(Gimp, Gc)
         elapsed = perf_counter() - t0
 
@@ -349,7 +360,10 @@ def solve_cluster_ed_gw_fast(
                 f"(emb={res_emb:.3e}, imp={res_imp:.3e}), "
                 f"Gimp/Gc={mismatch:.3e}, bath={bath.fit_error:.3e}, "
                 f"Ntot_imp={selection.average_particles:.6f}, "
-                f"mu={mu:+.9f}, dt={elapsed:.1f}s",
+                f"mu={mu:+.9f}, dt={elapsed:.1f}s\n"
+                f"    imp-res: low={imp_low:.3e}, high={imp_high:.3e}, "
+                f"high-common={hi_common:.3e}, "
+                f"max@iw[{max_iw}]={grid.omega[max_iw]:+.3e},ab=({max_a},{max_b})",
                 flush=True,
             )
 
