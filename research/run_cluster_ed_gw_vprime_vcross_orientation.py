@@ -31,6 +31,8 @@ if str(_REPO_ROOT) not in sys.path:
 
 import numpy as np
 
+import rubycgw.cluster_ed_gw_fast as _fast_solver
+from rubycgw.cluster_ed_gw_covariant import fit_finite_bath_complex
 from rubycgw.cluster_ed_gw_fast import ClusterEDGWFastOptions, solve_cluster_ed_gw_fast
 from rubycgw.cluster_orientation import (
     build_oriented_lattice_fields,
@@ -94,6 +96,11 @@ def _args():
     p.add_argument("--bath-fit-max-nfev", type=int, default=300)
     p.add_argument("--bath-energy-window", type=float, default=4.0)
     p.add_argument("--bath-coupling-bound", type=float, default=4.0)
+    p.add_argument(
+        "--complex-bath",
+        action="store_true",
+        help="fit the same number of bath orbitals with complex rather than real couplings",
+    )
     p.add_argument("--discard-weight-tol", type=float, default=1e-11)
     p.add_argument("--quiet-gw", action="store_true")
     p.add_argument("--quiet-embed", action="store_true")
@@ -172,6 +179,8 @@ def main():
         ti=float(args.ti), t1=float(args.t1), t2=float(args.t2),
         V=float(args.V), Vprime=float(args.Vprime), Vcross=float(args.Vcross),
     )
+    if bool(args.complex_bath):
+        _fast_solver.fit_finite_bath = fit_finite_bath_complex
 
     # Treat exactly one real A-B neighbour pair in the six-site impurity.
     # The other two directions remain in the full lattice GW interaction.
@@ -216,7 +225,8 @@ def main():
         f"orientation={args.orientation}, B-cell shift=({shift[0]},{shift[1]})\n"
         f"L={args.Lx}x{args.Ly}, V={args.V:g}, V'={args.Vprime:g}, "
         f"Vx={args.Vcross:g}, filling={args.filling:g}, T={args.T:g}\n"
-        f"ED physical intercell pair terms={pair_intercell}",
+        f"ED physical intercell pair terms={pair_intercell}\n"
+        f"bath couplings={'complex' if args.complex_bath else 'real'}",
         flush=True,
     )
     if np.isclose(float(args.t1), float(args.t2), rtol=0.0, atol=1e-14) and args.V != 0.0:
@@ -346,6 +356,7 @@ def main():
         G_cluster=np.asarray(result.G_cluster), G_impurity=np.asarray(result.G_impurity),
         bath_energies=np.asarray(result.bath.energies),
         bath_couplings=np.asarray(result.bath.couplings),
+        bath_coupling_kind=np.asarray("complex" if args.complex_bath else "real"),
         G_background=np.asarray(result.background.G),
         mu_background=float(result.background.mu),
     )
