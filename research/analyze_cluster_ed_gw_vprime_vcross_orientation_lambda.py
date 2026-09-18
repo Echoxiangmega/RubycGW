@@ -369,18 +369,23 @@ def main():
         # For the present CO-vs-LC question:
         # - LC candidate = largest-real TR-odd mode with strongest z content.
         # - CO candidate = largest-real TR-even mode with strongest x/y content.
-        odd_sorted = sorted(
-            odd_modes,
-            key=lambda m: (m["weight"]["LC_same"] + m["weight"]["LC_opposite"], m["lambda"].real),
-            reverse=True,
-        )
-        even_sorted = sorted(
-            even_modes,
-            key=lambda m: (m["weight"]["CO_even"] + m["weight"]["CO_odd"], m["lambda"].real),
-            reverse=True,
-        )
-        lc = odd_sorted[0]
-        co = even_sorted[0]
+        # The leading TR-odd eigenvalue is the clean LC-stability diagnostic
+        # on a TR-even CO background.  For the even sector, select the most
+        # CO-dominated mode among the leading Arnoldi modes because a uniform
+        # charge/compressibility mode may otherwise have the largest lambda.
+        lc = odd_modes[0]
+        co_candidates = [
+            m for m in even_modes
+            if (m["weight"]["CO_even"] + m["weight"]["CO_odd"])
+            >= m["weight"]["uniform"]
+        ]
+        if co_candidates:
+            co = max(co_candidates, key=lambda m: m["lambda"].real)
+        else:
+            co = max(
+                even_modes,
+                key=lambda m: m["weight"]["CO_even"] + m["weight"]["CO_odd"],
+            )
         print(
             "  candidates: "
             f"LC {_fmt_mode(lc)} | CO {_fmt_mode(co)}",
