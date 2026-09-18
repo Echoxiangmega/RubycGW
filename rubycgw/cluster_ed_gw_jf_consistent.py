@@ -26,7 +26,7 @@ import numpy as np
 from scipy.sparse.linalg import LinearOperator
 
 from . import cluster_ed_gw_jf as jf
-from .cluster_ed_gw import BathParameters, ruby_cluster_interactions
+from .cluster_ed_gw import BathParameters, cluster_interaction_matrix, ruby_cluster_interactions
 from .finite_q_cgw import normalize_q_index, vertex_corrections_finite_q
 from .model import NSUB, build_h0
 from .response_tail import build_tail_hf_context, build_tail_reference
@@ -363,7 +363,7 @@ def install_tail_consistent_cluster_jf() -> None:
             jf_opts=jf_opts,
         )
         h0 = build_h0(grid.kmesh(), params)
-        Vc = np.asarray(Vq[0, 0], dtype=complex)
+        Vc = cluster_interaction_matrix(ruby_cluster_interactions(params), 6)
         density = np.real(np.diag(np.asarray(rho_cluster, dtype=complex)))
         sigma_h = hartree_self_energy_matrix(density, Vc)
         op._jf_tail_reference = build_tail_reference(h0, float(mu), sigma_h, grid)
