@@ -67,3 +67,17 @@ Do not simply average three nonlinear backgrounds and treat the average as a new
 where each `chi^(r)` is computed around its own converged orientation and then transformed to a common physical frame before averaging.
 
 This orientation-resolved JF averaging is the preferred future public implementation because it removes cluster-cut bias without imposing a non-closing projected impurity map.
+
+
+## Physical-pair extended interactions
+
+For nonzero `Vprime`/`Vcross`, the maintained orientation driver no longer
+uses the primitive-cell q=0 collapse.  In orientation `r`, the six-site
+impurity contains exactly the real neighbouring A-B pair internalized by that
+gauge: two straight `Vprime` bonds and two crossed `Vcross` bonds, each with
+its bare coupling once.  The other two neighbour directions remain in the full
+lattice GW interaction.
+
+The finite-bath Weiss field is also split into a static Hermitian environment
+term and a dynamic hybridization.  Only the latter is fitted by bath orbitals;
+the static term is included directly in the impurity one-body Hamiltonian.
