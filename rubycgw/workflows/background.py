@@ -13,7 +13,8 @@ from pathlib import Path
 import numpy as np
 
 from ..grids import MatsubaraGrid
-from ..models import RubyModel, extended_cluster_interactions
+from ..cluster_ed_gw import ruby_cluster_interactions
+from ..models import RubyModel
 from ..solvers.cluster import (
     ClusterEDGWFastOptions,
     ClusterEDGWFastResult,
@@ -142,9 +143,13 @@ class BackgroundRun:
 
 
 @contextmanager
-def _extended_cluster_interactions_enabled():
-    """Keep the historical solver hook local to one workflow invocation."""
-    old = install_cluster_interaction_hooks(extended_cluster_interactions)
+def _v_only_cluster_interactions_enabled():
+    """Use intra-triangle V only in ED and cluster-GW double counting.
+
+    The lattice h0/V(q) still comes from the full extended Ruby model, so
+    Vprime/Vcross remain active in lattice Hartree, screening and GW self-energy.
+    """
+    old = install_cluster_interaction_hooks(ruby_cluster_interactions)
     try:
         yield
     finally:
@@ -191,7 +196,7 @@ def run_cluster_background(
     if mode not in {"fresh", "restart", "continuation"}:
         raise ValueError("restart_mode must be 'fresh', 'restart', or 'continuation'")
 
-    with _extended_cluster_interactions_enabled():
+    with _v_only_cluster_interactions_enabled():
         if restart is None or mode == "fresh":
             result = solve_cluster_ed_gw_fast(
                 h0, Vq, params, grid, gw_opts=gw_opts, embed_opts=embed_opts
