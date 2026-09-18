@@ -2,9 +2,9 @@
 """Run the production finite-q JF response for a Vprime/Vcross background.
 
 This is a thin compatibility front-end around ``scripts/run_jf.py``.  It reads
-the extended interaction parameters from the background checkpoint, installs
-the same q=0 cluster interaction used by the background workflow, and replaces
-the lattice V(q) builder with the canonical extended model implementation.
+the extended interaction parameters and cluster orientation from the background,
+installs the same physical A-B pair interaction used by that impurity, reuses
+the saved static Weiss shift, and reconstructs the full oriented lattice V(q).
 """
 from __future__ import annotations
 
