@@ -292,7 +292,7 @@ def solve_cluster_source_warm(
     h_cluster = np.mean(h0, axis=(0, 1))
     h_cluster = 0.5 * (h_cluster + h_cluster.conj().T)
     interactions = ruby_cluster_interactions(params)
-    V_cluster = np.asarray(Vq[0, 0], dtype=complex)
+    V_cluster = cluster_interaction_matrix(interactions, NSUB)
     eye = np.eye(NSUB, dtype=complex)
 
     mix_opts = GWOptions(
