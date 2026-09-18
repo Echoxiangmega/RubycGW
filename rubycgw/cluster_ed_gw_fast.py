@@ -38,7 +38,6 @@ from .gw import (
     GWOptions,
     GWResult,
     _check_backend,
-    _check_mixing_method,
     _mixed_self_energies,
 )
 from .impurity_ed import FiniteBathImpurityED
@@ -62,11 +61,15 @@ class ClusterEDGWFastOptions:
     max_iter: int = 30
     tol: float = 2.0e-5
     mixing: float = 0.40
-    mixing_method: str = "pulay"  # "linear" or "pulay"
+    mixing_method: str = "pulay"  # "linear", "pulay", or "broyden"
     pulay_history: int = 6
     pulay_start: int = 3
     pulay_regularization: float = 1.0e-7
     pulay_step_cap: float = 3.0
+    broyden_history: int = 8
+    broyden_regularization: float = 1.0e-8
+    broyden_step_cap: float = 3.0
+    broyden_reset_growth: float = 1.5
     # Optional pre-damping of the raw impurity map.  The default 1 means that
     # all damping/acceleration is handled by the coupled outer mixer.
     impurity_mixing: float = 1.0
@@ -127,6 +130,133 @@ def _channel_projection(mat: np.ndarray, vertex: np.ndarray) -> complex:
         return 0.0j
     return np.vdot(v, m) / den
 
+def _check_embed_mixing_method(method: str) -> str:
+    key = str(method).lower()
+    if key not in {"linear", "pulay", "broyden"}:
+        raise ValueError("embedding mixing_method must be 'linear', 'pulay', or 'broyden'")
+    return key
+
+
+def _pack_broyden_state(
+    sigma_h: np.ndarray,
+    dyn: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """Pack complex Hartree/dynamic variables into a balanced real vector."""
+    h = np.asarray(sigma_h, dtype=complex)
+    d = np.asarray(dyn, dtype=complex).reshape(-1)
+    hscale = np.sqrt(float(max(d.size, 1)) / float(max(h.size, 1)))
+    z = np.concatenate([hscale * h.ravel(), d])
+    return np.concatenate([z.real, z.imag]), float(hscale)
+
+
+def _unpack_broyden_state(
+    packed: np.ndarray,
+    sigma_h_shape: tuple[int, ...],
+    dyn_shape: tuple[int, ...],
+    hscale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Inverse of :func:`_pack_broyden_state`."""
+    x = np.asarray(packed, dtype=float).reshape(-1)
+    nh = int(np.prod(sigma_h_shape))
+    nd = int(np.prod(dyn_shape))
+    nz = nh + nd
+    if x.size != 2 * nz:
+        raise ValueError("Broyden packed-state size mismatch")
+    z = x[:nz] + 1j * x[nz:]
+    h = (z[:nh] / float(hscale)).reshape(sigma_h_shape)
+    d = z[nh:].reshape(dyn_shape)
+    return h, d
+
+
+class _LimitedMemoryBroyden:
+    """Limited-memory multisecant inverse Broyden mixer.
+
+    We solve q(x)=x-F(x)=0.  The initial inverse Jacobian is alpha*I, so with
+    no secant history the update is the ordinary linear-mixing step
+
+        x_next = x - alpha*q = x + alpha*(F(x)-x).
+
+    The retained secant pairs satisfy H y_i ~= s_i with
+    s_i=x_i-x_{i-1}, y_i=q_i-q_{i-1}.  The least-change multisecant inverse is
+
+        H = alpha I + (S-alpha Y) (Y^T Y + reg I)^-1 Y^T.
+
+    All vectors are explicitly real so the nonlinear complex self-energy map is
+    treated as a real-linear problem rather than assuming holomorphicity.
+    """
+
+    def __init__(
+        self,
+        *,
+        alpha: float,
+        history: int,
+        regularization: float,
+    ):
+        self.alpha = float(alpha)
+        self.history = int(history)
+        self.regularization = float(regularization)
+        self.s_hist: list[np.ndarray] = []
+        self.y_hist: list[np.ndarray] = []
+        self.prev_x: np.ndarray | None = None
+        self.prev_q: np.ndarray | None = None
+
+    def clear(self) -> None:
+        self.s_hist.clear()
+        self.y_hist.clear()
+        self.prev_x = None
+        self.prev_q = None
+
+    @property
+    def rank(self) -> int:
+        return len(self.s_hist)
+
+    def _append_secant(self, s: np.ndarray, y: np.ndarray) -> None:
+        ynorm = float(np.linalg.norm(y))
+        snorm = float(np.linalg.norm(s))
+        if (
+            not np.isfinite(ynorm)
+            or not np.isfinite(snorm)
+            or ynorm <= 1.0e-14 * max(1.0, snorm)
+        ):
+            return
+        self.s_hist.append(np.asarray(s / ynorm, dtype=float).copy())
+        self.y_hist.append(np.asarray(y / ynorm, dtype=float).copy())
+        keep = max(int(self.history), 1)
+        if len(self.s_hist) > keep:
+            del self.s_hist[:-keep]
+            del self.y_hist[:-keep]
+
+    def inverse_action(self, q: np.ndarray) -> np.ndarray:
+        q = np.asarray(q, dtype=float)
+        if not self.s_hist:
+            return self.alpha * q
+        S = np.column_stack(self.s_hist)
+        Y = np.column_stack(self.y_hist)
+        gram = Y.T @ Y
+        scale = max(
+            float(np.max(np.abs(gram), initial=0.0)),
+            np.finfo(float).tiny,
+        )
+        gram_scaled = gram / scale
+        rhs = (Y.T @ q) / scale
+        gram_scaled = gram_scaled + self.regularization * np.eye(gram.shape[0])
+        try:
+            coeff = np.linalg.solve(gram_scaled, rhs)
+        except np.linalg.LinAlgError:
+            coeff = np.linalg.lstsq(gram_scaled, rhs, rcond=None)[0]
+        return self.alpha * q + (S - self.alpha * Y) @ coeff
+
+    def propose(self, x: np.ndarray, q: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=float)
+        q = np.asarray(q, dtype=float)
+        if self.prev_x is not None and self.prev_q is not None:
+            self._append_secant(x - self.prev_x, q - self.prev_q)
+        step = self.inverse_action(q)
+        self.prev_x = x.copy()
+        self.prev_q = q.copy()
+        return x - step
+
+
 def _relative_error(a: np.ndarray, b: np.ndarray) -> float:
     den = max(float(np.linalg.norm(np.asarray(b).ravel())), 1e-300)
     return float(np.linalg.norm((np.asarray(a) - np.asarray(b)).ravel()) / den)
@@ -177,7 +307,7 @@ def solve_cluster_ed_gw_fast(
 ) -> ClusterEDGWFastResult:
     """Solve the coupled lattice-GW / finite-bath ED fixed point with Pulay."""
     backend = _check_backend(gw_opts.momentum_backend)
-    method = _check_mixing_method(embed_opts.mixing_method)
+    method = _check_embed_mixing_method(embed_opts.mixing_method)
     h0 = np.asarray(h0, dtype=complex)
     Vq = np.asarray(Vq, dtype=complex)
     if h0.shape != (grid.nk1, grid.nk2, NSUB, NSUB):
@@ -190,6 +320,14 @@ def solve_cluster_ed_gw_fast(
         raise ValueError("impurity mixing must lie in (0,1]")
     if int(embed_opts.pulay_history) < 2:
         raise ValueError("pulay_history must be at least 2")
+    if int(embed_opts.broyden_history) < 1:
+        raise ValueError("broyden_history must be at least 1")
+    if float(embed_opts.broyden_regularization) < 0.0:
+        raise ValueError("broyden_regularization must be nonnegative")
+    if float(embed_opts.broyden_step_cap) <= 0.0:
+        raise ValueError("broyden_step_cap must be positive")
+    if float(embed_opts.broyden_reset_growth) <= 1.0:
+        raise ValueError("broyden_reset_growth must be > 1")
 
     if background is None:
         if embed_opts.verbose:
@@ -234,12 +372,21 @@ def solve_cluster_ed_gw_fast(
 
     mix_opts = GWOptions(
         mixing=float(embed_opts.mixing),
-        mixing_method=method,
+        mixing_method=("pulay" if method == "broyden" else method),
         pulay_history=int(embed_opts.pulay_history),
         pulay_start=int(embed_opts.pulay_start),
         pulay_regularization=float(embed_opts.pulay_regularization),
     )
     mix_history: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+    broyden = (
+        _LimitedMemoryBroyden(
+            alpha=float(embed_opts.mixing),
+            history=int(embed_opts.broyden_history),
+            regularization=float(embed_opts.broyden_regularization),
+        )
+        if method == "broyden"
+        else None
+    )
     fallbacks = 0
 
     residual_hist: list[float] = []
@@ -408,22 +555,49 @@ def solve_cluster_ed_gw_fast(
         else:
             dyn = _pack_dynamic(sigma_emb, sigma_imp, grid.nk)
             dyn_out = _pack_dynamic(sigma_emb_out, sigma_imp_out, grid.nk)
-            sigma_h_next, dyn_next = _mixed_self_energies(
-                sigma_h,
-                dyn,
-                sigma_h_out,
-                dyn_out,
-                mix_opts,
-                it,
-                mix_history,
-            )
+
+            if method == "broyden":
+                if broyden is None:
+                    raise RuntimeError("internal Broyden mixer was not initialized")
+                if (
+                    len(residual_hist) >= 2
+                    and residual_hist[-1]
+                    > float(embed_opts.broyden_reset_growth) * residual_hist[-2]
+                ):
+                    broyden.clear()
+                    if embed_opts.verbose:
+                        print(
+                            f"[cluster-ED+GW] outer {it:02d}: Broyden history reset "
+                            f"(residual growth={residual_hist[-1]/max(residual_hist[-2],1e-300):.2f})",
+                            flush=True,
+                        )
+                x, hscale = _pack_broyden_state(sigma_h, dyn)
+                xout, hscale_out = _pack_broyden_state(sigma_h_out, dyn_out)
+                if not np.isclose(hscale, hscale_out, rtol=0.0, atol=0.0):
+                    raise RuntimeError("Broyden state scaling changed unexpectedly")
+                q = x - xout
+                xnext = broyden.propose(x, q)
+                sigma_h_next, dyn_next = _unpack_broyden_state(
+                    xnext, sigma_h.shape, dyn.shape, hscale
+                )
+                cap = float(embed_opts.broyden_step_cap)
+            else:
+                sigma_h_next, dyn_next = _mixed_self_energies(
+                    sigma_h,
+                    dyn,
+                    sigma_h_out,
+                    dyn_out,
+                    mix_opts,
+                    it,
+                    mix_history,
+                )
+                cap = float(embed_opts.pulay_step_cap)
 
             raw_step = max(_maxabs(sigma_h_out - sigma_h), _maxabs(dyn_out - dyn))
             mixed_step = max(
                 _maxabs(sigma_h_next - sigma_h),
                 _maxabs(dyn_next - dyn),
             )
-            cap = float(embed_opts.pulay_step_cap)
             unsafe = (
                 not np.all(np.isfinite(sigma_h_next))
                 or not np.all(np.isfinite(dyn_next))
@@ -432,12 +606,21 @@ def solve_cluster_ed_gw_fast(
             if unsafe:
                 fallbacks += 1
                 mix_history.clear()
+                if broyden is not None:
+                    # Keep the current point as the reference so the next
+                    # accepted linear step immediately supplies a fresh secant.
+                    xcur, _ = _pack_broyden_state(sigma_h, dyn)
+                    xoutcur, _ = _pack_broyden_state(sigma_h_out, dyn_out)
+                    broyden.clear()
+                    broyden.prev_x = np.asarray(xcur, dtype=float).copy()
+                    broyden.prev_q = np.asarray(xcur - xoutcur, dtype=float).copy()
                 a = float(embed_opts.mixing)
                 sigma_h_next = sigma_h + a * (sigma_h_out - sigma_h)
                 dyn_next = dyn + a * (dyn_out - dyn)
                 if embed_opts.verbose:
+                    label = "Broyden" if method == "broyden" else "Pulay"
                     print(
-                        f"[cluster-ED+GW] outer {it:02d}: Pulay safeguard -> "
+                        f"[cluster-ED+GW] outer {it:02d}: {label} safeguard -> "
                         f"linear fallback (mixed/raw={mixed_step/max(raw_step,1e-300):.2f})",
                         flush=True,
                     )
