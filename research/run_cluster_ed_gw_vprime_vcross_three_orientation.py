@@ -201,12 +201,9 @@ def main():
         bath_fit_error_by_orientation=np.asarray(
             result.bath_fit_error_by_orientation
         ),
-        bath_energies_by_orientation=np.asarray(
-            [b.energies for b in result.baths]
-        ),
-        bath_couplings_by_orientation=np.asarray(
-            [b.couplings for b in result.baths]
-        ),
+        bath_symmetry_mode=np.asarray("representative_ori0_plus_exact_C3"),
+        bath_energies_representative=np.asarray(result.baths[0].energies),
+        bath_couplings_representative=np.asarray(result.baths[0].couplings),
         bath_coupling_kind=np.asarray("complex" if args.complex_bath else "real"),
         bath_fit_metric=np.asarray(str(args.bath_fit_metric)),
         mixing_method=np.asarray(str(result.mixing_method)),
