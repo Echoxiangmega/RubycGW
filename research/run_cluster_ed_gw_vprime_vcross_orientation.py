@@ -358,6 +358,7 @@ def main():
         bath_fit_metric=np.asarray(str(args.bath_fit_metric)),
         mixing_method=str(result.mixing_method),
         pulay_fallbacks=int(result.pulay_fallbacks),
+        mixer_fallbacks=int(result.pulay_fallbacks),
         broyden_history=int(args.embed_broyden_history),
         broyden_regularization=float(args.embed_broyden_regularization),
         broyden_step_cap=float(args.embed_broyden_step_cap),
