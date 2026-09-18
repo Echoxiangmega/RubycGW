@@ -34,6 +34,7 @@ from .cluster_ed_gw import (
     bath_hybridization,
     build_impurity_one_body,
     cluster_gw_self_energy,
+    cluster_interaction_matrix,
     ruby_cluster_interactions,
 )
 from .grids import MatsubaraGrid
