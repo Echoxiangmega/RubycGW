@@ -64,7 +64,8 @@ class RubyModel:
         return build_extended_interaction(qpts, self.parameters())
 
     def cluster_interactions(self):
-        return extended_cluster_interactions(self.parameters())
+        """Return the production ED impurity interaction subset (V only)."""
+        return v_only_cluster_interactions(self.parameters())
 
     def effective_couplings(self) -> tuple[float, float, float]:
         if not np.isclose(float(self.t1), float(self.t2), rtol=0.0, atol=1e-14):
@@ -143,6 +144,14 @@ def build_extended_interaction(
     return vq.reshape(qpts.shape[:-1] + (NSUB, NSUB))
 
 
+def v_only_cluster_interactions(params: ExtendedRubyParameters):
+    """Return only the six intra-triangle V bonds used by production ED."""
+    return tuple(
+        (int(i), int(j), float(params.V))
+        for i, j, _R in INTRATRIANGLE_BONDS
+    )
+
+
 def extended_cluster_interactions(params: ExtendedRubyParameters):
     """Return the q=0 six-orbital interaction projection used by impurity ED.
 
@@ -197,6 +206,7 @@ __all__ = [
     "REFERENCE_CROSS_BONDS",
     "extended_interaction_bonds",
     "build_extended_interaction",
+    "v_only_cluster_interactions",
     "extended_cluster_interactions",
     "extended_cluster_matrix",
     "reference_pair_effective_couplings",
