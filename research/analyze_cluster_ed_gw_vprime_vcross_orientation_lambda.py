@@ -207,7 +207,9 @@ def _solve_sector(op, q_index, parity, args):
         maxiter=int(args.arpack_maxiter),
         ncv=ncv,
     )
-    order = np.argsort(vals.real)[::-1]
+    # Static softness is proximity to the pole lambda=1.  Sort all retained
+    # Arnoldi modes by |1-lambda| rather than by Re(lambda).
+    order = np.argsort(np.abs(1.0 - vals))
     vals = vals[order]
     vecs = vecs[:, order]
     modes = []
