@@ -3,6 +3,8 @@ import numpy as np
 from rubycgw.cluster_orientation import (
     build_oriented_lattice_fields,
     gauge_transform_lattice,
+    gauge_transform_response_field,
+    local_response_vertex_in_orientation,
     intracell_block,
     orientation_b_shift,
     rotate_local_between_orientations,
@@ -257,3 +259,37 @@ def test_single_scgw_map_is_orientation_gauge_covariant_on_2x2():
         assert np.max(
             np.abs(Gmur - transform_between_orientations(Gmu0, 0, r))
         ) < 2e-10
+
+
+def test_response_gauge_transform_roundtrip_at_finite_q():
+    rng = np.random.default_rng(2026091802)
+    x = rng.normal(size=(4, 3, 3, 6, 6)) + 1j * rng.normal(
+        size=(4, 3, 3, 6, 6)
+    )
+    for shift in ((0, 1), (-1, 0), (1, -1)):
+        y = gauge_transform_response_field(x, shift, (1, 2))
+        z = gauge_transform_response_field(y, (-shift[0], -shift[1]), (1, 2))
+        assert np.max(np.abs(z - x)) < 1e-12
+
+
+def test_response_gauge_q0_reduces_to_same_k_transform():
+    rng = np.random.default_rng(2026091803)
+    x = rng.normal(size=(2, 3, 3, 6, 6)) + 1j * rng.normal(
+        size=(2, 3, 3, 6, 6)
+    )
+    for shift in ((0, 1), (-1, 0)):
+        a = gauge_transform_response_field(x, shift, (0, 0))
+        b = gauge_transform_lattice(x, shift)
+        assert np.max(np.abs(a - b)) < 1e-12
+
+
+def test_pseudospin_local_source_stays_local_under_orientation_gauge():
+    from rubycgw.pseudospin import primitive_pseudospin_vertex
+
+    for name in ("Ax", "Ay", "Az", "Bx", "By", "Bz"):
+        K = primitive_pseudospin_vertex(name)
+        for r in (0, 1, 2):
+            Kr = local_response_vertex_in_orientation(
+                K, r, (1, 1), nk1=3, nk2=3
+            )
+            assert Kr.shape == (6, 6)
