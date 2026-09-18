@@ -11,6 +11,7 @@ from rubycgw.cluster_orientation import (
 )
 from rubycgw.grids import MatsubaraGrid
 from rubycgw.cluster_ed_gw import cluster_interaction_matrix
+from rubycgw.c3_constraint import C3_ORBITAL_PERM
 from rubycgw.model import build_h0
 from rubycgw.models.ruby import physical_pair_cluster_interactions
 from vprime_study.cross_model import (
@@ -133,3 +134,41 @@ def test_diagonal_translation_invariant_density_is_gauge_invariant():
     for r in (0, 1, 2):
         y = gauge_transform_lattice(x, orientation_b_shift(r))
         assert np.max(np.abs(y - x)) < 1e-12
+
+
+def _sorted_density_terms(terms):
+    return sorted(
+        (min(int(i), int(j)), max(int(i), int(j)), round(float(u), 14))
+        for i, j, u in terms
+    )
+
+
+def _rotate_density_terms_once(terms):
+    p = np.asarray(C3_ORBITAL_PERM, dtype=int)
+    return tuple((int(p[i]), int(p[j]), float(u)) for i, j, u in terms)
+
+
+def test_physical_pair_interactions_form_exact_c3_orbit():
+    params = VPrimeCrossParameters(
+        ti=0.4, t1=0.2, t2=0.2, V=1.8, Vprime=-0.1, Vcross=-0.07
+    )
+    terms = [physical_pair_cluster_interactions(params, r) for r in (0, 1, 2)]
+    assert _sorted_density_terms(_rotate_density_terms_once(terms[0])) == _sorted_density_terms(terms[1])
+    assert _sorted_density_terms(_rotate_density_terms_once(terms[1])) == _sorted_density_terms(terms[2])
+    assert _sorted_density_terms(_rotate_density_terms_once(terms[2])) == _sorted_density_terms(terms[0])
+
+
+def test_h0_and_full_interaction_are_c3_related_on_2x2_mesh():
+    grid = MatsubaraGrid(nk1=2, nk2=2, nw=2, nOmega=1, T=0.1)
+    params = VPrimeCrossParameters(
+        ti=0.4, t1=0.2, t2=0.2, V=1.8, Vprime=-0.1, Vcross=-0.07
+    )
+    h0 = build_h0(grid.kmesh(), params)
+    Vq = build_vprime_vcross_interaction(grid.qmesh(), params)
+    oriented = [build_oriented_lattice_fields(h0, Vq, r) for r in (0, 1, 2)]
+    for src in (0, 1, 2):
+        dst = (src + 1) % 3
+        hm = rotate_solution_between_orientations(oriented[src][0], src, dst)
+        vm = rotate_solution_between_orientations(oriented[src][1], src, dst)
+        assert np.max(np.abs(hm - oriented[dst][0])) < 1e-12
+        assert np.max(np.abs(vm - oriented[dst][1])) < 1e-12
