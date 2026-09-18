@@ -65,14 +65,16 @@ def load_cluster_ed_gw_restart(
     grid: MatsubaraGrid,
     nbath: int,
     allow_interaction_change: bool = False,
+    allow_filling_change: bool = False,
 ) -> ClusterEDGWRestartState:
     """Load and validate a saved cluster-ED+GW result.
 
     By default this is a strict restart: lattice size, ``V``, hoppings, filling,
-    temperature, Matsubara grids and bath size must match.  With
-    ``allow_interaction_change=True`` the saved ``V`` is allowed to differ and
-    the checkpoint is interpreted only as an initial embedded state for a new
-    interaction point.  All structural and one-body parameters remain strict.
+    temperature, Matsubara grids and bath size must match. With
+    ``allow_interaction_change=True`` the saved ``V`` may differ, and with
+    ``allow_filling_change=True`` the saved target filling may differ. These
+    relaxed modes are intended only for parameter continuation; all structural
+    and one-body lattice parameters remain strict.
     """
     p = Path(path)
     if not p.exists():
@@ -91,7 +93,8 @@ def load_cluster_ed_gw_restart(
         _require_close("ti", _scalar(z, "ti"), float(params.ti))
         _require_close("t1", _scalar(z, "t1"), float(params.t1))
         _require_close("t2", _scalar(z, "t2"), float(params.t2))
-        _require_close("filling", _scalar(z, "filling"), float(filling))
+        if not bool(allow_filling_change):
+            _require_close("filling", _scalar(z, "filling"), float(filling))
         _require_close("T", _scalar(z, "T"), float(T))
 
         omega = np.asarray(z["omega"], dtype=float) if "omega" in z else None
