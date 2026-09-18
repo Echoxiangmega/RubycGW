@@ -8,6 +8,7 @@ from rubycgw.cluster_ed_gw import (
     cluster_gw_self_energy,
     cluster_interaction_matrix,
     fit_finite_bath,
+    split_static_hybridization,
     ruby_cluster_interactions,
     solve_cluster_ed_gw,
 )
@@ -97,6 +98,23 @@ def test_finite_bath_ed_is_exact_for_noninteracting_resolvent():
         for w in omega
     ])
     assert np.max(np.abs(G - exact)) < 2e-10
+
+
+def test_static_weiss_split_recovers_constant_and_dynamic_bath():
+    T = 0.09
+    omega = (2 * np.arange(-30, 30) + 1) * np.pi * T
+    mu = 0.13
+    static = np.array(
+        [[0.12, 0.03 - 0.02j], [0.03 + 0.02j, -0.07]],
+        dtype=complex,
+    )
+    eps = np.array([-0.6, 0.8])
+    hyb = np.array([[0.42, 0.10], [-0.15, 0.31]])
+    dynamic = bath_hybridization(omega, mu, eps, hyb)
+    target = dynamic + static[None, :, :]
+    recovered, residual = split_static_hybridization(target, omega, n_tail=10)
+    assert np.max(np.abs(recovered - static)) < 2e-5
+    assert np.linalg.norm(residual - dynamic) / np.linalg.norm(dynamic) < 2e-4
 
 
 def test_bath_fit_recovers_exact_seed_hybridization():
