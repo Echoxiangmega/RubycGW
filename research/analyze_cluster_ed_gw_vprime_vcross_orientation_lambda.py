@@ -61,7 +61,11 @@ def _args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("files", nargs="+", type=Path)
     p.add_argument("--q", nargs=2, type=int, default=(0, 0), metavar=("IQ1", "IQ2"))
-    p.add_argument("--nev", type=int, default=6, help="eigenmodes retained per TR sector")
+    p.add_argument(
+        "--all-q", action="store_true",
+        help="scan every momentum on the saved nk1 x nk2 mesh; the bath tangent is built only once",
+    )
+    p.add_argument("--nev", type=int, default=6, help="eigenmodes retained per sector/full-q solve")
     p.add_argument("--arpack-tol", type=float, default=2e-6)
     p.add_argument("--arpack-maxiter", type=int, default=350)
     p.add_argument("--ncv", type=int, default=28)
@@ -228,6 +232,157 @@ def _solve_sector(op, q_index, parity, args):
     return modes
 
 
+
+def _full_seed(op) -> np.ndarray:
+    ps = primitive_cell_pseudospin_channels()
+    K = (
+        np.asarray(ps["x_even"], dtype=complex)
+        + np.asarray(ps["z_even"], dtype=complex)
+        + 0.5 * np.asarray(ps["x_odd"], dtype=complex)
+        + 0.5 * np.asarray(ps["z_odd"], dtype=complex)
+    )
+    field = np.broadcast_to(K, op.G.shape).copy()
+    v = _pack_complex(field)
+    nrm = np.linalg.norm(v)
+    if nrm <= 0:
+        raise RuntimeError("zero full-kernel ARPACK seed")
+    return v / nrm
+
+
+def _solve_full_q(op, q_index, args):
+    """Solve the complete real-linear kernel at a finite momentum q.
+
+    Time reversal maps a generic q to -q, so one must not impose a TR-even/odd
+    projector within a single finite-q problem.  We therefore diagonalize the
+    full packed-real kernel and classify the resulting modes by their equal-time
+    CO/LC projection weights.
+    """
+    L = jf_consistent.homogeneous_kernel_operator(op, q_index)
+    n = L.shape[0]
+    k = min(max(int(args.nev), 1), max(n - 2, 1))
+    ncv = min(max(int(args.ncv), 2 * k + 2), n)
+    vals, vecs = eigs(
+        L,
+        k=k,
+        which="LR",
+        v0=_full_seed(op),
+        tol=float(args.arpack_tol),
+        maxiter=int(args.arpack_maxiter),
+        ncv=ncv,
+    )
+    order = np.argsort(np.abs(1.0 - vals))
+    vals = vals[order]
+    vecs = vecs[:, order]
+    modes = []
+    for j, lam in enumerate(vals):
+        field = _physical_field_from_packed(vecs[:, j], op.G.shape)
+        amp, weight = _mode_projection(op, field, q_index)
+        modes.append(
+            {
+                "lambda": complex(lam),
+                "weight": weight,
+                "amp": amp,
+                "tr_residual": np.nan,
+            }
+        )
+    return modes
+
+
+def _select_candidates(modes, *, gamma_split=False, even_modes=None, odd_modes=None):
+    """Return the softest LC and CO candidates by min |1-lambda|."""
+    if gamma_split:
+        if even_modes is None or odd_modes is None:
+            raise ValueError("gamma_split requires even_modes and odd_modes")
+        lc_pool = [
+            m for m in odd_modes
+            if (m["weight"]["LC_same"] + m["weight"]["LC_opposite"])
+            >= max(
+                m["weight"]["CO_even"] + m["weight"]["CO_odd"],
+                m["weight"]["uniform"],
+            )
+        ]
+        co_pool = [
+            m for m in even_modes
+            if (m["weight"]["CO_even"] + m["weight"]["CO_odd"])
+            >= m["weight"]["uniform"]
+        ]
+        lc = min(
+            lc_pool if lc_pool else odd_modes,
+            key=lambda m: abs(1.0 - m["lambda"]),
+        )
+        co = min(
+            co_pool if co_pool else even_modes,
+            key=lambda m: abs(1.0 - m["lambda"]),
+        )
+        return lc, co
+
+    lc_pool = [
+        m for m in modes
+        if (m["weight"]["LC_same"] + m["weight"]["LC_opposite"])
+        >= max(
+            m["weight"]["CO_even"] + m["weight"]["CO_odd"],
+            m["weight"]["uniform"],
+        )
+    ]
+    co_pool = [
+        m for m in modes
+        if (m["weight"]["CO_even"] + m["weight"]["CO_odd"])
+        >= max(
+            m["weight"]["LC_same"] + m["weight"]["LC_opposite"],
+            m["weight"]["uniform"],
+        )
+    ]
+    lc = min(
+        lc_pool if lc_pool else modes,
+        key=lambda m: abs(1.0 - m["lambda"]),
+    )
+    co = min(
+        co_pool if co_pool else modes,
+        key=lambda m: abs(1.0 - m["lambda"]),
+    )
+    return lc, co
+
+
+def _q_list(grid, args):
+    if bool(args.all_q):
+        return [
+            (i, j)
+            for i in range(int(grid.nk1))
+            for j in range(int(grid.nk2))
+        ]
+    return [
+        (
+            int(args.q[0]) % int(grid.nk1),
+            int(args.q[1]) % int(grid.nk2),
+        )
+    ]
+
+
+def _analyze_one_q(op, qn, args):
+    """Analyze one q and return (LC candidate, CO candidate, all modes)."""
+    qn = tuple(int(x) for x in qn)
+    if qn == (0, 0):
+        even_modes = _solve_sector(op, qn, "even", args)
+        odd_modes = _solve_sector(op, qn, "odd", args)
+        print("  TR-even leading modes:")
+        for i, m in enumerate(even_modes, 1):
+            print(f"    {i}: {_fmt_mode(m)}")
+        print("  TR-odd leading modes:")
+        for i, m in enumerate(odd_modes, 1):
+            print(f"    {i}: {_fmt_mode(m)}")
+        lc, co = _select_candidates(
+            [], gamma_split=True, even_modes=even_modes, odd_modes=odd_modes
+        )
+        return lc, co, even_modes + odd_modes, "gamma_TR_split"
+
+    modes = _solve_full_q(op, qn, args)
+    print("  full finite-q leading modes:")
+    for i, m in enumerate(modes, 1):
+        print(f"    {i}: {_fmt_mode(m)}")
+    lc, co = _select_candidates(modes)
+    return lc, co, modes, "full_finite_q"
+
+
 def _build_operator(path: Path, args):
     d = _load_npz(path)
     if not bool(_scalar(d, "converged", default=True, cast=bool)):
@@ -342,9 +497,9 @@ def _fmt_mode(m):
     )
 
 
+
 def main():
     args = _args()
-    q = tuple(int(x) for x in args.q)
     all_rows = []
 
     for path in args.files:
@@ -352,65 +507,40 @@ def main():
             raise FileNotFoundError(path)
         print(f"\n=== {path} ===", flush=True)
         d, ori, grid, params, op, tangent = _build_operator(path, args)
-        qn = (q[0] % grid.nk1, q[1] % grid.nk2)
+        q_points = _q_list(grid, args)
         print(
-            f"orientation={ori}, q={qn}, "
+            f"orientation={ori}, q-count={len(q_points)}, "
             f"background residual={_scalar(d,'final_error',default=np.nan):.3e}, "
             f"bath={_scalar(d,'bath_fit_error',default=np.nan):.3e}, "
             f"tangent rank={tangent.rank}, cond={tangent.condition_number:.3e}",
             flush=True,
         )
 
-        even_modes = _solve_sector(op, qn, "even", args)
-        odd_modes = _solve_sector(op, qn, "odd", args)
-
-        print("  TR-even leading modes:")
-        for i, m in enumerate(even_modes, 1):
-            print(f"    {i}: {_fmt_mode(m)}")
-        print("  TR-odd leading modes:")
-        for i, m in enumerate(odd_modes, 1):
-            print(f"    {i}: {_fmt_mode(m)}")
-
-        # Static softness is controlled by proximity to the response pole
-        # lambda=1, not by max Re(lambda) and not by max |lambda|.  Therefore
-        # rank candidates by min |1-lambda|.  Keep |lambda| only as an
-        # iteration-slowing diagnostic for the nonlinear fixed-point map.
-        lc_candidates = [
-            m for m in odd_modes
-            if (m["weight"]["LC_same"] + m["weight"]["LC_opposite"])
-            >= max(
-                m["weight"]["CO_even"] + m["weight"]["CO_odd"],
-                m["weight"]["uniform"],
+        file_rows = []
+        for iq, qn in enumerate(q_points, 1):
+            print(
+                f"\n--- q {iq}/{len(q_points)}: {qn} ---",
+                flush=True,
             )
-        ]
-        lc = min(
-            lc_candidates if lc_candidates else odd_modes,
-            key=lambda m: abs(1.0 - m["lambda"]),
-        )
-        co_candidates = [
-            m for m in even_modes
-            if (m["weight"]["CO_even"] + m["weight"]["CO_odd"])
-            >= m["weight"]["uniform"]
-        ]
-        co = min(
-            co_candidates if co_candidates else even_modes,
-            key=lambda m: abs(1.0 - m["lambda"]),
-        )
-        print(
-            "  candidates: "
-            f"LC {_fmt_mode(lc)} | CO {_fmt_mode(co)}",
-            flush=True,
-        )
-        all_rows.append(
-            dict(
+            lc, co, modes, solve_kind = _analyze_one_q(op, qn, args)
+            print(
+                "  candidates: "
+                f"LC {_fmt_mode(lc)} | CO {_fmt_mode(co)}",
+                flush=True,
+            )
+            row = dict(
                 file=str(path),
                 orientation=int(ori),
+                q=tuple(qn),
+                solve_kind=solve_kind,
                 lambda_lc=complex(lc["lambda"]),
                 lambda_co=complex(co["lambda"]),
                 lc_same=float(lc["weight"]["LC_same"]),
                 lc_opposite=float(lc["weight"]["LC_opposite"]),
                 co_even=float(co["weight"]["CO_even"]),
                 co_odd=float(co["weight"]["CO_odd"]),
+                uniform_lc=float(lc["weight"]["uniform"]),
+                uniform_co=float(co["weight"]["uniform"]),
                 tangent_rank=int(tangent.rank),
                 tangent_condition=float(tangent.condition_number),
                 distance_lc=float(abs(1.0 - lc["lambda"])),
@@ -418,25 +548,27 @@ def main():
                 modulus_lc=float(abs(lc["lambda"])),
                 modulus_co=float(abs(co["lambda"])),
             )
-        )
+            file_rows.append(row)
+            all_rows.append(row)
 
-    if len(all_rows) > 1:
-        lc = np.asarray([r["lambda_lc"] for r in all_rows])
-        co = np.asarray([r["lambda_co"] for r in all_rows])
-        dlc = np.asarray([r["distance_lc"] for r in all_rows])
-        dco = np.asarray([r["distance_co"] for r in all_rows])
-        print("\n=== orientation consistency ===")
+        best_lc = min(file_rows, key=lambda r: r["distance_lc"])
+        best_co = min(file_rows, key=lambda r: r["distance_co"])
+        print("\n=== all-q summary for this checkpoint ===")
         print(
-            f"LC: mean lambda={np.mean(lc.real):+.8f}"
-            f"{np.mean(lc.imag):+.2e}i, "
-            f"mean |1-lambda|={np.mean(dlc):.6e}, "
-            f"spread(|1-lambda|)={np.ptp(dlc):.3e}"
+            f"LC*: q={best_lc['q']}, lambda={best_lc['lambda_lc'].real:+.8f}"
+            f"{best_lc['lambda_lc'].imag:+.2e}i, "
+            f"|1-lambda|={best_lc['distance_lc']:.6e}, "
+            f"same/opp={best_lc['lc_same']:.3f}/{best_lc['lc_opposite']:.3f}"
         )
         print(
-            f"CO: mean lambda={np.mean(co.real):+.8f}"
-            f"{np.mean(co.imag):+.2e}i, "
-            f"mean |1-lambda|={np.mean(dco):.6e}, "
-            f"spread(|1-lambda|)={np.ptp(dco):.3e}"
+            f"CO*: q={best_co['q']}, lambda={best_co['lambda_co'].real:+.8f}"
+            f"{best_co['lambda_co'].imag:+.2e}i, "
+            f"|1-lambda|={best_co['distance_co']:.6e}, "
+            f"even/odd={best_co['co_even']:.3f}/{best_co['co_odd']:.3f}"
+        )
+        print(
+            f"softness difference d_CO-d_LC="
+            f"{best_co['distance_co']-best_lc['distance_lc']:+.6e}"
         )
 
     if args.out is not None:
@@ -445,19 +577,23 @@ def main():
             args.out,
             source_files=np.asarray([r["file"] for r in all_rows]),
             orientation=np.asarray([r["orientation"] for r in all_rows], dtype=int),
+            q_index=np.asarray([r["q"] for r in all_rows], dtype=int),
+            solve_kind=np.asarray([r["solve_kind"] for r in all_rows]),
             lambda_lc=np.asarray([r["lambda_lc"] for r in all_rows]),
             lambda_co=np.asarray([r["lambda_co"] for r in all_rows]),
             lc_same_weight=np.asarray([r["lc_same"] for r in all_rows]),
             lc_opposite_weight=np.asarray([r["lc_opposite"] for r in all_rows]),
             co_even_weight=np.asarray([r["co_even"] for r in all_rows]),
             co_odd_weight=np.asarray([r["co_odd"] for r in all_rows]),
+            uniform_lc_weight=np.asarray([r["uniform_lc"] for r in all_rows]),
+            uniform_co_weight=np.asarray([r["uniform_co"] for r in all_rows]),
             tangent_rank=np.asarray([r["tangent_rank"] for r in all_rows], dtype=int),
             tangent_condition=np.asarray([r["tangent_condition"] for r in all_rows]),
             distance_to_one_lc=np.asarray([r["distance_lc"] for r in all_rows]),
             distance_to_one_co=np.asarray([r["distance_co"] for r in all_rows]),
             lambda_modulus_lc=np.asarray([r["modulus_lc"] for r in all_rows]),
             lambda_modulus_co=np.asarray([r["modulus_co"] for r in all_rows]),
-            q_index=np.asarray(q, dtype=int),
+            all_q=np.asarray(bool(args.all_q)),
             stage=np.asarray(str(args.stage)),
         )
         print(f"saved {args.out}", flush=True)
