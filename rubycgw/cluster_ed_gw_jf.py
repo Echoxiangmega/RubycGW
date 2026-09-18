@@ -65,6 +65,7 @@ from .cluster_ed_gw import (
     bath_hybridization,
     build_impurity_one_body,
     cluster_gw_self_energy,
+    cluster_interaction_matrix,
     ruby_cluster_interactions,
 )
 from .finite_q_cgw import (
@@ -683,7 +684,7 @@ def build_embedded_jacobian(
     P = compute_polarization_matrix(G, grid, backend=str(jf_opts.momentum_backend))
     W = compute_screened_interaction_matrix(P, Vq)
     Gc = np.mean(G, axis=(1, 2))
-    Vc = np.asarray(Vq[0, 0], dtype=complex)
+    Vc = cluster_interaction_matrix(ruby_cluster_interactions(params), NSUB)
     _, _, Wc = cluster_gw_self_energy(
         Gc,
         np.asarray(rho_cluster, dtype=complex),
