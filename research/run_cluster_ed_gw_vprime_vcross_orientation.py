@@ -300,16 +300,20 @@ def main():
             filling=float(args.filling), T=float(args.T),
             params=params, grid=grid, nbath=int(args.nbath),
             allow_interaction_change=True,
+            allow_filling_change=True,
         )
         continuation_source = str(args.continue_from)
         source_V = float(restart.source_V)
         source_Vprime, source_Vcross = _saved_interactions(args.continue_from)
+        source_filling = float(_saved_scalar(
+            args.continue_from, ("filling",), args.filling
+        ))
         source_orientation = _saved_orientation(args.continue_from)
         print(
             "[cluster-ED+GW:orientation] seed: "
             f"ori {source_orientation} -> {args.orientation}; "
-            f"(V,V',Vx)=({source_V:g},{source_Vprime:g},{source_Vcross:g}) -> "
-            f"({args.V:g},{args.Vprime:g},{args.Vcross:g})",
+            f"(V,V',Vx,n)=({source_V:g},{source_Vprime:g},{source_Vcross:g},{source_filling:g}) -> "
+            f"({args.V:g},{args.Vprime:g},{args.Vcross:g},{args.filling:g})",
             flush=True,
         )
 
