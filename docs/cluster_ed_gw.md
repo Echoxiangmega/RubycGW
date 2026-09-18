@@ -127,3 +127,12 @@ Broyden vector: for fixed filling it is solved from the density constraint after
 each accepted self-energy update.  The mixer stores only a limited number of
 secant pairs and applies a regularized multisecant inverse-Jacobian action.
 Unsafe oversized steps fall back to the ordinary damped fixed-point step.
+
+
+Broyden uses a trust-region safeguard rather than discarding every oversized
+quasi-Newton proposal.  If a finite proposal exceeds `broyden_step_cap` times
+the raw fixed-point step, its direction and multisecant history are retained
+while only the accepted displacement is rescaled to the trust radius.  Only
+non-finite proposals cause a true linear fallback/history restart.  This is
+important when a slow fixed-point eigenmode legitimately requires a Newton step
+many times larger than the raw residual.
