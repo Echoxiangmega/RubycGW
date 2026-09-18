@@ -507,6 +507,11 @@ def main():
     rho_c = np.mean(rho_k, axis=(0, 1))
     h_cluster = np.mean(h0, axis=(0, 1))
     h_cluster = 0.5 * (h_cluster + h_cluster.conj().T)
+    if "impurity_static_shift" in d:
+        static_shift = np.asarray(d["impurity_static_shift"], dtype=complex)
+        if static_shift.shape != (6, 6):
+            raise ValueError("saved impurity_static_shift must have shape (6,6)")
+        h_cluster = h_cluster + 0.5 * (static_shift + static_shift.conj().T)
     bath = BathParameters(
         np.asarray(d["bath_energies"], dtype=float),
         np.asarray(d["bath_couplings"], dtype=complex),
