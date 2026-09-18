@@ -598,17 +598,37 @@ def solve_cluster_ed_gw_fast(
                 _maxabs(sigma_h_next - sigma_h),
                 _maxabs(dyn_next - dyn),
             )
-            unsafe = (
-                not np.all(np.isfinite(sigma_h_next))
-                or not np.all(np.isfinite(dyn_next))
-                or (raw_step > 1e-14 and mixed_step > cap * raw_step)
+            finite_step = (
+                np.all(np.isfinite(sigma_h_next))
+                and np.all(np.isfinite(dyn_next))
             )
-            if unsafe:
+            oversized = (
+                raw_step > 1e-14 and mixed_step > cap * raw_step
+            )
+
+            if method == "broyden" and finite_step and oversized:
+                # Do not throw away a useful quasi-Newton direction merely
+                # because its norm is large.  A slow fixed-point eigenmode can
+                # legitimately require a Newton step many times larger than
+                # the raw residual.  Clip the accepted displacement to a trust
+                # radius while retaining the multisecant history.
+                scale = (cap * raw_step) / max(mixed_step, 1e-300)
+                sigma_h_next = sigma_h + scale * (sigma_h_next - sigma_h)
+                dyn_next = dyn + scale * (dyn_next - dyn)
+                if embed_opts.verbose:
+                    print(
+                        f"[cluster-ED+GW] outer {it:02d}: Broyden trust clip "
+                        f"(proposed/raw={mixed_step/max(raw_step,1e-300):.2f}, "
+                        f"accepted/raw={cap:.2f}, rank={broyden.rank if broyden is not None else 0})",
+                        flush=True,
+                    )
+            elif (not finite_step) or oversized:
                 fallbacks += 1
                 mix_history.clear()
                 if broyden is not None:
-                    # Keep the current point as the reference so the next
-                    # accepted linear step immediately supplies a fresh secant.
+                    # Non-finite Broyden proposals are genuinely invalid and
+                    # require a restart.  Ordinary Pulay oversized steps retain
+                    # the historical linear-fallback behavior.
                     xcur, _ = _pack_broyden_state(sigma_h, dyn)
                     xoutcur, _ = _pack_broyden_state(sigma_h_out, dyn_out)
                     broyden.clear()
