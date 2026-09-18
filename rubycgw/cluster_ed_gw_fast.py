@@ -294,6 +294,7 @@ def solve_cluster_ed_gw_fast(
         if embed_opts.verbose:
             print(
                 f"[cluster-ED+GW] outer {it:02d}: bath relerr={bath.fit_error:.3e}, "
+                f"static={_maxabs(static_shift):.3e}, "
                 f"nfev={bath.nfev}; diagonalize impurity ...",
                 flush=True,
             )
