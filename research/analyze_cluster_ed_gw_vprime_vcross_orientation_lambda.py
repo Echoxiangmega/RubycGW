@@ -329,8 +329,11 @@ def _build_operator(path: Path, args):
 def _fmt_mode(m):
     lam = m["lambda"]
     w = m["weight"]
+    d1 = abs(1.0 - lam)
+    mod = abs(lam)
     return (
         f"lambda={lam.real:+.8f}{lam.imag:+.2e}i, "
+        f"|1-lambda|={d1:.6e}, |lambda|={mod:.6e}, "
         f"COe={w['CO_even']:.3f}, COo={w['CO_odd']:.3f}, "
         f"LCsame={w['LC_same']:.3f}, LCo={w['LC_opposite']:.3f}, "
         f"uniform={w['uniform']:.3f}"
@@ -366,26 +369,31 @@ def main():
         for i, m in enumerate(odd_modes, 1):
             print(f"    {i}: {_fmt_mode(m)}")
 
-        # For the present CO-vs-LC question:
-        # - LC candidate = largest-real TR-odd mode with strongest z content.
-        # - CO candidate = largest-real TR-even mode with strongest x/y content.
-        # The leading TR-odd eigenvalue is the clean LC-stability diagnostic
-        # on a TR-even CO background.  For the even sector, select the most
-        # CO-dominated mode among the leading Arnoldi modes because a uniform
-        # charge/compressibility mode may otherwise have the largest lambda.
-        lc = odd_modes[0]
+        # Static softness is controlled by proximity to the response pole
+        # lambda=1, not by max Re(lambda) and not by max |lambda|.  Therefore
+        # rank candidates by min |1-lambda|.  Keep |lambda| only as an
+        # iteration-slowing diagnostic for the nonlinear fixed-point map.
+        lc_candidates = [
+            m for m in odd_modes
+            if (m["weight"]["LC_same"] + m["weight"]["LC_opposite"])
+            >= max(
+                m["weight"]["CO_even"] + m["weight"]["CO_odd"],
+                m["weight"]["uniform"],
+            )
+        ]
+        lc = min(
+            lc_candidates if lc_candidates else odd_modes,
+            key=lambda m: abs(1.0 - m["lambda"]),
+        )
         co_candidates = [
             m for m in even_modes
             if (m["weight"]["CO_even"] + m["weight"]["CO_odd"])
             >= m["weight"]["uniform"]
         ]
-        if co_candidates:
-            co = max(co_candidates, key=lambda m: m["lambda"].real)
-        else:
-            co = max(
-                even_modes,
-                key=lambda m: m["weight"]["CO_even"] + m["weight"]["CO_odd"],
-            )
+        co = min(
+            co_candidates if co_candidates else even_modes,
+            key=lambda m: abs(1.0 - m["lambda"]),
+        )
         print(
             "  candidates: "
             f"LC {_fmt_mode(lc)} | CO {_fmt_mode(co)}",
@@ -403,20 +411,30 @@ def main():
                 co_odd=float(co["weight"]["CO_odd"]),
                 tangent_rank=int(tangent.rank),
                 tangent_condition=float(tangent.condition_number),
+                distance_lc=float(abs(1.0 - lc["lambda"])),
+                distance_co=float(abs(1.0 - co["lambda"])),
+                modulus_lc=float(abs(lc["lambda"])),
+                modulus_co=float(abs(co["lambda"])),
             )
         )
 
     if len(all_rows) > 1:
         lc = np.asarray([r["lambda_lc"] for r in all_rows])
         co = np.asarray([r["lambda_co"] for r in all_rows])
+        dlc = np.asarray([r["distance_lc"] for r in all_rows])
+        dco = np.asarray([r["distance_co"] for r in all_rows])
         print("\n=== orientation consistency ===")
         print(
-            f"LC: mean Re(lambda)={np.mean(lc.real):+.8f}, "
-            f"spread={np.ptp(lc.real):.3e}"
+            f"LC: mean lambda={np.mean(lc.real):+.8f}"
+            f"{np.mean(lc.imag):+.2e}i, "
+            f"mean |1-lambda|={np.mean(dlc):.6e}, "
+            f"spread(|1-lambda|)={np.ptp(dlc):.3e}"
         )
         print(
-            f"CO: mean Re(lambda)={np.mean(co.real):+.8f}, "
-            f"spread={np.ptp(co.real):.3e}"
+            f"CO: mean lambda={np.mean(co.real):+.8f}"
+            f"{np.mean(co.imag):+.2e}i, "
+            f"mean |1-lambda|={np.mean(dco):.6e}, "
+            f"spread(|1-lambda|)={np.ptp(dco):.3e}"
         )
 
     if args.out is not None:
@@ -433,6 +451,10 @@ def main():
             co_odd_weight=np.asarray([r["co_odd"] for r in all_rows]),
             tangent_rank=np.asarray([r["tangent_rank"] for r in all_rows], dtype=int),
             tangent_condition=np.asarray([r["tangent_condition"] for r in all_rows]),
+            distance_to_one_lc=np.asarray([r["distance_lc"] for r in all_rows]),
+            distance_to_one_co=np.asarray([r["distance_co"] for r in all_rows]),
+            lambda_modulus_lc=np.asarray([r["modulus_lc"] for r in all_rows]),
+            lambda_modulus_co=np.asarray([r["modulus_co"] for r in all_rows]),
             q_index=np.asarray(q, dtype=int),
             stage=np.asarray(str(args.stage)),
         )
