@@ -181,6 +181,83 @@ def build_oriented_lattice_fields(
     return gauge_transform_lattice(h0, s), gauge_transform_lattice(Vq, s)
 
 
+
+def gauge_transform_response_field(
+    field: np.ndarray,
+    shift,
+    q_index: tuple[int, int],
+) -> np.ndarray:
+    """Gauge-transform a two-momentum response field Gamma(k;q).
+
+    For c'_k=D_s(k)c_k, a vertex/self-energy response carrying external
+    momentum q transforms as
+
+        X'_s(k;q) = D_s(k+q) X(k;q) D_s(k)^dagger.
+
+    This reduces to :func:`gauge_transform_lattice` at q=0.
+    """
+    x = np.asarray(field, dtype=complex)
+    if x.ndim < 4 or x.shape[-2:] != (NSUB, NSUB):
+        raise ValueError("response field must end in (...,nk1,nk2,6,6)")
+    n1, n2 = int(x.shape[-4]), int(x.shape[-3])
+    iq1 = int(q_index[0]) % n1
+    iq2 = int(q_index[1]) % n2
+    s = np.asarray(shift, dtype=int).reshape(2)
+
+    phase_k = _phase_grid(n1, n2, s)
+    qphase = np.exp(
+        2j * np.pi * (
+            float(iq1) * float(s[0]) / float(n1)
+            + float(iq2) * float(s[1]) / float(n2)
+        )
+    )
+    phase_kq = qphase * phase_k
+
+    dl = np.ones((n1, n2, NSUB), dtype=complex)
+    dr = np.ones((n1, n2, NSUB), dtype=complex)
+    dl[..., 3:] = phase_kq[..., None]
+    dr[..., 3:] = phase_k[..., None]
+
+    lead = (1,) * (x.ndim - 4)
+    left = dl.reshape(lead + (n1, n2, NSUB, 1))
+    right = dr.conj().reshape(lead + (n1, n2, 1, NSUB))
+    return left * x * right
+
+
+def local_response_vertex_in_orientation(
+    vertex: np.ndarray,
+    orientation: int,
+    q_index: tuple[int, int],
+    *,
+    nk1: int,
+    nk2: int,
+    atol: float = 1.0e-10,
+) -> np.ndarray:
+    """Transform a local source to an orientation frame and require locality.
+
+    Primitive-cell pseudospin vertices are block diagonal in the A/B triangle
+    sectors, so after a cell-gauge change they remain k independent even at
+    finite q (the B block only acquires the overall external-momentum phase).
+    """
+    k = np.asarray(vertex, dtype=complex)
+    if k.shape != (NSUB, NSUB):
+        raise ValueError("local response vertex must be 6x6")
+    field = np.broadcast_to(
+        k.reshape(1, 1, NSUB, NSUB),
+        (int(nk1), int(nk2), NSUB, NSUB),
+    ).copy()
+    mapped = gauge_transform_response_field(
+        field, orientation_b_shift(int(orientation)), q_index
+    )
+    local = np.mean(mapped, axis=(0, 1))
+    spread = float(np.max(np.abs(mapped - local[None, None]), initial=0.0))
+    if spread > float(atol):
+        raise ValueError(
+            "source becomes k dependent in the requested orientation; "
+            f"spread={spread:.3e}"
+        )
+    return local
+
 def intracell_block(field: np.ndarray) -> np.ndarray:
     """Return the k-average 6x6 block of a static lattice field."""
     x = np.asarray(field, dtype=complex)
@@ -198,5 +275,7 @@ __all__ = [
     "rotate_solution_between_orientations",
     "rotate_local_between_orientations",
     "build_oriented_lattice_fields",
+    "gauge_transform_response_field",
+    "local_response_vertex_in_orientation",
     "intracell_block",
 ]
