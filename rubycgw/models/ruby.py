@@ -117,6 +117,21 @@ REFERENCE_CROSS_BONDS = (
     (2, 4, (0, 0)),
 )
 
+# The three real neighbouring A-B pairs selected by the three cluster gauges.
+# Each entry contains two straight and two crossed bonds.  Crucially, every
+# physical intercell bond appears with its bare coupling once; no q=0 collapse
+# or repeated-pair summation is performed inside a six-site impurity.
+PAIR_STRAIGHT_BONDS = (
+    ((1, 4), (2, 5)),
+    ((0, 5), (1, 3)),
+    ((0, 4), (2, 3)),
+)
+PAIR_CROSS_BONDS = (
+    ((1, 5), (2, 4)),
+    ((0, 3), (1, 5)),
+    ((0, 3), (2, 4)),
+)
+
 
 def extended_interaction_bonds(params: ExtendedRubyParameters):
     """Return all real-space density bonds ``(i,j,R,coupling)``."""
@@ -150,6 +165,26 @@ def v_only_cluster_interactions(params: ExtendedRubyParameters):
         (int(i), int(j), float(params.V))
         for i, j, _R in INTRATRIANGLE_BONDS
     )
+
+
+def physical_pair_cluster_interactions(
+    params: ExtendedRubyParameters,
+    orientation: int,
+):
+    """Return one real A-B neighbour pair for a six-site impurity.
+
+    The six intra-triangle V bonds are always included.  For the selected
+    orientation, exactly two straight Vprime and two crossed Vcross bonds are
+    added.  Distinct intercell neighbours are never collapsed onto the same
+    impurity orbital pair.
+    """
+    r = int(orientation)
+    if r not in (0, 1, 2):
+        raise ValueError(f"cluster orientation must be 0, 1 or 2; got {orientation!r}")
+    out = list(v_only_cluster_interactions(params))
+    out.extend((int(i), int(j), float(params.Vprime)) for i, j in PAIR_STRAIGHT_BONDS[r])
+    out.extend((int(i), int(j), float(params.Vcross)) for i, j in PAIR_CROSS_BONDS[r])
+    return tuple(out)
 
 
 def extended_cluster_interactions(params: ExtendedRubyParameters):
@@ -204,9 +239,12 @@ __all__ = [
     "CROSS_INTERTRIANGLE_BONDS",
     "REFERENCE_STRAIGHT_BONDS",
     "REFERENCE_CROSS_BONDS",
+    "PAIR_STRAIGHT_BONDS",
+    "PAIR_CROSS_BONDS",
     "extended_interaction_bonds",
     "build_extended_interaction",
     "v_only_cluster_interactions",
+    "physical_pair_cluster_interactions",
     "extended_cluster_interactions",
     "extended_cluster_matrix",
     "reference_pair_effective_couplings",
