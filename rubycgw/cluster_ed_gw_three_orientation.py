@@ -39,7 +39,11 @@ from .cluster_ed_gw_fast import (
     _relative_error,
     _unpack_broyden_state,
 )
-from .cluster_orientation import build_oriented_lattice_fields, transform_between_orientations
+from .cluster_orientation import (
+    build_oriented_lattice_fields,
+    rotate_local_between_orientations,
+    transform_between_orientations,
+)
 from .grids import MatsubaraGrid
 from .gw import GWOptions, GWResult, _mixed_self_energies
 from .impurity_ed import FiniteBathImpurityED
@@ -150,6 +154,53 @@ def _project_common_dynamic(field: np.ndarray) -> np.ndarray:
     return np.asarray(project_lattice_c3(np.asarray(field, dtype=complex)))
 
 
+
+def _c3_local_orbit(field: np.ndarray, grid: MatsubaraGrid) -> list[np.ndarray]:
+    """Generate the three exactly C3-related local cluster matrices."""
+    x0 = np.asarray(field, dtype=complex)
+    return [
+        rotate_local_between_orientations(
+            x0, 0, r, nk1=grid.nk1, nk2=grid.nk2
+        )
+        for r in range(3)
+    ]
+
+
+def _symmetrized_local_orbit(field: np.ndarray, grid: MatsubaraGrid) -> np.ndarray:
+    """Embed one representative local field in all three cuts and average."""
+    return _average_local_fields_in_common(_c3_local_orbit(field, grid), grid)
+
+
+def _pack_representative_dynamic(
+    sigma_emb: np.ndarray,
+    sigma_imp0: np.ndarray,
+    grid: MatsubaraGrid,
+) -> np.ndarray:
+    """Pack common weak lattice piece plus one representative impurity field."""
+    avg_imp = _symmetrized_local_orbit(sigma_imp0, grid)
+    weak = np.asarray(sigma_emb, dtype=complex) - avg_imp
+    scale = np.sqrt(float(max(grid.nk, 1)))
+    return np.concatenate([weak.ravel(), scale * np.asarray(sigma_imp0).ravel()])
+
+
+def _unpack_representative_dynamic(
+    packed: np.ndarray,
+    sigma_emb_shape: tuple[int, ...],
+    sigma_imp_shape: tuple[int, ...],
+    grid: MatsubaraGrid,
+) -> tuple[np.ndarray, np.ndarray]:
+    nemb = int(np.prod(sigma_emb_shape))
+    nimp = int(np.prod(sigma_imp_shape))
+    flat = np.asarray(packed, dtype=complex).reshape(-1)
+    if flat.size != nemb + nimp:
+        raise ValueError("representative dynamic state size mismatch")
+    weak = flat[:nemb].reshape(sigma_emb_shape)
+    scale = np.sqrt(float(max(grid.nk, 1)))
+    imp0 = (flat[nemb:] / scale).reshape(sigma_imp_shape)
+    emb = weak + _symmetrized_local_orbit(imp0, grid)
+    return np.asarray(emb), np.asarray(imp0)
+
+
 def solve_three_orientation_ed_gw(
     h0: np.ndarray,
     Vq: np.ndarray,
@@ -160,7 +211,15 @@ def solve_three_orientation_ed_gw(
     embed_opts: ClusterEDGWFastOptions = ClusterEDGWFastOptions(),
     background: GWResult | None = None,
 ) -> ThreeOrientationEDGWResult:
-    """Solve the simultaneous C3-symmetric three-cut physical-pair embedding."""
+    """Solve the C3-symmetric map using one representative impurity problem.
+
+    On a C3-symmetric lattice state the three oriented impurity Weiss problems
+    are exactly related by C3.  Solving three independent nonlinear bath fits
+    would therefore add an unphysical source of orientation breaking.  We fit
+    and diagonalize only orientation 0, generate orientations 1 and 2 by exact
+    C3 transformations, and average the three real-space cut corrections in a
+    common lattice gauge.
+    """
     if grid.nk1 != grid.nk2:
         raise ValueError("three-orientation C3 projection requires a square k mesh")
     method = _check_embed_mixing_method(embed_opts.mixing_method)
@@ -178,8 +237,6 @@ def solve_three_orientation_ed_gw(
             f"common SCGW background is not converged: residual={background.final_error:.3e}"
         )
 
-    # One common lattice state.  Project tiny numerical C3 drift before entering
-    # the constrained map and re-solve the fixed-filling Dyson equation.
     density0 = project_density_c3(np.asarray(background.density, dtype=float))
     sigma_h = hartree_self_energy_matrix(density0, Vq[0, 0])
     sigma_emb = _project_common_dynamic(np.asarray(background.Sigma_GW, dtype=complex))
@@ -205,17 +262,13 @@ def solve_three_orientation_ed_gw(
         interactions.append(ir)
         V_clusters.append(cluster_interaction_matrix(ir, NSUB))
 
-    baths: list[BathParameters | None] = [None, None, None]
-    sigma_imps: list[np.ndarray] = []
-    for r in range(3):
-        Gr = _common_to_orientation(G, r)
-        rho_r = one_body_density_matrix_tail(
-            Gr, grid, oriented[r][0], mu, sigma_h
-        )
-        Gc_r = np.mean(Gr, axis=(1, 2))
-        rho_c_r = np.mean(rho_r, axis=(0, 1))
-        scgw_r, _, _ = cluster_gw_self_energy(Gc_r, rho_c_r, V_clusters[r], grid)
-        sigma_imps.append(np.asarray(scgw_r).copy())
+    # Initialize the one independent impurity self-energy from orientation 0.
+    rho_k0 = one_body_density_matrix_tail(G, grid, h0, mu, sigma_h)
+    Gc0 = np.mean(G, axis=(1, 2))
+    rho_c0 = np.mean(rho_k0, axis=(0, 1))
+    sigma_cgw0, _, _ = cluster_gw_self_energy(Gc0, rho_c0, V_clusters[0], grid)
+    sigma_imp0 = np.asarray(sigma_cgw0).copy()
+    bath0: BathParameters | None = None
 
     mix_opts = GWOptions(
         mixing=float(embed_opts.mixing),
@@ -246,9 +299,10 @@ def solve_three_orientation_ed_gw(
     W = np.asarray(background.W)
     P = np.asarray(background.P)
     sigma_gw_lattice = np.asarray(background.Sigma_GW)
-    sigma_cgws = [np.zeros_like(sigma_imps[0]) for _ in range(3)]
-    Gimps = [np.zeros_like(sigma_imps[0]) for _ in range(3)]
-    Gcs = [np.zeros_like(sigma_imps[0]) for _ in range(3)]
+    sigma_cgws = [np.zeros_like(sigma_imp0) for _ in range(3)]
+    sigma_imps = [np.zeros_like(sigma_imp0) for _ in range(3)]
+    Gimps = [np.zeros_like(sigma_imp0) for _ in range(3)]
+    Gcs = [np.zeros_like(sigma_imp0) for _ in range(3)]
     static_shifts = [np.zeros((NSUB, NSUB), dtype=complex) for _ in range(3)]
     mismatches = [np.inf, np.inf, np.inf]
     bath_errors = [np.inf, np.inf, np.inf]
@@ -260,7 +314,11 @@ def solve_three_orientation_ed_gw(
     for it in range(1, int(embed_opts.max_iter) + 1):
         t0 = perf_counter()
         if embed_opts.verbose:
-            print(f"[3ori-ED+GW] outer {it:02d}: common lattice map + 3 impurity cuts", flush=True)
+            print(
+                f"[3ori-ED+GW] outer {it:02d}: common lattice map + "
+                "one representative impurity",
+                flush=True,
+            )
 
         rho_k = one_body_density_matrix_tail(G, grid, h0, mu, sigma_h)
         rho_c0 = np.mean(rho_k, axis=(0, 1))
@@ -275,12 +333,72 @@ def solve_three_orientation_ed_gw(
         )
         sigma_gw_lattice = _project_common_dynamic(sigma_gw_lattice)
 
-        sigma_imp_outs: list[np.ndarray] = []
-        corrections_common: list[np.ndarray] = []
-        imp_res = []
-        mismatches = []
-        bath_errors = []
+        # Orientation 0 is the representative impurity problem.
+        Gc0 = np.mean(G, axis=(1, 2))
+        sigma_cgw0, _, _ = cluster_gw_self_energy(
+            Gc0, rho_c0, V_clusters[0], grid
+        )
+        g0_inv = np.linalg.inv(Gc0) + sigma_imp0
+        eye = np.eye(NSUB, dtype=complex)
+        delta_raw = (
+            (1j * grid.omega[:, None, None] + float(mu)) * eye[None]
+            - h_clusters[0][None]
+            - g0_inv
+        )
+        static_shift0, delta_target = split_static_hybridization(
+            delta_raw, grid.omega
+        )
+        h_imp0 = h_clusters[0] + static_shift0
 
+        if embed_opts.verbose:
+            print(
+                f"[3ori-ED+GW] outer {it:02d}: ori0 representative fit bath + ED",
+                flush=True,
+            )
+        bath0 = fit_finite_bath(
+            delta_target, grid.omega, mu,
+            nbath=int(embed_opts.nbath),
+            nfit=int(embed_opts.bath_fit_nfreq),
+            max_nfev=int(embed_opts.bath_fit_max_nfev),
+            energy_window=float(embed_opts.bath_energy_window),
+            coupling_bound=float(embed_opts.bath_coupling_bound),
+            xtol=float(embed_opts.bath_fit_xtol),
+            initial=bath0,
+            metric=str(embed_opts.bath_fit_metric),
+            one_body=h_imp0,
+        )
+        himp0 = build_impurity_one_body(h_imp0, bath0)
+        impurity0 = FiniteBathImpurityED(
+            himp0, interactions[0], correlated_orbitals=tuple(range(NSUB))
+        )
+        impurity0.diagonalize()
+        Gimp0, _ = impurity0.green_iomega(
+            1j * grid.omega, mu, grid.T,
+            orbitals=tuple(range(NSUB)),
+            discard_weight_tol=float(embed_opts.discard_weight_tol),
+        )
+        delta_fit = bath_hybridization(
+            grid.omega, mu, bath0.energies, bath0.couplings
+        )
+        g0_fit_inv = (
+            (1j * grid.omega[:, None, None] + float(mu)) * eye[None]
+            - h_imp0[None] - delta_fit
+        )
+        sigma_ed_raw0 = g0_fit_inv - np.linalg.inv(Gimp0)
+        beta = float(embed_opts.impurity_mixing)
+        sigma_imp0_out = sigma_imp0 + beta * (sigma_ed_raw0 - sigma_imp0)
+
+        # Generate the complete C3 orbit exactly.  Direct cluster-GW evaluations
+        # are retained only as a covariance diagnostic, never as independent
+        # nonlinear degrees of freedom.
+        sigma_imp_outs = _c3_local_orbit(sigma_imp0_out, grid)
+        sigma_cgws = _c3_local_orbit(sigma_cgw0, grid)
+        Gimps = _c3_local_orbit(Gimp0, grid)
+        static_shifts = _c3_local_orbit(static_shift0, grid)
+
+        corrections_common = []
+        cgw_cov_err = 0.0
+        mismatches = []
         for r in range(3):
             Gr = _common_to_orientation(G, r)
             rho_r = one_body_density_matrix_tail(
@@ -289,78 +407,32 @@ def solve_three_orientation_ed_gw(
             Gc_r = np.mean(Gr, axis=(1, 2))
             rho_c_r = np.mean(rho_r, axis=(0, 1))
             Gcs[r] = np.asarray(Gc_r)
-
-            sigma_cgw_r, _, _ = cluster_gw_self_energy(
+            cgw_direct, _, _ = cluster_gw_self_energy(
                 Gc_r, rho_c_r, V_clusters[r], grid
             )
-            sigma_cgws[r] = np.asarray(sigma_cgw_r)
+            cgw_cov_err = max(
+                cgw_cov_err, _maxabs(cgw_direct - sigma_cgws[r])
+            )
+            corrections_common.append(
+                _local_to_common(sigma_imp_outs[r] - sigma_cgws[r], r, grid)
+            )
+            mismatches.append(_relative_error(Gimps[r], Gc_r))
 
-            g0_inv = np.linalg.inv(Gc_r) + sigma_imps[r]
-            eye = np.eye(NSUB, dtype=complex)
-            delta_raw = (
-                (1j * grid.omega[:, None, None] + float(mu)) * eye[None]
-                - h_clusters[r][None]
-                - g0_inv
-            )
-            static_shift, delta_target = split_static_hybridization(delta_raw, grid.omega)
-            static_shifts[r] = np.asarray(static_shift)
-            h_imp = h_clusters[r] + static_shift
-
-            if embed_opts.verbose:
-                print(f"[3ori-ED+GW] outer {it:02d}: ori{r} fit bath + ED", flush=True)
-            bath_r = fit_finite_bath(
-                delta_target, grid.omega, mu,
-                nbath=int(embed_opts.nbath),
-                nfit=int(embed_opts.bath_fit_nfreq),
-                max_nfev=int(embed_opts.bath_fit_max_nfev),
-                energy_window=float(embed_opts.bath_energy_window),
-                coupling_bound=float(embed_opts.bath_coupling_bound),
-                xtol=float(embed_opts.bath_fit_xtol),
-                initial=baths[r],
-                metric=str(embed_opts.bath_fit_metric),
-                one_body=h_imp,
-            )
-            baths[r] = bath_r
-            himp = build_impurity_one_body(h_imp, bath_r)
-            impurity = FiniteBathImpurityED(
-                himp, interactions[r], correlated_orbitals=tuple(range(NSUB))
-            )
-            impurity.diagonalize()
-            Gimp_r, _ = impurity.green_iomega(
-                1j * grid.omega, mu, grid.T,
-                orbitals=tuple(range(NSUB)),
-                discard_weight_tol=float(embed_opts.discard_weight_tol),
-            )
-            Gimps[r] = np.asarray(Gimp_r)
-            delta_fit = bath_hybridization(
-                grid.omega, mu, bath_r.energies, bath_r.couplings
-            )
-            g0_fit_inv = (
-                (1j * grid.omega[:, None, None] + float(mu)) * eye[None]
-                - h_imp[None] - delta_fit
-            )
-            sigma_ed_raw = g0_fit_inv - np.linalg.inv(Gimp_r)
-            beta = float(embed_opts.impurity_mixing)
-            sigma_imp_out_r = sigma_imps[r] + beta * (sigma_ed_raw - sigma_imps[r])
-            sigma_imp_outs.append(np.asarray(sigma_imp_out_r))
-
-            correction_r = sigma_imp_out_r - sigma_cgw_r
-            corrections_common.append(_local_to_common(correction_r, r, grid))
-            imp_res.append(_maxabs(sigma_imp_out_r - sigma_imps[r]))
-            mismatches.append(_relative_error(Gimp_r, Gc_r))
-            bath_errors.append(float(bath_r.fit_error))
-
+        bath_errors = [float(bath0.fit_error)] * 3
         correction_sym = sum(corrections_common) / 3.0
-        sigma_emb_out = _project_common_dynamic(sigma_gw_lattice + correction_sym)
+        sigma_emb_out = _project_common_dynamic(
+            sigma_gw_lattice + correction_sym
+        )
 
         res_h = _maxabs(sigma_h_out - sigma_h)
         res_emb = _maxabs(sigma_emb_out - sigma_emb)
-        err = max([res_h, res_emb] + imp_res)
+        res_imp0 = _maxabs(sigma_imp0_out - sigma_imp0)
+        err = max(res_h, res_emb, res_imp0)
         c3res = c3_lattice_residual(sigma_emb_out)
         elapsed = perf_counter() - t0
 
         residual_hist.append(float(err))
-        imp_residual_hist.append([float(x) for x in imp_res])
+        imp_residual_hist.append([float(res_imp0)] * 3)
         mismatch_hist.append([float(x) for x in mismatches])
         bath_hist.append([float(x) for x in bath_errors])
         mu_hist.append(float(mu))
@@ -370,23 +442,25 @@ def solve_three_orientation_ed_gw(
         if embed_opts.verbose:
             print(
                 f"[3ori-ED+GW] outer {it:02d}: residual={err:.3e} "
-                f"(H={res_h:.3e}, emb={res_emb:.3e}, "
-                f"imp={max(imp_res):.3e}), mu={mu:+.9f}, "
-                f"C3={c3res:.2e}, dt={elapsed:.1f}s\n"
+                f"(H={res_h:.3e}, emb={res_emb:.3e}, imp={res_imp0:.3e}), "
+                f"mu={mu:+.9f}, C3={c3res:.2e}, "
+                f"cluster-C3={cgw_cov_err:.2e}, dt={elapsed:.1f}s\n"
                 f"    mismatch ori0/1/2="
                 f"{mismatches[0]:.3e}/{mismatches[1]:.3e}/{mismatches[2]:.3e}; "
-                f"bath={bath_errors[0]:.3e}/{bath_errors[1]:.3e}/{bath_errors[2]:.3e}",
+                f"bath(rep)={bath0.fit_error:.3e}",
                 flush=True,
             )
 
         if err < float(embed_opts.tol):
             sigma_h = np.asarray(sigma_h_out)
             sigma_emb = np.asarray(sigma_emb_out)
-            sigma_imps = [np.asarray(x) for x in sigma_imp_outs]
+            sigma_imp0 = np.asarray(sigma_imp0_out)
             converged = True
         else:
-            dyn = _pack_three_dynamic(sigma_emb, sigma_imps, grid)
-            dyn_out = _pack_three_dynamic(sigma_emb_out, sigma_imp_outs, grid)
+            dyn = _pack_representative_dynamic(sigma_emb, sigma_imp0, grid)
+            dyn_out = _pack_representative_dynamic(
+                sigma_emb_out, sigma_imp0_out, grid
+            )
 
             if method == "broyden":
                 if broyden is None:
@@ -398,11 +472,12 @@ def solve_three_orientation_ed_gw(
                 ):
                     broyden.clear()
                 x, hscale = _pack_broyden_state(sigma_h, dyn)
-                xout, hscale_out = _pack_broyden_state(sigma_h_out, dyn_out)
+                xout, hscale_out = _pack_broyden_state(
+                    sigma_h_out, dyn_out
+                )
                 if hscale != hscale_out:
                     raise RuntimeError("Broyden state scale changed")
-                q = x - xout
-                xnext = broyden.propose(x, q)
+                xnext = broyden.propose(x, x - xout)
                 sigma_h_next, dyn_next = _unpack_broyden_state(
                     xnext, sigma_h.shape, dyn.shape, hscale
                 )
@@ -414,14 +489,25 @@ def solve_three_orientation_ed_gw(
                 )
                 cap = float(embed_opts.pulay_step_cap)
 
-            raw_step = max(_maxabs(sigma_h_out-sigma_h), _maxabs(dyn_out-dyn))
-            mixed_step = max(_maxabs(sigma_h_next-sigma_h), _maxabs(dyn_next-dyn))
-            finite = np.all(np.isfinite(sigma_h_next)) and np.all(np.isfinite(dyn_next))
-            oversized = raw_step > 1e-14 and mixed_step > cap * raw_step
+            raw_step = max(
+                _maxabs(sigma_h_out - sigma_h), _maxabs(dyn_out - dyn)
+            )
+            mixed_step = max(
+                _maxabs(sigma_h_next - sigma_h), _maxabs(dyn_next - dyn)
+            )
+            finite = (
+                np.all(np.isfinite(sigma_h_next))
+                and np.all(np.isfinite(dyn_next))
+            )
+            oversized = (
+                raw_step > 1e-14 and mixed_step > cap * raw_step
+            )
 
             if method == "broyden" and finite and oversized:
                 scale = (cap * raw_step) / max(mixed_step, 1e-300)
-                sigma_h_next = sigma_h + scale * (sigma_h_next - sigma_h)
+                sigma_h_next = sigma_h + scale * (
+                    sigma_h_next - sigma_h
+                )
                 dyn_next = dyn + scale * (dyn_next - dyn)
                 if embed_opts.verbose:
                     print(
@@ -436,40 +522,48 @@ def solve_three_orientation_ed_gw(
                 if broyden is not None:
                     broyden.clear()
                 a = float(embed_opts.mixing)
-                sigma_h_next = sigma_h + a * (sigma_h_out - sigma_h)
+                sigma_h_next = sigma_h + a * (
+                    sigma_h_out - sigma_h
+                )
                 dyn_next = dyn + a * (dyn_out - dyn)
 
             sigma_h = np.asarray(sigma_h_next)
-            sigma_emb, sigma_imps = _unpack_three_dynamic(
-                dyn_next, sigma_emb.shape, sigma_imps[0].shape, grid
+            sigma_emb, sigma_imp0 = _unpack_representative_dynamic(
+                dyn_next, sigma_emb.shape, sigma_imp0.shape, grid
             )
-            # Keep the common lattice state exactly in the C3-symmetric subspace.
             sigma_emb = _project_common_dynamic(sigma_emb)
-            # sigma_h is diagonal for density interactions; averaging the three
-            # diagonal entries within each triangle is the C3 projection.
+            hdiag = np.diag(sigma_h).real
             sigma_h = np.diag(
-                np.r_[np.repeat(np.mean(np.diag(sigma_h).real[:3]), 3),
-                      np.repeat(np.mean(np.diag(sigma_h).real[3:]), 3)]
+                np.r_[np.repeat(np.mean(hdiag[:3]), 3),
+                      np.repeat(np.mean(hdiag[3:]), 3)]
             ).astype(complex)
 
         if gw_opts.target_filling is None:
-            G = dyson_from_sigma_matrix(h0, grid, mu, sigma_h, sigma_emb)
+            G = dyson_from_sigma_matrix(
+                h0, grid, mu, sigma_h, sigma_emb
+            )
         else:
             mu, G, _, _ = _solve_mu_matrix_fast(
-                h0, sigma_h, sigma_emb, grid, float(gw_opts.target_filling),
-                mu, float(gw_opts.mu_tol), int(gw_opts.mu_max_iter)
+                h0, sigma_h, sigma_emb, grid,
+                float(gw_opts.target_filling), mu,
+                float(gw_opts.mu_tol), int(gw_opts.mu_max_iter)
             )
-        # Do not project G independently: with C3-projected self-energies the
-        # Dyson result is already covariant up to roundoff, and keeping it
-        # untouched preserves the exact Dyson identity.
         if converged:
             break
 
-    if any(b is None for b in baths):
+    if bath0 is None:
         raise RuntimeError("three-orientation embedding loop did not execute")
 
     rho_k = one_body_density_matrix_tail(G, grid, h0, mu, sigma_h)
-    density = project_density_c3(np.real(np.diag(np.mean(rho_k, axis=(0, 1)))))
+    density = project_density_c3(
+        np.real(np.diag(np.mean(rho_k, axis=(0, 1))))
+    )
+    sigma_imps = _c3_local_orbit(sigma_imp0, grid)
+
+    # Keep the old tuple-shaped result surface for compatibility.  Only the
+    # orientation-0 bath is an independently fitted object; the other entries
+    # are aliases and must be interpreted as symmetry-generated representatives.
+    baths_tuple = (bath0, bath0, bath0)
 
     return ThreeOrientationEDGWResult(
         G=np.asarray(G),
@@ -483,7 +577,7 @@ def solve_three_orientation_ed_gw(
         G_cluster_by_orientation=np.asarray(Gcs),
         G_impurity_by_orientation=np.asarray(Gimps),
         impurity_static_shift_by_orientation=np.asarray(static_shifts),
-        baths=(baths[0], baths[1], baths[2]),  # type: ignore[arg-type]
+        baths=baths_tuple,
         mu=float(mu),
         density=np.asarray(density),
         converged=bool(converged),
@@ -504,4 +598,13 @@ def solve_three_orientation_ed_gw(
     )
 
 
-__all__ = ["ThreeOrientationEDGWResult", "solve_three_orientation_ed_gw"]
+__all__ = [
+    "ThreeOrientationEDGWResult",
+    "solve_three_orientation_ed_gw",
+    "_average_local_fields_in_common",
+    "_pack_three_dynamic",
+    "_unpack_three_dynamic",
+    "_c3_local_orbit",
+    "_pack_representative_dynamic",
+    "_unpack_representative_dynamic",
+]
