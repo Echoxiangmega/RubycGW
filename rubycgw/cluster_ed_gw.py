@@ -113,13 +113,40 @@ def build_intracell_h0(params: RubyParameters) -> np.ndarray:
 
 
 def ruby_cluster_interactions(params: RubyParameters):
-    """Return all six primitive-cell density bonds as ``(i,j,V)`` terms."""
+    """Return the six intra-triangle density bonds as ``(i,j,V)`` terms.
+
+    Extended nonlocal couplings such as Vprime/Vcross are intentionally excluded.
+    They remain in the lattice interaction V(q), while the ED impurity and the
+    matching cluster-GW subtraction treat only the strong intra-triangle V sector.
+    """
     out = []
     for i, j, R, u in ruby_interaction_bonds(params):
         if np.any(np.asarray(R, dtype=int) != 0):
-            raise RuntimeError("Ruby interaction unexpectedly crosses primitive cells")
+            raise RuntimeError("Ruby intra-triangle interaction unexpectedly crosses primitive cells")
         out.append((int(i), int(j), float(np.real(u))))
     return tuple(out)
+
+
+def cluster_interaction_matrix(
+    interactions,
+    norb: int = NSUB,
+) -> np.ndarray:
+    """Build the Hermitian cluster density-interaction matrix from ED terms.
+
+    This is the single source of truth for the impurity/cluster-GW partition.
+    The lattice GW calculation may contain additional nonlocal interactions in
+    V(q), but the double-counting subtraction must use exactly the same
+    interaction subset as the ED impurity.
+    """
+    out = np.zeros((int(norb), int(norb)), dtype=complex)
+    for i, j, u in interactions:
+        i, j = int(i), int(j)
+        if i == j:
+            raise ValueError("cluster density interaction must connect distinct orbitals")
+        val = complex(u)
+        out[i, j] += val
+        out[j, i] += np.conj(val)
+    return 0.5 * (out + out.conj().T)
 
 
 def bath_hybridization(
@@ -365,7 +392,7 @@ def solve_cluster_ed_gw(
         )
 
     interactions = ruby_cluster_interactions(params)
-    V_cluster = np.asarray(Vq[0, 0], dtype=complex)
+    V_cluster = cluster_interaction_matrix(interactions, NSUB)
 
     sigma_h = np.asarray(background.Sigma_H, dtype=complex).copy()
     sigma_emb = np.asarray(background.Sigma_GW, dtype=complex).copy()
@@ -558,6 +585,7 @@ __all__ = [
     "ClusterEDGWResult",
     "build_intracell_h0",
     "ruby_cluster_interactions",
+    "cluster_interaction_matrix",
     "bath_hybridization",
     "fit_finite_bath",
     "build_impurity_one_body",
