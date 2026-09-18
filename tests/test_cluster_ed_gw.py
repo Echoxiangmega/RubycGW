@@ -12,6 +12,7 @@ from rubycgw.cluster_ed_gw import (
     ruby_cluster_interactions,
     solve_cluster_ed_gw,
 )
+from rubycgw.cluster_ed_gw_fast import _pack_dynamic, _unpack_dynamic
 from rubycgw.grids import MatsubaraGrid
 from rubycgw.gw import GWOptions
 from rubycgw.impurity_ed import FiniteBathImpurityED
@@ -150,6 +151,20 @@ def test_cluster_gw_double_counting_vanishes_at_zero_interaction():
     assert np.max(np.abs(sigma)) < 1e-14
     assert np.max(np.abs(W)) < 1e-14
     assert np.all(np.isfinite(P))
+
+
+def test_nonredundant_pulay_pack_roundtrip():
+    rng = np.random.default_rng(2026)
+    emb = rng.normal(size=(4, 2, 3, 6, 6)) + 1j * rng.normal(size=(4, 2, 3, 6, 6))
+    imp = rng.normal(size=(4, 6, 6)) + 1j * rng.normal(size=(4, 6, 6))
+    packed = _pack_dynamic(emb, imp, nk=6)
+    emb2, imp2 = _unpack_dynamic(packed, emb.shape, imp.shape, nk=6)
+    assert np.max(np.abs(emb2 - emb)) < 1e-12
+    assert np.max(np.abs(imp2 - imp)) < 1e-12
+
+    weak = emb - imp[:, None, None, :, :]
+    nemb = emb.size
+    assert np.max(np.abs(packed[:nemb].reshape(emb.shape) - weak)) < 1e-12
 
 
 def test_zero_interaction_embedding_reduces_to_lattice_gw():
