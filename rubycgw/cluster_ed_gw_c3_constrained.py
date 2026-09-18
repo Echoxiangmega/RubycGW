@@ -36,6 +36,7 @@ from .cluster_ed_gw import (
     build_impurity_one_body,
     build_intracell_h0,
     cluster_gw_self_energy,
+    cluster_interaction_matrix,
     fit_finite_bath,
     ruby_cluster_interactions,
 )
@@ -191,7 +192,7 @@ def solve_cluster_ed_gw_fast_c3_constrained(
         )
 
     interactions = ruby_cluster_interactions(params)
-    V_cluster = np.asarray(Vq[0, 0], dtype=complex)
+    V_cluster = cluster_interaction_matrix(interactions, NSUB)
 
     rho_k = one_body_density_matrix_tail(G, grid, h0, mu, sigma_h)
     Gc = np.mean(G, axis=(1, 2))
