@@ -96,3 +96,14 @@ The two cluster terms always use the same interaction subset; this is required f
 ## Broken symmetry
 
 The nonlinear embedding can converge to symmetry-broken fixed points.  This does not automatically prove the microscopic zero-temperature ground state.  In particular, the six-site primitive-cell impurity selects a cluster orientation among three C3-related choices.  Use the [orientation-ensemble diagnostic](orientation_ensemble.md) before interpreting small C3-breaking density differences as intrinsic order.
+
+
+### Physical-pair orientation workflow
+
+The orientation-resolved extended-interaction research driver uses a more
+specific partition than the generic public V-only workflow.  Each oriented
+six-site impurity treats the intra-triangle V plus exactly one real A-B
+neighbour pair (two Vprime and two Vcross bonds).  This avoids collapsing
+different intercell neighbours onto the same impurity orbital pair.  A static
+high-frequency Weiss contribution is separated from the finite-bath dynamic
+hybridization so the bath is not asked to fit a nondecaying constant term.
