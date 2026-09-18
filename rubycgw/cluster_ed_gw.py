@@ -94,6 +94,7 @@ class ClusterEDGWResult:
     final_error: float
     impurity_mismatch: float
     bath_fit_error: float
+    impurity_static_shift: np.ndarray
     background: GWResult
 
 
@@ -236,7 +237,7 @@ def fit_finite_bath(
 
     if initial is not None:
         eps0 = np.asarray(initial.energies, dtype=float)
-        bath_hyb0 = np.asarray(initial.couplings, dtype=float)
+        bath_hyb0 = np.asarray(np.real(initial.couplings), dtype=float)
         if eps0.shape != (nbath,) or bath_hyb0.shape != (norb, nbath):
             eps0, bath_hyb0 = _initial_bath_guess(
                 delta, w, mu, nbath, energy_window
@@ -288,6 +289,52 @@ def fit_finite_bath(
     den = max(float(np.linalg.norm(dfit.ravel())), 1e-300)
     err = float(np.linalg.norm((fit - dfit).ravel()) / den)
     return BathParameters(eps, bath_hyb, err, int(opt.nfev))
+
+
+def split_static_hybridization(
+    target_delta: np.ndarray,
+    omega: np.ndarray,
+    *,
+    n_tail: int = 8,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Separate a static Hermitian Weiss term from the dynamic bath hybridization.
+
+    A finite Anderson bath can represent only terms decaying as 1/(i omega).
+    When part of the lattice interaction is kept outside the ED impurity, the
+    projected Weiss field can contain a nonzero high-frequency constant.  We
+    extract that constant from the even high-frequency tail and fit only the
+    remaining dynamic part with bath orbitals.
+    """
+    delta = np.asarray(target_delta, dtype=complex)
+    w = np.asarray(omega, dtype=float).reshape(-1)
+    if delta.ndim != 3 or delta.shape[0] != len(w) or delta.shape[1] != delta.shape[2]:
+        raise ValueError("target_delta must have shape (nf,norb,norb)")
+    pos = np.flatnonzero(w > 0.0)
+    if pos.size == 0:
+        raise ValueError("static Weiss split requires positive Matsubara frequencies")
+    pos = pos[np.argsort(w[pos])[-min(max(int(n_tail), 1), len(pos)):]]
+    even_tail = []
+    invw2 = []
+    for ip in pos:
+        wp = float(w[ip])
+        im = int(np.argmin(np.abs(w + wp)))
+        if abs(float(w[im]) + wp) > 1.0e-10 * max(1.0, abs(wp)):
+            raise ValueError("fermionic Matsubara grid is not +/- symmetric")
+        even = 0.5 * (delta[ip] + delta[im])
+        even = 0.5 * (even + even.conj().T)
+        even_tail.append(even)
+        invw2.append(1.0 / (wp * wp))
+    y = np.asarray(even_tail, dtype=complex).reshape(len(even_tail), -1)
+    x = np.asarray(invw2, dtype=float)
+    if len(x) >= 2 and np.ptp(x) > 0.0:
+        design = np.column_stack([np.ones_like(x), x])
+        coeff, *_ = np.linalg.lstsq(design, y, rcond=None)
+        static = coeff[0].reshape(delta.shape[1], delta.shape[2])
+    else:
+        static = np.mean(np.asarray(even_tail), axis=0)
+    static = 0.5 * (static + static.conj().T)
+    dynamic = delta - static[None, :, :]
+    return np.asarray(static), np.asarray(dynamic)
 
 
 def build_impurity_one_body(
@@ -440,11 +487,15 @@ def solve_cluster_ed_gw(
         # and the previous/mixed impurity self-energy.
         g0_inv = np.linalg.inv(Gc) + sigma_imp
         eye = np.eye(NSUB, dtype=complex)
-        delta_target = (
+        delta_target_raw = (
             (1j * grid.omega[:, None, None] + float(mu)) * eye[None, :, :]
             - h_cluster[None, :, :]
             - g0_inv
         )
+        static_shift, delta_target = split_static_hybridization(
+            delta_target_raw, grid.omega
+        )
+        h_impurity = h_cluster + static_shift
 
         if embed_opts.verbose:
             print(
@@ -470,7 +521,7 @@ def solve_cluster_ed_gw(
                 flush=True,
             )
 
-        himp = build_impurity_one_body(h_cluster, bath)
+        himp = build_impurity_one_body(h_impurity, bath)
         impurity = FiniteBathImpurityED(
             himp,
             interactions,
@@ -489,7 +540,7 @@ def solve_cluster_ed_gw(
         )
         g0_fit_inv = (
             (1j * grid.omega[:, None, None] + float(mu)) * eye[None, :, :]
-            - h_cluster[None, :, :]
+            - h_impurity[None, :, :]
             - delta_fit
         )
         sigma_ed_raw = g0_fit_inv - np.linalg.inv(Gimp)
@@ -577,6 +628,7 @@ def solve_cluster_ed_gw(
         final_error=float(err),
         impurity_mismatch=float(mismatch),
         bath_fit_error=float(bath.fit_error if bath is not None else np.nan),
+        impurity_static_shift=np.asarray(static_shift),
         background=background,
     )
 
@@ -590,6 +642,7 @@ __all__ = [
     "cluster_interaction_matrix",
     "bath_hybridization",
     "fit_finite_bath",
+    "split_static_hybridization",
     "build_impurity_one_body",
     "cluster_gw_self_energy",
     "solve_cluster_ed_gw",
