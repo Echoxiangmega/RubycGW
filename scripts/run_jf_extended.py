@@ -32,7 +32,7 @@ from vprime_study.patches import install_cluster_interaction_hooks
 import run_jf as _driver  # noqa: E402
 
 
-def _load_background_metadata(path: Path) -> tuple[float, float, int, str]:
+def _load_background_metadata(path: Path) -> tuple[float, float, int, str, str]:
     with np.load(path, allow_pickle=False) as z:
         if "Vprime" in z:
             vp = float(np.asarray(z["Vprime"]).reshape(()))
@@ -51,7 +51,11 @@ def _load_background_metadata(path: Path) -> tuple[float, float, int, str]:
             str(np.asarray(z["cluster_projection"]).reshape(()))
             if "cluster_projection" in z else "legacy_unknown"
         )
-    return vp, vx, orientation, projection
+        bath_metric = (
+            str(np.asarray(z["bath_fit_metric"]).reshape(()))
+            if "bath_fit_metric" in z else "delta"
+        )
+    return vp, vx, orientation, projection, bath_metric
 
 
 def _tag(x: float) -> str:
@@ -78,7 +82,8 @@ def _append_metadata(path: Path, vp: float, vx: float, orientation: int) -> None
 
 def main() -> None:
     args = _driver._args()
-    vp, vx, orientation, projection = _load_background_metadata(Path(args.input))
+    vp, vx, orientation, projection, bath_metric = _load_background_metadata(Path(args.input))
+    args.bath_metric = str(bath_metric)
     if projection != "physical_pair_no_intercell_collapse":
         raise ValueError(
             "input checkpoint is not from the physical-pair ED+GW partition: "
@@ -138,7 +143,7 @@ def main() -> None:
     _append_metadata(out, vp, vx, orientation)
     print(
         f"extended JF metadata: Vprime={vp:g}, Vcross={vx:g}, orientation={orientation}, "
-        "cluster=physical-pair",
+        f"cluster=physical-pair, bath_metric={bath_metric}",
         flush=True,
     )
 
