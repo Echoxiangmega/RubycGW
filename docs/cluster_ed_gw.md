@@ -28,7 +28,7 @@ config = BackgroundConfig(
 run = run_cluster_background(model, config)
 ```
 
-The workflow constructs `h0(k)` and the full extended `V(q)`, installs the model-specific q=0 cluster interaction only for the duration of the solve, and then restores the historical solver hooks.  This keeps the high-level interface free of the global patching that older launchers performed manually.
+The workflow constructs `h0(k)` and the full extended `V(q)`.  The lattice Hartree, screening, and GW self-energy therefore use `V`, `Vprime`, and `Vcross`.  The finite-bath ED impurity treats only the strong six intra-triangle `V` bonds, and the cluster-GW double-counting subtraction is built from exactly that same `V`-only interaction subset.
 
 ## Fixed filling and chemical potential
 
@@ -72,7 +72,26 @@ Structural quantities such as lattice mesh, temperature, frequency grids, hoppin
 
 ## Extended interactions
 
-The lattice keeps the true real-space offsets of `Vprime` and `Vcross`.  The six-site impurity uses their q=0 projection.  Repeated crossed-bond orbital pairs are summed, so the impurity interaction is exactly the matrix used by the cluster-GW subtraction at q=0, even though the lattice retains additional spatial information.
+The production partition is
+
+\[
+\mathrm{ED}(V)+\mathrm{GW}(V,V',V_x).
+\]
+
+The lattice keeps the true real-space offsets of `Vprime` and `Vcross`, so their momentum structure remains in the lattice Hartree/screening/GW map.  They are intentionally excluded from the six-site ED impurity because collapsing different neighboring triangles into one primitive-cell impurity converts distinct nonlocal bonds into repeated orbital pairs and can spuriously enhance an intra-triangle density/orbital mode.
+
+The embedded correction is therefore
+
+\[
+\Sigma_{\rm emb}
+=
+\Sigma_{GW}^{\rm lattice}[V,V',V_x]
++
+\left(\Sigma_{ED}^{\rm cluster}[V]
+-\Sigma_{GW}^{\rm cluster}[V]\right).
+\]
+
+The two cluster terms always use the same interaction subset; this is required for a consistent double-counting subtraction.
 
 ## Broken symmetry
 
