@@ -84,11 +84,15 @@ def _args():
     p.add_argument("--embed-max", type=int, default=150)
     p.add_argument("--embed-tol", type=float, default=2e-5)
     p.add_argument("--embed-mixing", type=float, default=0.80)
-    p.add_argument("--embed-mixing-method", choices=("linear", "pulay"), default="pulay")
+    p.add_argument("--embed-mixing-method", choices=("linear", "pulay", "broyden"), default="pulay")
     p.add_argument("--embed-pulay-history", type=int, default=8)
     p.add_argument("--embed-pulay-start", type=int, default=3)
     p.add_argument("--embed-pulay-regularization", type=float, default=1e-7)
     p.add_argument("--embed-pulay-step-cap", type=float, default=3.0)
+    p.add_argument("--embed-broyden-history", type=int, default=8)
+    p.add_argument("--embed-broyden-regularization", type=float, default=1e-8)
+    p.add_argument("--embed-broyden-step-cap", type=float, default=3.0)
+    p.add_argument("--embed-broyden-reset-growth", type=float, default=1.5)
     p.add_argument("--impurity-mixing", type=float, default=1.0)
 
     p.add_argument("--nbath", type=int, default=6)
@@ -216,6 +220,10 @@ def main():
         pulay_start=int(args.embed_pulay_start),
         pulay_regularization=float(args.embed_pulay_regularization),
         pulay_step_cap=float(args.embed_pulay_step_cap),
+        broyden_history=int(args.embed_broyden_history),
+        broyden_regularization=float(args.embed_broyden_regularization),
+        broyden_step_cap=float(args.embed_broyden_step_cap),
+        broyden_reset_growth=float(args.embed_broyden_reset_growth),
         impurity_mixing=float(args.impurity_mixing),
         nbath=int(args.nbath), bath_fit_nfreq=int(args.bath_fit_nfreq),
         bath_fit_max_nfev=int(args.bath_fit_max_nfev),
@@ -350,6 +358,10 @@ def main():
         bath_fit_metric=np.asarray(str(args.bath_fit_metric)),
         mixing_method=str(result.mixing_method),
         pulay_fallbacks=int(result.pulay_fallbacks),
+        broyden_history=int(args.embed_broyden_history),
+        broyden_regularization=float(args.embed_broyden_regularization),
+        broyden_step_cap=float(args.embed_broyden_step_cap),
+        broyden_reset_growth=float(args.embed_broyden_reset_growth),
         residual_history=np.asarray(result.residual_history),
         impurity_residual_history=np.asarray(result.impurity_residual_history),
         impurity_mismatch_history=np.asarray(result.impurity_mismatch_history),
