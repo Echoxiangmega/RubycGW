@@ -2,9 +2,11 @@
 """Run ordinary cluster ED+GW in one of three C3-related cluster gauges.
 
 This is the symmetry-safe alternative to forcing a single oriented six-site
-impurity map onto a C3-projected lattice fixed point.  The impurity ED and its
-cluster-GW double-counting subtraction treat only the strong intra-triangle V;
-Vprime and Vcross remain exclusively in the full lattice GW interaction.  The physical lattice
+impurity map onto a C3-projected lattice fixed point.  The impurity ED and its cluster-GW double-counting subtraction treat the strong
+intra-triangle V together with exactly one real neighbouring A-B pair carrying
+two Vprime and two Vcross bonds.  Distinct intercell neighbours are never
+collapsed onto the same impurity orbital pair; the remaining directions stay
+in the full lattice GW interaction.  The physical lattice
 Hamiltonian is unchanged; only the primitive-cell assignment of the B triangle
 is shifted so that the six-site impurity internalizes one of the three
 C3-related neighbouring A-B pairs.
@@ -29,7 +31,6 @@ if str(_REPO_ROOT) not in sys.path:
 
 import numpy as np
 
-from rubycgw.cluster_ed_gw import ruby_cluster_interactions
 from rubycgw.cluster_ed_gw_fast import ClusterEDGWFastOptions, solve_cluster_ed_gw_fast
 from rubycgw.cluster_orientation import (
     build_oriented_lattice_fields,
@@ -44,6 +45,7 @@ from rubycgw.cluster_restart_solver import (
 from rubycgw.grids import MatsubaraGrid
 from rubycgw.gw import GWOptions
 from rubycgw.model import build_h0
+from rubycgw.models.ruby import physical_pair_cluster_interactions
 from rubycgw.pulay_accel import install_scale_invariant_pulay
 from vprime_study.cross_model import (
     VPrimeCrossParameters,
@@ -54,10 +56,6 @@ from vprime_study.patches import install_cluster_interaction_hooks
 
 
 install_scale_invariant_pulay()
-# Deliberate interaction partition:
-#   ED impurity + cluster-GW subtraction: intra-triangle V only
-#   lattice GW/Hartree/screening: full V(q; V, Vprime, Vcross)
-install_cluster_interaction_hooks(ruby_cluster_interactions)
 
 
 def _args():
@@ -174,6 +172,12 @@ def main():
         ti=float(args.ti), t1=float(args.t1), t2=float(args.t2),
         V=float(args.V), Vprime=float(args.Vprime), Vcross=float(args.Vcross),
     )
+
+    # Treat exactly one real A-B neighbour pair in the six-site impurity.
+    # The other two directions remain in the full lattice GW interaction.
+    install_cluster_interaction_hooks(
+        lambda p: physical_pair_cluster_interactions(p, int(args.orientation))
+    )
     grid = MatsubaraGrid(
         nk1=int(args.Lx), nk2=int(args.Ly), nw=int(args.nw),
         nOmega=int(args.nomega), T=float(args.T),
@@ -238,11 +242,11 @@ def main():
         source_projection = str(_saved_scalar(
             args.continue_from, ("cluster_projection",), "legacy_unknown"
         ))
-        if source_projection != "V_only_intra_triangle":
+        if source_projection != "physical_pair_no_intercell_collapse":
             raise ValueError(
                 "continuation checkpoint uses a different cluster interaction partition "
-                f"({source_projection!r}). Start a fresh ED(V)+GW(V,Vprime,Vcross) run "
-                "instead of reusing an impurity self-energy from the old q=0-projected scheme."
+                f"({source_projection!r}). Start a fresh physical-pair ED+GW run "
+                "instead of reusing an impurity self-energy from an older scheme."
             )
         restart = load_cluster_ed_gw_restart(
             args.continue_from,
@@ -294,9 +298,9 @@ def main():
     )
     np.savez_compressed(
         outfile,
-        interaction_model=np.asarray("lattice_full_V_Vprime_Vcross__cluster_ED_V_only"),
-        cluster_projection=np.asarray("V_only_intra_triangle"),
-        embedding_scheme=np.asarray("ED(V)+GW(V,Vprime,Vcross)"),
+        interaction_model=np.asarray("lattice_full_V_Vprime_Vcross__cluster_ED_physical_pair"),
+        cluster_projection=np.asarray("physical_pair_no_intercell_collapse"),
+        embedding_scheme=np.asarray("ED(V+one_real_pair_Vprime_Vcross)+GW(full_lattice)"),
         cluster_orientation=int(args.orientation),
         cluster_b_shift=np.asarray(shift, dtype=int),
         orientation_method=np.asarray("B_triangle_cell_gauge_three_orientation_ensemble"),
@@ -335,6 +339,7 @@ def main():
         Sigma_GW_lattice=np.asarray(result.Sigma_GW_lattice),
         Sigma_GW_cluster=np.asarray(result.Sigma_GW_cluster),
         Sigma_ED_cluster=np.asarray(result.Sigma_ED_cluster),
+        impurity_static_shift=np.asarray(result.impurity_static_shift),
         G_cluster=np.asarray(result.G_cluster), G_impurity=np.asarray(result.G_impurity),
         bath_energies=np.asarray(result.bath.energies),
         bath_couplings=np.asarray(result.bath.couplings),
