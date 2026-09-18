@@ -2,7 +2,9 @@
 """Run ordinary cluster ED+GW in one of three C3-related cluster gauges.
 
 This is the symmetry-safe alternative to forcing a single oriented six-site
-impurity map onto a C3-projected lattice fixed point.  The physical lattice
+impurity map onto a C3-projected lattice fixed point.  The impurity ED and its
+cluster-GW double-counting subtraction treat only the strong intra-triangle V;
+Vprime and Vcross remain exclusively in the full lattice GW interaction.  The physical lattice
 Hamiltonian is unchanged; only the primitive-cell assignment of the B triangle
 is shifted so that the six-site impurity internalizes one of the three
 C3-related neighbouring A-B pairs.
@@ -19,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
+from rubycgw.cluster_ed_gw import ruby_cluster_interactions
 from rubycgw.cluster_ed_gw_fast import ClusterEDGWFastOptions, solve_cluster_ed_gw_fast
 from rubycgw.cluster_orientation import (
     build_oriented_lattice_fields,
@@ -38,13 +41,15 @@ from vprime_study.cross_model import (
     VPrimeCrossParameters,
     build_vprime_vcross_interaction,
     reference_pair_effective_couplings,
-    vprime_vcross_cluster_interactions,
 )
 from vprime_study.patches import install_cluster_interaction_hooks
 
 
 install_scale_invariant_pulay()
-install_cluster_interaction_hooks(vprime_vcross_cluster_interactions)
+# Deliberate interaction partition:
+#   ED impurity + cluster-GW subtraction: intra-triangle V only
+#   lattice GW/Hartree/screening: full V(q; V, Vprime, Vcross)
+install_cluster_interaction_hooks(ruby_cluster_interactions)
 
 
 def _args():
@@ -222,6 +227,15 @@ def main():
             h0, Vq, params, grid, gw_opts=gw_opts, embed_opts=embed_opts
         )
     else:
+        source_projection = str(_saved_scalar(
+            args.continue_from, ("cluster_projection",), "legacy_unknown"
+        ))
+        if source_projection != "V_only_intra_triangle":
+            raise ValueError(
+                "continuation checkpoint uses a different cluster interaction partition "
+                f"({source_projection!r}). Start a fresh ED(V)+GW(V,Vprime,Vcross) run "
+                "instead of reusing an impurity self-energy from the old q=0-projected scheme."
+            )
         restart = load_cluster_ed_gw_restart(
             args.continue_from,
             Lx=int(args.Lx), Ly=int(args.Ly),
@@ -272,8 +286,9 @@ def main():
     )
     np.savez_compressed(
         outfile,
-        interaction_model=np.asarray("V_intra_plus_Vprime_straight_plus_Vcross_diagonal"),
-        cluster_projection=np.asarray("q0_primitive_cell_projection_sum_repeated_cross_pairs"),
+        interaction_model=np.asarray("lattice_full_V_Vprime_Vcross__cluster_ED_V_only"),
+        cluster_projection=np.asarray("V_only_intra_triangle"),
+        embedding_scheme=np.asarray("ED(V)+GW(V,Vprime,Vcross)"),
         cluster_orientation=int(args.orientation),
         cluster_b_shift=np.asarray(shift, dtype=int),
         orientation_method=np.asarray("B_triangle_cell_gauge_three_orientation_ensemble"),
