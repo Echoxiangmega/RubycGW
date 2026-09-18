@@ -166,8 +166,12 @@ def fit_finite_bath_complex(
     coupling_bound: float = 4.0,
     xtol: float = 1.0e-10,
     initial: BathParameters | None = None,
+    metric: str = "delta",
+    one_body: np.ndarray | None = None,
 ) -> BathParameters:
     """Fit Delta(iw) with real bath energies and complex bath couplings."""
+    if str(metric).lower() != "delta":
+        raise ValueError("complex bath fitter currently supports metric='delta' only")
     delta = np.asarray(target_delta, dtype=complex)
     w = np.asarray(omega, dtype=float).reshape(-1)
     if delta.ndim != 3 or delta.shape[0] != len(w) or delta.shape[1] != delta.shape[2]:
