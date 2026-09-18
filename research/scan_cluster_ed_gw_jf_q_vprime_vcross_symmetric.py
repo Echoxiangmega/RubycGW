@@ -271,8 +271,13 @@ def main():
     eigvals = np.empty((nq, 6), dtype=float)
     eigvecs = np.empty((nq, 6, 6), dtype=complex)
     projections = np.empty((nq, 6), dtype=complex)
+    co_max = np.empty(nq, dtype=float)
+    lc_max = np.empty(nq, dtype=float)
+    co_lc_cross = np.empty(nq, dtype=float)
     labels = []
     weights = []
+    co_idx = np.asarray([0, 1, 3, 4], dtype=int)  # Ax,Ay,Bx,By
+    lc_idx = np.asarray([2, 5], dtype=int)        # Az,Bz
     for i in range(nq):
         eigvals[i], eigvecs[i] = _hermitian_eigensystem(chi_h[i])
         projections[i] = _project_mode(eigvecs[i, :, 0])
@@ -280,13 +285,29 @@ def main():
         labels.append(label)
         weights.append(weight)
 
+        co_block = chi_h[i][np.ix_(co_idx, co_idx)]
+        lc_block = chi_h[i][np.ix_(lc_idx, lc_idx)]
+        co_max[i] = np.max(np.linalg.eigvalsh(
+            0.5 * (co_block + co_block.conj().T)
+        )).real
+        lc_max[i] = np.max(np.linalg.eigvalsh(
+            0.5 * (lc_block + lc_block.conj().T)
+        )).real
+        co_lc_cross[i] = np.max(
+            np.abs(chi_h[i][np.ix_(co_idx, lc_idx)]),
+            initial=0.0,
+        )
+
     order = np.argsort(eigvals[:, 0])[::-1]
     print("\n=== leading physical modes ===", flush=True)
     for rank, pos in enumerate(order, 1):
+        winner = "CO" if co_max[pos] > lc_max[pos] else "LC"
         print(
             f"{rank:2d}: q={q_reduced_from_index(q_points[pos], grid)}, "
             f"chi_max={eigvals[pos,0]:+.10e}, "
-            f"mode={labels[pos]}, weight={weights[pos]:.4f}",
+            f"mode={labels[pos]}, weight={weights[pos]:.4f}; "
+            f"CO={co_max[pos]:+.10e}, LC={lc_max[pos]:+.10e}, "
+            f"larger={winner}, cross={co_lc_cross[pos]:.2e}",
             flush=True,
         )
 
@@ -315,6 +336,9 @@ def main():
         leading_projection=projections,
         leading_mode_label=np.asarray(labels),
         leading_mode_weight=np.asarray(weights),
+        chi_co_max=co_max,
+        chi_lc_max=lc_max,
+        chi_co_lc_cross_max=co_lc_cross,
         iterations=iterations,
         response_residuals=residuals,
         bath_tangent_rank=np.asarray(
