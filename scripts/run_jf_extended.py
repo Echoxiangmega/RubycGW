@@ -21,7 +21,7 @@ from rubycgw.cluster_orientation import gauge_transform_lattice, orientation_b_s
 from rubycgw.models.ruby import (
     ExtendedRubyParameters,
     build_extended_interaction,
-    v_only_cluster_interactions,
+    physical_pair_cluster_interactions,
 )
 from rubycgw.model import build_h0 as build_base_h0
 from vprime_study.patches import install_cluster_interaction_hooks
@@ -66,10 +66,12 @@ def _append_metadata(path: Path, vp: float, vx: float, orientation: int) -> None
     payload["Vcross"] = np.asarray(float(vx))
     payload["Vx"] = np.asarray(float(vx))
     payload["interaction_model"] = np.asarray(
-        "lattice_full_V_Vprime_Vcross__cluster_ED_V_only"
+        "lattice_full_V_Vprime_Vcross__cluster_ED_physical_pair"
     )
-    payload["cluster_projection"] = np.asarray("V_only_intra_triangle")
-    payload["embedding_scheme"] = np.asarray("ED(V)+GW(V,Vprime,Vcross)")
+    payload["cluster_projection"] = np.asarray("physical_pair_no_intercell_collapse")
+    payload["embedding_scheme"] = np.asarray(
+        "ED(V+one_real_pair_Vprime_Vcross)+GW(full_lattice)"
+    )
     payload["cluster_orientation"] = np.asarray(int(orientation))
     np.savez_compressed(path, **payload)
 
@@ -77,9 +79,9 @@ def _append_metadata(path: Path, vp: float, vx: float, orientation: int) -> None
 def main() -> None:
     args = _driver._args()
     vp, vx, orientation, projection = _load_background_metadata(Path(args.input))
-    if projection != "V_only_intra_triangle":
+    if projection != "physical_pair_no_intercell_collapse":
         raise ValueError(
-            "input checkpoint is not from the ED(V)+GW(V,Vprime,Vcross) partition: "
+            "input checkpoint is not from the physical-pair ED+GW partition: "
             f"cluster_projection={projection!r}. Recompute the background with the current main branch."
         )
 
@@ -93,7 +95,9 @@ def main() -> None:
             Vcross=float(vx),
         )
 
-    install_cluster_interaction_hooks(v_only_cluster_interactions)
+    install_cluster_interaction_hooks(
+        lambda p: physical_pair_cluster_interactions(p, int(orientation))
+    )
 
     shift = orientation_b_shift(orientation)
 
@@ -134,7 +138,7 @@ def main() -> None:
     _append_metadata(out, vp, vx, orientation)
     print(
         f"extended JF metadata: Vprime={vp:g}, Vcross={vx:g}, orientation={orientation}, "
-        "cluster=V-only",
+        "cluster=physical-pair",
         flush=True,
     )
 
