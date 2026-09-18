@@ -18,11 +18,11 @@ from rubycgw.models.ruby import (
 
 def test_fermion_time_reversal_projection():
     rng = np.random.default_rng(123)
-    x = rng.normal(size=(6, 2, 2, 6, 6)) + 1j * rng.normal(
-        size=(6, 2, 2, 6, 6)
+    x = rng.normal(size=(6, 3, 3, 6, 6)) + 1j * rng.normal(
+        size=(6, 3, 3, 6, 6)
     )
     y = project_fermion_time_reversal(x)
-    neg = np.asarray([0, 1], dtype=int)
+    neg = np.asarray([0, 2, 1], dtype=int)
     partner = np.conj(y[::-1][:, neg][:, :, neg])
     assert np.max(np.abs(y - partner)) < 1e-12
 
