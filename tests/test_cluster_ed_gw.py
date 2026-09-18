@@ -6,6 +6,7 @@ from rubycgw.cluster_ed_gw import (
     bath_hybridization,
     build_intracell_h0,
     cluster_gw_self_energy,
+    cluster_interaction_matrix,
     fit_finite_bath,
     ruby_cluster_interactions,
     solve_cluster_ed_gw,
@@ -14,6 +15,7 @@ from rubycgw.grids import MatsubaraGrid
 from rubycgw.gw import GWOptions
 from rubycgw.impurity_ed import FiniteBathImpurityED
 from rubycgw.model import RubyParameters, build_h0, build_interaction
+from rubycgw.models import ExtendedRubyParameters, build_extended_interaction
 
 
 def test_ruby_six_site_cluster_contains_all_interactions():
@@ -24,6 +26,27 @@ def test_ruby_six_site_cluster_contains_all_interactions():
         (0, 1), (0, 2), (1, 2), (3, 4), (3, 5), (4, 5)
     }
     assert all(abs(u - 1.7) < 1e-14 for _, _, u in terms)
+
+
+def test_extended_lattice_interactions_do_not_enter_ed_cluster_partition():
+    p = ExtendedRubyParameters(V=1.8, Vprime=-0.10, Vcross=-0.07)
+    terms = ruby_cluster_interactions(p)
+    Vc = cluster_interaction_matrix(terms)
+
+    # ED + cluster-GW double counting contain only the six intra-triangle V bonds.
+    assert len(terms) == 6
+    assert np.max(np.abs(Vc[:3, 3:])) < 1e-14
+    assert np.allclose(Vc[0, 1], 1.8)
+    assert np.allclose(Vc[0, 2], 1.8)
+    assert np.allclose(Vc[1, 2], 1.8)
+    assert np.allclose(Vc[3, 4], 1.8)
+    assert np.allclose(Vc[3, 5], 1.8)
+    assert np.allclose(Vc[4, 5], 1.8)
+
+    # The lattice interaction still contains Vprime/Vcross.
+    Vq = build_extended_interaction(np.zeros((1, 2)), p)[0]
+    assert np.max(np.abs(Vq[:3, 3:])) > 1e-6
+    assert np.max(np.abs(Vq - Vc)) > 1e-6
 
 
 def test_finite_torus_local_block_is_k_average_not_strict_r0():
