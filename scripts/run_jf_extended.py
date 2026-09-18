@@ -9,14 +9,21 @@ the lattice V(q) builder with the canonical extended model implementation.
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import numpy as np
 
+from rubycgw.cluster_orientation import gauge_transform_lattice, orientation_b_shift
 from rubycgw.models.ruby import (
     ExtendedRubyParameters,
     build_extended_interaction,
-    extended_cluster_interactions,
+    v_only_cluster_interactions,
 )
+from rubycgw.model import build_h0 as build_base_h0
 from vprime_study.patches import install_cluster_interaction_hooks
 
 # When this file is executed as ``python scripts/run_jf_extended.py``, the
@@ -25,7 +32,7 @@ from vprime_study.patches import install_cluster_interaction_hooks
 import run_jf as _driver  # noqa: E402
 
 
-def _load_interactions(path: Path) -> tuple[float, float]:
+def _load_background_metadata(path: Path) -> tuple[float, float, int, str]:
     with np.load(path, allow_pickle=False) as z:
         if "Vprime" in z:
             vp = float(np.asarray(z["Vprime"]).reshape(()))
@@ -39,14 +46,19 @@ def _load_interactions(path: Path) -> tuple[float, float]:
             vx = float(np.asarray(z["Vx"]).reshape(()))
         else:
             vx = 0.0
-    return vp, vx
+        orientation = int(np.asarray(z["cluster_orientation"]).reshape(())) if "cluster_orientation" in z else 0
+        projection = (
+            str(np.asarray(z["cluster_projection"]).reshape(()))
+            if "cluster_projection" in z else "legacy_unknown"
+        )
+    return vp, vx, orientation, projection
 
 
 def _tag(x: float) -> str:
     return f"{float(x):g}"
 
 
-def _append_metadata(path: Path, vp: float, vx: float) -> None:
+def _append_metadata(path: Path, vp: float, vx: float, orientation: int) -> None:
     with np.load(path, allow_pickle=False) as z:
         payload = {k: np.asarray(z[k]) for k in z.files}
     payload["Vprime"] = np.asarray(float(vp))
@@ -54,17 +66,22 @@ def _append_metadata(path: Path, vp: float, vx: float) -> None:
     payload["Vcross"] = np.asarray(float(vx))
     payload["Vx"] = np.asarray(float(vx))
     payload["interaction_model"] = np.asarray(
-        "V_intra_plus_Vprime_straight_plus_Vcross_diagonal"
+        "lattice_full_V_Vprime_Vcross__cluster_ED_V_only"
     )
-    payload["cluster_projection"] = np.asarray(
-        "q0_primitive_cell_projection_sum_repeated_cross_pairs"
-    )
+    payload["cluster_projection"] = np.asarray("V_only_intra_triangle")
+    payload["embedding_scheme"] = np.asarray("ED(V)+GW(V,Vprime,Vcross)")
+    payload["cluster_orientation"] = np.asarray(int(orientation))
     np.savez_compressed(path, **payload)
 
 
 def main() -> None:
     args = _driver._args()
-    vp, vx = _load_interactions(Path(args.input))
+    vp, vx, orientation, projection = _load_background_metadata(Path(args.input))
+    if projection != "V_only_intra_triangle":
+        raise ValueError(
+            "input checkpoint is not from the ED(V)+GW(V,Vprime,Vcross) partition: "
+            f"cluster_projection={projection!r}. Recompute the background with the current main branch."
+        )
 
     def _params_factory(*, ti=0.4, t1=0.2, t2=0.2, V=0.2, **_ignored):
         return ExtendedRubyParameters(
@@ -76,7 +93,15 @@ def main() -> None:
             Vcross=float(vx),
         )
 
-    install_cluster_interaction_hooks(extended_cluster_interactions)
+    install_cluster_interaction_hooks(v_only_cluster_interactions)
+
+    shift = orientation_b_shift(orientation)
+
+    def _build_h0_oriented(kpts, params):
+        return gauge_transform_lattice(build_base_h0(kpts, params), shift)
+
+    def _build_interaction_oriented(qpts, params):
+        return gauge_transform_lattice(build_extended_interaction(qpts, params), shift)
 
     if Path(args.out) == Path("cluster_ed_gw_jf_q.npz"):
         args.out = Path("results/jf_response") / (
@@ -85,26 +110,33 @@ def main() -> None:
 
     original_args = _driver._args
     original_params = _driver.RubyParameters
+    original_build_h0 = _driver.build_h0
     original_build_interaction = _driver.build_interaction
     _driver._args = lambda: args
     _driver.RubyParameters = _params_factory
-    _driver.build_interaction = build_extended_interaction
+    _driver.build_h0 = _build_h0_oriented
+    _driver.build_interaction = _build_interaction_oriented
     try:
         try:
             _driver.main()
         except BaseException:
             partial = _driver._partial_path(Path(args.out))
             if partial.exists():
-                _append_metadata(partial, vp, vx)
+                _append_metadata(partial, vp, vx, orientation)
             raise
     finally:
         _driver._args = original_args
         _driver.RubyParameters = original_params
+        _driver.build_h0 = original_build_h0
         _driver.build_interaction = original_build_interaction
 
     out = _driver._normalise_out(Path(args.out))
-    _append_metadata(out, vp, vx)
-    print(f"extended JF metadata: Vprime={vp:g}, Vcross={vx:g}", flush=True)
+    _append_metadata(out, vp, vx, orientation)
+    print(
+        f"extended JF metadata: Vprime={vp:g}, Vcross={vx:g}, orientation={orientation}, "
+        "cluster=V-only",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
