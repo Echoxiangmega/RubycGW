@@ -176,6 +176,66 @@ def _dynamic_lattice(operator, Gamma: np.ndarray, p) -> np.ndarray:
     return np.asarray(parts[2] + parts[3] + parts[4], dtype=complex)
 
 
+
+def homogeneous_linear_kernel(operator, field, q_index):
+    """Source-free linear kernel L for stability/eigenmode analysis.
+
+    This is exactly the Gamma-dependent part of the tail/source-consistent
+    response equation used by the consistent solver,
+
+        (I-L) Gamma = K_eff,
+
+    with all affine source terms removed. Therefore an instability is
+    diagnosed by an eigenvalue of L approaching +1.
+    """
+    p = normalize_q_index(q_index, operator.grid)
+    gamma = np.asarray(field, dtype=complex)
+    if gamma.shape != operator.G.shape:
+        raise ValueError("homogeneous JF field shape mismatch")
+
+    zero_source = np.zeros((NSUB, NSUB), dtype=complex)
+    ctx = _tail_context(operator, zero_source, p)
+    X = operator._x_field(gamma, p)
+
+    zero_X = np.zeros_like(operator.G)
+    static_zero, _ = _static_net_field(operator, zero_X, ctx)
+    static_total, _ = _static_net_field(operator, X, ctx)
+    static_linear = static_total - static_zero
+
+    lat_dyn = _dynamic_lattice(operator, gamma, p)
+
+    delta_gc = np.mean(X, axis=(1, 2))
+    zero_gc = np.zeros_like(operator.Gc)
+    zero_direct = np.zeros_like(operator.Gc)
+    imp_zero = _impurity_vertex(
+        operator, zero_gc, zero_source, zero_direct
+    )
+    imp_total = _impurity_vertex(
+        operator, delta_gc, zero_source, zero_direct
+    )
+    imp_linear = imp_total - imp_zero
+    c_dyn = _cluster_dynamic_tangent(operator, delta_gc)
+
+    return (
+        static_linear
+        + lat_dyn
+        + (imp_linear - c_dyn)[:, None, None, :, :]
+    )
+
+
+def homogeneous_kernel_operator(operator, q_index):
+    """Return the packed-real LinearOperator representing the JF kernel L."""
+    p = normalize_q_index(q_index, operator.grid)
+    shape = operator.G.shape
+    n = 2 * int(np.prod(shape))
+
+    def matvec(x):
+        gamma = jf._unpack_complex(x, shape)
+        out = homogeneous_linear_kernel(operator, gamma, p)
+        return jf._pack_complex(out)
+
+    return LinearOperator((n, n), matvec=matvec, dtype=float)
+
 def _solve_consistent(operator, K, q_index, *, initial_gamma=None, recycle=None):
     p = normalize_q_index(q_index, operator.grid)
     K = np.asarray(K, dtype=complex)
@@ -446,4 +506,8 @@ def install_tail_consistent_cluster_jf() -> None:
     jf._tail_consistent_cluster_jf_installed = True
 
 
-__all__ = ["install_tail_consistent_cluster_jf"]
+__all__ = [
+    "install_tail_consistent_cluster_jf",
+    "homogeneous_linear_kernel",
+    "homogeneous_kernel_operator",
+]
