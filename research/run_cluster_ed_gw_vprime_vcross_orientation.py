@@ -94,6 +94,12 @@ def _args():
     p.add_argument("--nbath", type=int, default=6)
     p.add_argument("--bath-fit-nfreq", type=int, default=12)
     p.add_argument("--bath-fit-max-nfev", type=int, default=300)
+    p.add_argument(
+        "--bath-fit-metric",
+        choices=("delta", "g0"),
+        default="delta",
+        help="fit bath hybridization Delta or the low-frequency Weiss Green function G0",
+    )
     p.add_argument("--bath-energy-window", type=float, default=4.0)
     p.add_argument("--bath-coupling-bound", type=float, default=4.0)
     p.add_argument(
@@ -180,6 +186,8 @@ def main():
         V=float(args.V), Vprime=float(args.Vprime), Vcross=float(args.Vcross),
     )
     if bool(args.complex_bath):
+        if str(args.bath_fit_metric) != "delta":
+            raise ValueError("--complex-bath currently supports only --bath-fit-metric delta")
         _fast_solver.fit_finite_bath = fit_finite_bath_complex
 
     # Treat exactly one real A-B neighbour pair in the six-site impurity.
@@ -211,6 +219,7 @@ def main():
         impurity_mixing=float(args.impurity_mixing),
         nbath=int(args.nbath), bath_fit_nfreq=int(args.bath_fit_nfreq),
         bath_fit_max_nfev=int(args.bath_fit_max_nfev),
+        bath_fit_metric=str(args.bath_fit_metric),
         bath_energy_window=float(args.bath_energy_window),
         bath_coupling_bound=float(args.bath_coupling_bound),
         discard_weight_tol=float(args.discard_weight_tol),
@@ -226,7 +235,8 @@ def main():
         f"L={args.Lx}x{args.Ly}, V={args.V:g}, V'={args.Vprime:g}, "
         f"Vx={args.Vcross:g}, filling={args.filling:g}, T={args.T:g}\n"
         f"ED physical intercell pair terms={pair_intercell}\n"
-        f"bath couplings={'complex' if args.complex_bath else 'real'}",
+        f"bath couplings={'complex' if args.complex_bath else 'real'}, "
+        f"metric={args.bath_fit_metric}",
         flush=True,
     )
     if np.isclose(float(args.t1), float(args.t2), rtol=0.0, atol=1e-14) and args.V != 0.0:
@@ -337,6 +347,7 @@ def main():
         final_error=float(result.final_error),
         impurity_mismatch=float(result.impurity_mismatch),
         bath_fit_error=float(result.bath_fit_error),
+        bath_fit_metric=np.asarray(str(args.bath_fit_metric)),
         mixing_method=str(result.mixing_method),
         pulay_fallbacks=int(result.pulay_fallbacks),
         residual_history=np.asarray(result.residual_history),
