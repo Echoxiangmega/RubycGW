@@ -1,16 +1,18 @@
 """Self-consistent 6-site Ruby cluster ED + lattice GW self-energy embedding.
 
-All density interactions of the microscopic Ruby model are primitive-cell local.
-This makes a six-site primitive cell a complete interacting cluster: inter-cell
-couplings are hopping only.  The approximation implemented here is
+The production interaction partition treats the strong intra-triangle V
+nonperturbatively in a six-site impurity, while any additional nonlocal
+Vprime/Vcross terms remain in the lattice GW interaction V(q).  The
+approximation implemented here is
 
     Sigma_emb(k,iw) = Sigma_GW^lattice(k,iw)
                     - Sigma_GW^cluster(iw)
                     + Sigma_ED^cluster(iw),
 
-where ``Sigma_GW^cluster`` is the same weak-coupling skeleton evaluated with the
-projected cluster Green function, and ``Sigma_ED^cluster`` is obtained from a
-finite-bath Anderson impurity solved by exact diagonalization.
+where ``Sigma_GW^cluster`` is the weak-coupling skeleton evaluated with the
+projected cluster Green function and exactly the same interaction subset as the
+ED impurity.  Thus, for the extended Ruby model the production scheme is
+ED(V)+GW(V,Vprime,Vcross), with a V-only cluster double-counting subtraction.
 
 The impurity Weiss field is updated from the lattice projection,
 
