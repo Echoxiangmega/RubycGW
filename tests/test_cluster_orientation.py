@@ -10,7 +10,9 @@ from rubycgw.cluster_orientation import (
     transform_between_orientations,
 )
 from rubycgw.grids import MatsubaraGrid
+from rubycgw.cluster_ed_gw import cluster_interaction_matrix
 from rubycgw.model import build_h0
+from rubycgw.models.ruby import physical_pair_cluster_interactions
 from vprime_study.cross_model import (
     VPrimeCrossParameters,
     build_vprime_vcross_interaction,
@@ -65,6 +67,27 @@ def test_three_orientations_internalize_three_expected_ab_pairs():
         hr, _ = build_oriented_lattice_fields(h0, Vq, r)
         hc = intracell_block(hr)
         _assert_only_pairs(hc, expected[r])
+
+
+def test_physical_pair_cluster_equals_oriented_q_average_without_collapse():
+    grid = MatsubaraGrid(nk1=6, nk2=6, nw=2, nOmega=1, T=0.1)
+    params = VPrimeCrossParameters(
+        ti=0.4, t1=0.2, t2=0.2, V=1.8, Vprime=-0.1, Vcross=-0.07
+    )
+    h0 = build_h0(grid.kmesh(), params)
+    Vq = build_vprime_vcross_interaction(grid.qmesh(), params)
+    for r in (0, 1, 2):
+        _, vr = build_oriented_lattice_fields(h0, Vq, r)
+        local_exact = np.mean(vr, axis=(0, 1))
+        local_pair = cluster_interaction_matrix(
+            physical_pair_cluster_interactions(params, r)
+        )
+        assert np.max(np.abs(local_pair - local_exact)) < 1e-12
+
+        # Every selected crossed bond keeps the bare Vcross; no 2*Vcross fold.
+        terms = physical_pair_cluster_interactions(params, r)
+        cross = [u for i, j, u in terms if i < 3 <= j and abs(u - params.Vcross) < 1e-14]
+        assert len(cross) == 2
 
 
 def test_orientation_change_is_unitary_at_each_k_and_q0_interaction_unchanged():
