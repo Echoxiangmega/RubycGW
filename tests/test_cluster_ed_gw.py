@@ -140,6 +140,29 @@ def test_bath_fit_recovers_exact_seed_hybridization():
     assert np.linalg.norm(reproduced - target) / np.linalg.norm(target) < 1e-9
 
 
+def test_g0_bath_metric_recovers_exact_seed_weiss_function():
+    T = 0.11
+    omega = (2 * np.arange(-6, 6) + 1) * np.pi * T
+    mu = 0.2
+    eps = np.array([-0.7, 0.9])
+    bath_hyb = np.array([[0.45, 0.12], [-0.18, 0.38]])
+    target = bath_hybridization(omega, mu, eps, bath_hyb)
+    h = np.array([[0.1, 0.2], [0.2, -0.15]], dtype=float)
+    seed = BathParameters(eps.copy(), bath_hyb.copy(), 0.0, 0)
+    fit = fit_finite_bath(
+        target,
+        omega,
+        mu,
+        nbath=2,
+        nfit=5,
+        max_nfev=30,
+        initial=seed,
+        metric="g0",
+        one_body=h,
+    )
+    assert fit.fit_error < 1e-10
+
+
 def test_cluster_gw_double_counting_vanishes_at_zero_interaction():
     grid = MatsubaraGrid(nk1=1, nk2=1, nw=4, nOmega=2, T=0.12)
     h = build_intracell_h0(RubyParameters(V=0.0))
