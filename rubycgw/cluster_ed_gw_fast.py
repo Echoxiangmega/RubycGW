@@ -5,12 +5,15 @@ its coupled fixed point.  The lattice embedded self-energy and the impurity
 self-energy are mixed together, rather than damping the impurity map first and
 then damping the lattice map a second time.
 
-The dynamic state is
+The dynamic state is expressed in nonredundant weak/local pieces,
 
-    X_dyn = (Sigma_emb(k,iw), sqrt(Nk) Sigma_imp(iw)),
+    Sigma_weak(k,iw) = Sigma_emb(k,iw) - Sigma_imp(iw),
+    X_dyn = (Sigma_weak(k,iw), sqrt(Nk) Sigma_imp(iw)).
 
-where the sqrt(Nk) factor gives the local impurity block comparable weight in
-Pulay's residual metric when the lattice contains Nk cluster momenta.
+Since Sigma_emb = Sigma_GW^lat - Sigma_GW^cluster + Sigma_imp, mixing Sigma_emb
+and Sigma_imp directly duplicates the local impurity component in the Pulay
+metric and becomes badly conditioned near soft density modes.  The weak/local
+split removes that exact algebraic redundancy.
 """
 from __future__ import annotations
 
@@ -123,11 +126,16 @@ def _pack_dynamic(
     sigma_imp: np.ndarray,
     nk: int,
 ) -> np.ndarray:
-    """Pack lattice and impurity dynamic self-energies for one Pulay metric."""
+    """Pack nonredundant weak-lattice and impurity dynamic self-energies."""
+    emb = np.asarray(sigma_emb, dtype=complex)
+    imp = np.asarray(sigma_imp, dtype=complex)
+    if emb.ndim != 5 or imp.ndim != 3:
+        raise ValueError("dynamic self-energy shapes must be lattice 5D and impurity 3D")
+    weak = emb - imp[:, None, None, :, :]
     scale = np.sqrt(float(max(int(nk), 1)))
     return np.concatenate([
-        np.asarray(sigma_emb, dtype=complex).ravel(),
-        scale * np.asarray(sigma_imp, dtype=complex).ravel(),
+        weak.ravel(),
+        scale * imp.ravel(),
     ])
 
 
@@ -140,8 +148,9 @@ def _unpack_dynamic(
     nemb = int(np.prod(sigma_emb_shape))
     scale = np.sqrt(float(max(int(nk), 1)))
     flat = np.asarray(packed, dtype=complex).reshape(-1)
-    emb = flat[:nemb].reshape(sigma_emb_shape)
+    weak = flat[:nemb].reshape(sigma_emb_shape)
     imp = (flat[nemb:] / scale).reshape(sigma_imp_shape)
+    emb = weak + imp[:, None, None, :, :]
     return emb, imp
 
 
