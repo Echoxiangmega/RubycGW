@@ -70,6 +70,7 @@ class ClusterEDGWOptions:
     bath_energy_window: float = 4.0
     bath_coupling_bound: float = 4.0
     bath_fit_xtol: float = 1.0e-9
+    bath_fit_metric: str = "delta"  # "delta" or "g0"
     discard_weight_tol: float = 1.0e-11
     verbose: bool = True
 
@@ -214,14 +215,33 @@ def fit_finite_bath(
     coupling_bound: float = 4.0,
     xtol: float = 1.0e-9,
     initial: BathParameters | None = None,
+    metric: str = "delta",
+    one_body: np.ndarray | None = None,
 ) -> BathParameters:
-    """Least-squares fit of a full-matrix hybridization to a finite real bath."""
+    """Fit a finite real bath using Delta or Weiss-Green-function distance.
+
+    metric="delta" reproduces the historical hybridization fit.
+    metric="g0" minimizes the difference between the target and bath Weiss
+    Green functions and is therefore much more sensitive to low-frequency
+    errors near a soft correlated fixed point.
+    """
     delta = np.asarray(target_delta, dtype=complex)
     w = np.asarray(omega, dtype=float).reshape(-1)
     if delta.ndim != 3 or delta.shape[0] != len(w) or delta.shape[1] != delta.shape[2]:
         raise ValueError("target_delta must have shape (nf,norb,norb)")
     norb = int(delta.shape[-1])
     nbath = int(nbath)
+    metric = str(metric).lower()
+    if metric not in ("delta", "g0"):
+        raise ValueError("bath fit metric must be 'delta' or 'g0'")
+    if metric == "g0":
+        if one_body is None:
+            raise ValueError("metric='g0' requires one_body")
+        hfit = np.asarray(one_body, dtype=complex)
+        if hfit.shape != (norb, norb):
+            raise ValueError("one_body shape mismatch for g0 bath fit")
+    else:
+        hfit = None
     if nbath < 1:
         raise ValueError("nbath must be positive")
 
@@ -266,10 +286,26 @@ def fit_finite_bath(
     def unpack(x):
         return x[:nbath], x[nbath:].reshape(norb, nbath)
 
+    eye = np.eye(norb, dtype=complex)
+    if metric == "g0":
+        target_g0 = np.linalg.inv(
+            (1j * wfit[:, None, None] + float(mu)) * eye[None, :, :]
+            - hfit[None, :, :]
+            - dfit
+        )
+
     def residual(x):
         eps, bath_hyb = unpack(x)
         model = bath_hybridization(wfit, mu, eps, bath_hyb)
-        diff = (model - dfit) * weights[:, None, None]
+        if metric == "g0":
+            model_g0 = np.linalg.inv(
+                (1j * wfit[:, None, None] + float(mu)) * eye[None, :, :]
+                - hfit[None, :, :]
+                - model
+            )
+            diff = (model_g0 - target_g0) * weights[:, None, None]
+        else:
+            diff = (model - dfit) * weights[:, None, None]
         return np.concatenate([diff.real.ravel(), diff.imag.ravel()])
 
     opt = least_squares(
@@ -286,8 +322,17 @@ def fit_finite_bath(
     eps = np.asarray(eps[order], dtype=float)
     bath_hyb = np.asarray(bath_hyb[:, order], dtype=float)
     fit = bath_hybridization(wfit, mu, eps, bath_hyb)
-    den = max(float(np.linalg.norm(dfit.ravel())), 1e-300)
-    err = float(np.linalg.norm((fit - dfit).ravel()) / den)
+    if metric == "g0":
+        fit_g0 = np.linalg.inv(
+            (1j * wfit[:, None, None] + float(mu)) * eye[None, :, :]
+            - hfit[None, :, :]
+            - fit
+        )
+        den = max(float(np.linalg.norm(target_g0.ravel())), 1e-300)
+        err = float(np.linalg.norm((fit_g0 - target_g0).ravel()) / den)
+    else:
+        den = max(float(np.linalg.norm(dfit.ravel())), 1e-300)
+        err = float(np.linalg.norm((fit - dfit).ravel()) / den)
     return BathParameters(eps, bath_hyb, err, int(opt.nfev))
 
 
@@ -513,6 +558,8 @@ def solve_cluster_ed_gw(
             coupling_bound=float(embed_opts.bath_coupling_bound),
             xtol=float(embed_opts.bath_fit_xtol),
             initial=bath,
+            metric=str(embed_opts.bath_fit_metric),
+            one_body=h_impurity,
         )
         if embed_opts.verbose:
             print(
