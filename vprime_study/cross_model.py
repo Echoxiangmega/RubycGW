@@ -17,6 +17,7 @@ from rubycgw.models.ruby import (
     extended_cluster_interactions,
     extended_cluster_matrix,
     extended_interaction_bonds,
+    physical_pair_cluster_interactions,
     reference_pair_effective_couplings,
 )
 
@@ -25,6 +26,7 @@ vprime_vcross_interaction_bonds = extended_interaction_bonds
 build_vprime_vcross_interaction = build_extended_interaction
 vprime_vcross_cluster_interactions = extended_cluster_interactions
 vprime_vcross_cluster_matrix = extended_cluster_matrix
+vprime_vcross_physical_pair_interactions = physical_pair_cluster_interactions
 
 __all__ = [
     "VPrimeCrossParameters",
@@ -37,5 +39,6 @@ __all__ = [
     "build_vprime_vcross_interaction",
     "vprime_vcross_cluster_interactions",
     "vprime_vcross_cluster_matrix",
+    "vprime_vcross_physical_pair_interactions",
     "reference_pair_effective_couplings",
 ]
