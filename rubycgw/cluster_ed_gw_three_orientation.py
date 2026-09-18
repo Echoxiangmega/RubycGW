@@ -191,7 +191,6 @@ def solve_three_orientation_ed_gw(
             h0, sigma_h, sigma_emb, grid, float(gw_opts.target_filling),
             mu, float(gw_opts.mu_tol), int(gw_opts.mu_max_iter)
         )
-    G = _project_common_dynamic(G)
 
     oriented = [build_oriented_lattice_fields(h0, Vq, r) for r in range(3)]
     h_clusters = []
@@ -446,7 +445,6 @@ def solve_three_orientation_ed_gw(
             )
             # Keep the common lattice state exactly in the C3-symmetric subspace.
             sigma_emb = _project_common_dynamic(sigma_emb)
-            density_h = project_density_c3(np.real(np.diag(sigma_h)))
             # sigma_h is diagonal for density interactions; averaging the three
             # diagonal entries within each triangle is the C3 projection.
             sigma_h = np.diag(
@@ -461,9 +459,9 @@ def solve_three_orientation_ed_gw(
                 h0, sigma_h, sigma_emb, grid, float(gw_opts.target_filling),
                 mu, float(gw_opts.mu_tol), int(gw_opts.mu_max_iter)
             )
-        # Dyson of a C3-projected self-energy should already be C3 symmetric;
-        # projection removes only floating-point drift.
-        G = _project_common_dynamic(G)
+        # Do not project G independently: with C3-projected self-energies the
+        # Dyson result is already covariant up to roundoff, and keeping it
+        # untouched preserves the exact Dyson identity.
         if converged:
             break
 
