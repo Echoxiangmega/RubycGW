@@ -107,3 +107,23 @@ neighbour pair (two Vprime and two Vcross bonds).  This avoids collapsing
 different intercell neighbours onto the same impurity orbital pair.  A static
 high-frequency Weiss contribution is separated from the finite-bath dynamic
 hybridization so the bath is not asked to fit a nondecaying constant term.
+
+
+### Limited-memory Broyden outer mixer
+
+The accelerated cluster embedding supports `mixing_method="broyden"` in
+addition to linear and Pulay mixing.  Broyden is applied only to the cluster
+outer fixed point; the standalone SC-GW background solver is unchanged.
+
+The real-linear state uses the nonredundant decomposition
+
+```text
+Sigma_weak = Sigma_emb - Sigma_imp(local)
+X = (Sigma_H, Sigma_weak, Sigma_imp)
+```
+
+with block balancing before packing.  The chemical potential is not part of the
+Broyden vector: for fixed filling it is solved from the density constraint after
+each accepted self-energy update.  The mixer stores only a limited number of
+secant pairs and applies a regularized multisecant inverse-Jacobian action.
+Unsafe oversized steps fall back to the ordinary damped fixed-point step.
