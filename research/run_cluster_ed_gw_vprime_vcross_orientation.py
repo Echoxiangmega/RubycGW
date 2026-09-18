@@ -37,7 +37,8 @@ from rubycgw.cluster_ed_gw_fast import ClusterEDGWFastOptions, solve_cluster_ed_
 from rubycgw.cluster_orientation import (
     build_oriented_lattice_fields,
     orientation_b_shift,
-    transform_between_orientations,
+    rotate_local_between_orientations,
+    rotate_solution_between_orientations,
 )
 from rubycgw.cluster_restart import ClusterEDGWRestartState, load_cluster_ed_gw_restart
 from rubycgw.cluster_restart_solver import (
@@ -120,9 +121,9 @@ def _args():
         default=None,
         help=(
             "seed from an existing V'+Vx checkpoint.  If its saved cluster "
-            "orientation differs from the requested one, only the gauge-"
-            "transformed lattice G/Sigma state is reused and the impurity/bath "
-            "is rebuilt for the new cluster cut"
+            "orientation differs from the requested one, the C3-related "
+            "lattice G/Sigma/Hartree state is used as the warm start while "
+            "the impurity/bath is rebuilt for the new cluster cut"
         ),
     )
     p.add_argument(
@@ -161,16 +162,30 @@ def _lattice_reseed_for_orientation(
     source_orientation: int,
     target_orientation: int,
 ) -> ClusterEDGWRestartState:
-    """Transform lattice fields to a new gauge; impurity data are seed-only."""
-    G = transform_between_orientations(
+    """Map a saved branch to its C3-related partner in the target cluster frame.
+
+    A pure unit-cell gauge change would keep the same symmetry-broken physical
+    state while changing only which B triangle is called intracell.  That is
+    not the desired warm start when comparing the three C3-related cluster
+    orientations: the target should instead receive the actively C3-rotated
+    physical partner, expressed in its own orientation gauge.
+    """
+    G = rotate_solution_between_orientations(
         restart.G, source_orientation, target_orientation
     )
-    Sigma_emb = transform_between_orientations(
+    Sigma_emb = rotate_solution_between_orientations(
         restart.Sigma_emb, source_orientation, target_orientation
+    )
+    Sigma_H = rotate_local_between_orientations(
+        restart.Sigma_H,
+        source_orientation,
+        target_orientation,
+        nk1=restart.G.shape[-4],
+        nk2=restart.G.shape[-3],
     )
     return ClusterEDGWRestartState(
         G=np.asarray(G),
-        Sigma_H=np.array(restart.Sigma_H, copy=True),
+        Sigma_H=np.asarray(Sigma_H),
         Sigma_emb=np.asarray(Sigma_emb),
         Sigma_imp=np.array(restart.Sigma_imp, copy=True),
         mu=float(restart.mu),
@@ -306,10 +321,10 @@ def main():
             )
         else:
             # A different cluster cut has a different impurity Weiss problem.
-            # Reuse only the exactly gauge-related lattice state.  Let the
-            # ordinary solver rebuild sigma_imp and the finite bath from that
-            # lattice seed instead of carrying an incompatible oriented bath.
-            seed_mode = "gauge_transformed_lattice_reseed"
+            # Seed it with the actively C3-related physical partner, expressed
+            # in the target orientation gauge.  The local impurity self-energy
+            # and finite bath are rebuilt rather than copied across cuts.
+            seed_mode = "c3_rotated_lattice_reseed"
             oriented_restart = _lattice_reseed_for_orientation(
                 restart,
                 source_orientation=int(source_orientation),
