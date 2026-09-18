@@ -209,11 +209,14 @@ def main():
     )
 
     shift = orientation_b_shift(int(args.orientation))
+    pair_terms = physical_pair_cluster_interactions(params, int(args.orientation))
+    pair_intercell = [(i, j, u) for i, j, u in pair_terms if (i < 3) != (j < 3)]
     print(
         "=== Ruby V-prime + V-cross orientation-resolved cluster ED+GW ===\n"
         f"orientation={args.orientation}, B-cell shift=({shift[0]},{shift[1]})\n"
         f"L={args.Lx}x{args.Ly}, V={args.V:g}, V'={args.Vprime:g}, "
-        f"Vx={args.Vcross:g}, filling={args.filling:g}, T={args.T:g}",
+        f"Vx={args.Vcross:g}, filling={args.filling:g}, T={args.T:g}\n"
+        f"ED physical intercell pair terms={pair_intercell}",
         flush=True,
     )
     if np.isclose(float(args.t1), float(args.t2), rtol=0.0, atol=1e-14) and args.V != 0.0:
