@@ -43,6 +43,7 @@ from .gw import (
 )
 from .impurity_ed import FiniteBathImpurityED
 from .model import NSUB, RubyParameters
+from .pseudospin import primitive_cell_pseudospin_channels
 from .supercell_gw import (
     compute_polarization_matrix,
     compute_screened_interaction_matrix,
@@ -116,6 +117,15 @@ class ClusterEDGWFastResult:
 def _maxabs(a: np.ndarray) -> float:
     return float(np.max(np.abs(np.asarray(a)), initial=0.0))
 
+
+
+def _channel_projection(mat: np.ndarray, vertex: np.ndarray) -> complex:
+    m = np.asarray(mat, dtype=complex)
+    v = np.asarray(vertex, dtype=complex)
+    den = np.vdot(v, v)
+    if abs(den) < 1e-300:
+        return 0.0j
+    return np.vdot(v, m) / den
 
 def _relative_error(a: np.ndarray, b: np.ndarray) -> float:
     den = max(float(np.linalg.norm(np.asarray(b).ravel())), 1e-300)
@@ -351,6 +361,13 @@ def solve_cluster_ed_gw_fast(
         imp_low = _maxabs(imp_residual[iw_low])
         imp_high = _maxabs(imp_residual[iw_high])
         hi_common = abs(np.trace(imp_residual[iw_high]) / float(NSUB))
+        low_common = abs(np.trace(imp_residual[iw_low]) / float(NSUB))
+        low_mat = np.asarray(imp_residual[iw_low], dtype=complex)
+        ps = primitive_cell_pseudospin_channels()
+        low_proj = {
+            name: abs(_channel_projection(low_mat, ps[name]))
+            for name in ("x_even", "x_odd", "y_even", "y_odd", "z_even", "z_odd")
+        }
         max_idx = np.unravel_index(
             int(np.argmax(np.abs(imp_residual))), imp_residual.shape
         )
@@ -374,8 +391,12 @@ def solve_cluster_ed_gw_fast(
                 f"Ntot_imp={selection.average_particles:.6f}, "
                 f"mu={mu:+.9f}, dt={elapsed:.1f}s\n"
                 f"    imp-res: low={imp_low:.3e}, high={imp_high:.3e}, "
-                f"high-common={hi_common:.3e}, "
-                f"max@iw[{max_iw}]={grid.omega[max_iw]:+.3e},ab=({max_a},{max_b})",
+                f"low-common={low_common:.3e}, high-common={hi_common:.3e}, "
+                f"max@iw[{max_iw}]={grid.omega[max_iw]:+.3e},ab=({max_a},{max_b})\n"
+                f"    low-iw channels: xE={low_proj['x_even']:.3e}, "
+                f"xO={low_proj['x_odd']:.3e}, yE={low_proj['y_even']:.3e}, "
+                f"yO={low_proj['y_odd']:.3e}, zE={low_proj['z_even']:.3e}, "
+                f"zO={low_proj['z_odd']:.3e}",
                 flush=True,
             )
 
