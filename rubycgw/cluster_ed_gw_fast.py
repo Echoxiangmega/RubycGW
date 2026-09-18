@@ -27,6 +27,7 @@ from .cluster_ed_gw import (
     cluster_gw_self_energy,
     cluster_interaction_matrix,
     fit_finite_bath,
+    split_static_hybridization,
     ruby_cluster_interactions,
 )
 from .grids import MatsubaraGrid
@@ -95,6 +96,7 @@ class ClusterEDGWFastResult:
     final_error: float
     impurity_mismatch: float
     bath_fit_error: float
+    impurity_static_shift: np.ndarray
     background: GWResult
     mixing_method: str
     residual_history: np.ndarray
@@ -262,11 +264,15 @@ def solve_cluster_ed_gw_fast(
 
         g0_inv = np.linalg.inv(Gc) + sigma_imp
         eye = np.eye(NSUB, dtype=complex)
-        delta_target = (
+        delta_target_raw = (
             (1j * grid.omega[:, None, None] + float(mu)) * eye[None, :, :]
             - h_cluster[None, :, :]
             - g0_inv
         )
+        static_shift, delta_target = split_static_hybridization(
+            delta_target_raw, grid.omega
+        )
+        h_impurity = h_cluster + static_shift
 
         if embed_opts.verbose:
             print(
@@ -292,7 +298,7 @@ def solve_cluster_ed_gw_fast(
                 flush=True,
             )
 
-        himp = build_impurity_one_body(h_cluster, bath)
+        himp = build_impurity_one_body(h_impurity, bath)
         impurity = FiniteBathImpurityED(
             himp,
             interactions,
@@ -311,7 +317,7 @@ def solve_cluster_ed_gw_fast(
         )
         g0_fit_inv = (
             (1j * grid.omega[:, None, None] + float(mu)) * eye[None, :, :]
-            - h_cluster[None, :, :]
+            - h_impurity[None, :, :]
             - delta_fit
         )
         sigma_ed_raw = g0_fit_inv - np.linalg.inv(Gimp)
@@ -440,6 +446,7 @@ def solve_cluster_ed_gw_fast(
         final_error=float(err),
         impurity_mismatch=float(mismatch),
         bath_fit_error=float(bath.fit_error),
+        impurity_static_shift=np.asarray(static_shift),
         background=background,
         mixing_method=method,
         residual_history=np.asarray(residual_hist, dtype=float),
