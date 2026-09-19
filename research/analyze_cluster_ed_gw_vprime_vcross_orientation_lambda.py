@@ -8,9 +8,10 @@ the response tangent of the *same* physical-pair impurity functional and solves
     L v = lambda v
 
 for the leading real-linear Jacobian modes.  The q=0 problem is split into
-spinless time-reversal even and odd sectors.  The odd sector is the clean LC
-stability diagnostic on a TR-even CO background: lambda_LC > 1 means that CO
-branch is linearly unstable to a loop-current fluctuation.
+spinless time-reversal even and odd sectors.  For static response the special
+condition is lambda=1, because the response contains (I-L)^(-1).  We therefore
+save the signed mass 1-lambda as well as the full retained spectrum; lambda>1
+must not be confused with "more soft" than a mode that lies closer to one.
 """
 from __future__ import annotations
 
@@ -65,7 +66,11 @@ def _args():
         "--all-q", action="store_true",
         help="scan every momentum on the saved nk1 x nk2 mesh; the bath tangent is built only once",
     )
-    p.add_argument("--nev", type=int, default=6, help="eigenmodes retained per sector/full-q solve")
+    p.add_argument("--nev", type=int, default=16, help="eigenmodes retained per sector/full-q solve")
+    p.add_argument(
+        "--no-save-mode-vectors", action="store_true",
+        help="omit normalized retained ARPACK eigenvectors from --out (disables overlap tracking)",
+    )
     p.add_argument("--arpack-tol", type=float, default=2e-6)
     p.add_argument("--arpack-maxiter", type=int, default=350)
     p.add_argument("--ncv", type=int, default=28)
@@ -218,7 +223,9 @@ def _solve_sector(op, q_index, parity, args):
     vecs = vecs[:, order]
     modes = []
     for j, lam in enumerate(vals):
-        field = _physical_field_from_packed(vecs[:, j], op.G.shape)
+        raw_vec = np.asarray(vecs[:, j], dtype=complex)
+        raw_vec = raw_vec / max(float(np.linalg.norm(raw_vec)), 1e-300)
+        field = _physical_field_from_packed(raw_vec, op.G.shape)
         field = _tr_project(field, parity)
         amp, weight = _mode_projection(op, field, q_index)
         modes.append(
@@ -227,6 +234,8 @@ def _solve_sector(op, q_index, parity, args):
                 "weight": weight,
                 "amp": amp,
                 "tr_residual": _tr_residual(field, parity),
+                "sector": f"TR_{parity}",
+                "vector": raw_vec,
             }
         )
     return modes
@@ -275,7 +284,9 @@ def _solve_full_q(op, q_index, args):
     vecs = vecs[:, order]
     modes = []
     for j, lam in enumerate(vals):
-        field = _physical_field_from_packed(vecs[:, j], op.G.shape)
+        raw_vec = np.asarray(vecs[:, j], dtype=complex)
+        raw_vec = raw_vec / max(float(np.linalg.norm(raw_vec)), 1e-300)
+        field = _physical_field_from_packed(raw_vec, op.G.shape)
         amp, weight = _mode_projection(op, field, q_index)
         modes.append(
             {
@@ -283,6 +294,8 @@ def _solve_full_q(op, q_index, args):
                 "weight": weight,
                 "amp": amp,
                 "tr_residual": np.nan,
+                "sector": "full",
+                "vector": raw_vec,
             }
         )
     return modes
@@ -501,6 +514,7 @@ def _fmt_mode(m):
 def main():
     args = _args()
     all_rows = []
+    all_mode_rows = []
 
     for path in args.files:
         if not path.exists():
@@ -550,6 +564,35 @@ def main():
             )
             file_rows.append(row)
             all_rows.append(row)
+            for imode, m in enumerate(modes):
+                w = m["weight"]
+                all_mode_rows.append(
+                    dict(
+                        file=str(path),
+                        orientation=int(ori),
+                        q=tuple(qn),
+                        solve_kind=solve_kind,
+                        sector=str(m["sector"]),
+                        mode_index=int(imode),
+                        lambda_value=complex(m["lambda"]),
+                        mass=complex(1.0 - m["lambda"]),
+                        distance=float(abs(1.0 - m["lambda"])),
+                        modulus=float(abs(m["lambda"])),
+                        tr_residual=float(m["tr_residual"]),
+                        x_even=float(w["x_even"]),
+                        y_even=float(w["y_even"]),
+                        x_odd=float(w["x_odd"]),
+                        y_odd=float(w["y_odd"]),
+                        z_even=float(w["z_even"]),
+                        z_odd=float(w["z_odd"]),
+                        co_even=float(w["CO_even"]),
+                        co_odd=float(w["CO_odd"]),
+                        lc_same=float(w["LC_same"]),
+                        lc_opposite=float(w["LC_opposite"]),
+                        uniform=float(w["uniform"]),
+                        vector=np.asarray(m["vector"], dtype=np.complex64),
+                    )
+                )
 
         best_lc = min(file_rows, key=lambda r: r["distance_lc"])
         best_co = min(file_rows, key=lambda r: r["distance_co"])
@@ -595,6 +638,37 @@ def main():
             lambda_modulus_co=np.asarray([r["modulus_co"] for r in all_rows]),
             all_q=np.asarray(bool(args.all_q)),
             stage=np.asarray(str(args.stage)),
+            full_spectrum_schema=np.asarray(1, dtype=int),
+            mode_source_files=np.asarray([r["file"] for r in all_mode_rows]),
+            mode_orientation=np.asarray([r["orientation"] for r in all_mode_rows], dtype=int),
+            mode_q_index=np.asarray([r["q"] for r in all_mode_rows], dtype=int),
+            mode_solve_kind=np.asarray([r["solve_kind"] for r in all_mode_rows]),
+            mode_sector=np.asarray([r["sector"] for r in all_mode_rows]),
+            mode_index=np.asarray([r["mode_index"] for r in all_mode_rows], dtype=int),
+            mode_lambda=np.asarray([r["lambda_value"] for r in all_mode_rows], dtype=complex),
+            mode_mass=np.asarray([r["mass"] for r in all_mode_rows], dtype=complex),
+            mode_distance_to_one=np.asarray([r["distance"] for r in all_mode_rows], dtype=float),
+            mode_lambda_modulus=np.asarray([r["modulus"] for r in all_mode_rows], dtype=float),
+            mode_tr_residual=np.asarray([r["tr_residual"] for r in all_mode_rows], dtype=float),
+            mode_x_even_weight=np.asarray([r["x_even"] for r in all_mode_rows], dtype=float),
+            mode_y_even_weight=np.asarray([r["y_even"] for r in all_mode_rows], dtype=float),
+            mode_x_odd_weight=np.asarray([r["x_odd"] for r in all_mode_rows], dtype=float),
+            mode_y_odd_weight=np.asarray([r["y_odd"] for r in all_mode_rows], dtype=float),
+            mode_z_even_weight=np.asarray([r["z_even"] for r in all_mode_rows], dtype=float),
+            mode_z_odd_weight=np.asarray([r["z_odd"] for r in all_mode_rows], dtype=float),
+            mode_co_even_weight=np.asarray([r["co_even"] for r in all_mode_rows], dtype=float),
+            mode_co_odd_weight=np.asarray([r["co_odd"] for r in all_mode_rows], dtype=float),
+            mode_lc_same_weight=np.asarray([r["lc_same"] for r in all_mode_rows], dtype=float),
+            mode_lc_opposite_weight=np.asarray([r["lc_opposite"] for r in all_mode_rows], dtype=float),
+            mode_uniform_weight=np.asarray([r["uniform"] for r in all_mode_rows], dtype=float),
+            mode_vectors=(
+                np.stack([r["vector"] for r in all_mode_rows], axis=0)
+                if (all_mode_rows and not bool(args.no_save_mode_vectors))
+                else np.empty((0, 0), dtype=np.complex64)
+            ),
+            mode_vectors_saved=np.asarray(
+                bool(all_mode_rows) and not bool(args.no_save_mode_vectors)
+            ),
         )
         print(f"saved {args.out}", flush=True)
 
