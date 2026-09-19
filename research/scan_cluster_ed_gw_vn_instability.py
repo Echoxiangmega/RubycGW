@@ -33,6 +33,7 @@ import numpy as np
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNNER = _REPO_ROOT / "research" / "run_cluster_ed_gw_vprime_vcross_orientation.py"
 JF = _REPO_ROOT / "research" / "analyze_cluster_ed_gw_vprime_vcross_orientation_lambda.py"
+TRACKER = _REPO_ROOT / "research" / "track_cluster_ed_gw_vn_modes.py"
 
 
 def _csv_floats(text: str) -> list[float]:
@@ -81,7 +82,7 @@ def _args():
     p.add_argument("--bath-fit-max-nfev", type=int, default=300)
     p.add_argument("--bath-fit-metric", choices=("delta", "g0"), default="delta")
 
-    p.add_argument("--nev", type=int, default=8)
+    p.add_argument("--nev", type=int, default=16)
     p.add_argument("--bath-rank", type=int, default=24)
     p.add_argument("--bath-svd-rcond", type=float, default=1e-7)
     p.add_argument("--bath-fd-step", type=float, default=2e-4)
@@ -106,6 +107,10 @@ def _args():
     p.add_argument(
         "--keep-going", action="store_true",
         help="record failed points and continue the grid instead of stopping",
+    )
+    p.add_argument(
+        "--skip-tracking", action="store_true",
+        help="do not run overlap-based mode tracking after the grid finishes",
     )
     p.add_argument("--quiet-solvers", action="store_true")
     return p.parse_args()
@@ -147,6 +152,18 @@ def _checkpoint_is_converged(path: Path, tol: float) -> bool:
     conv = bool(_npz_scalar(path, "converged", False))
     err = float(_npz_scalar(path, "final_error", np.inf))
     return conv and np.isfinite(err) and err <= float(tol)
+
+
+def _jf_has_full_spectrum(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        with np.load(path, allow_pickle=False) as z:
+            if "full_spectrum_schema" not in z or "mode_vectors_saved" not in z:
+                return False
+            return bool(np.asarray(z["mode_vectors_saved"]).reshape(()))
+    except Exception:
+        return False
 
 
 def _run(cmd: list[str], *, cwd: Path):
@@ -346,7 +363,13 @@ def main():
             seed = chk
 
             if not bool(args.background_only):
-                if bool(args.rerun) or not jfout.exists():
+                if bool(args.rerun) or not _jf_has_full_spectrum(jfout):
+                    if jfout.exists() and not bool(args.rerun):
+                        print(
+                            "[JF] existing output lacks full-spectrum vectors; "
+                            "recomputing tracking-ready spectrum",
+                            flush=True,
+                        )
                     _run(_jf_command(args, chk, jfout), cwd=_REPO_ROOT)
                 s = _summarize_jf(jfout)
                 arrays["d_lc"][inn, iv] = s["d_lc"]
@@ -382,6 +405,12 @@ def main():
         _save_summary(summary_path, args, Vs, fillings, arrays)
 
     print(f"\nsaved grid summary: {summary_path}", flush=True)
+    if not bool(args.background_only) and not bool(args.skip_tracking):
+        print("\n=== overlap tracking of retained JF branches ===", flush=True)
+        _run(
+            [sys.executable, str(TRACKER), str(summary_path)],
+            cwd=_REPO_ROOT,
+        )
 
 
 if __name__ == "__main__":
