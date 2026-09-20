@@ -31,10 +31,12 @@ from rubycgw.folded_torus import (
     commensurate_source_matrix,
     fold_dynamic_k_field,
     fold_static_field_as_grid,
+    torus_cells,
 )
 from rubycgw.grids import MatsubaraGrid
 from rubycgw.model import build_h0
 from rubycgw.models.ruby import physical_pair_cluster_interactions
+from rubycgw.pseudospin import primitive_cell_pseudospin_channels
 from rubycgw.supercell_gw_split import one_body_density_matrix_tail
 from vprime_study.cross_model import (
     VPrimeCrossParameters,
@@ -127,6 +129,39 @@ def _multicell_restart(path):
         bath_energies=np.asarray(d["bath_energies"], dtype=float),
         bath_couplings=np.asarray(d["bath_couplings"], dtype=complex),
     )
+
+
+def _order_spectrum(rho_sc: np.ndarray, Lx: int, Ly: int):
+    channels = primitive_cell_pseudospin_channels()
+    names = ("x_even", "y_even", "x_odd", "y_odd", "z_even", "z_odd")
+    cells = torus_cells(Lx, Ly)
+    local = np.zeros((len(names), len(cells)), dtype=complex)
+    rho_sc = np.asarray(rho_sc, dtype=complex)
+    for ic, _ in enumerate(cells):
+        sl = slice(6*ic, 6*(ic+1))
+        rc = rho_sc[sl, sl]
+        for ia, name in enumerate(names):
+            K = np.asarray(channels[name], dtype=complex)
+            den = max(float(np.vdot(K, K).real), 1e-300)
+            local[ia, ic] = np.vdot(K, rc) / den
+
+    spec = np.zeros((len(names), Lx, Ly), dtype=complex)
+    for ia in range(len(names)):
+        for q1 in range(Lx):
+            for q2 in range(Ly):
+                acc = 0.0j
+                for ic, (r1, r2) in enumerate(cells):
+                    phase = np.exp(
+                        -2j * np.pi * (
+                            q1 * r1 / float(Lx)
+                            + q2 * r2 / float(Ly)
+                        )
+                    )
+                    acc += phase * local[ia, ic]
+                spec[ia, q1, q2] = acc / float(len(cells))
+    flat = int(np.argmax(np.abs(spec)))
+    ia, q1, q2 = np.unravel_index(flat, spec.shape)
+    return names, local, spec, names[ia], (int(q1), int(q2)), complex(spec[ia, q1, q2])
 
 
 def main():
@@ -239,6 +274,14 @@ def main():
         source_expect = complex(source_expect / float(ncell))
     else:
         source_expect = 0.0j
+    (
+        order_names,
+        order_local,
+        order_spectrum,
+        dominant_order_channel,
+        dominant_order_q,
+        dominant_order_amplitude,
+    ) = _order_spectrum(rho[0, 0], Lx, Ly)
 
     args.out.mkdir(parents=True, exist_ok=True)
     qtag = "normal" if q == (-1, -1) else f"q{q[0]}_{q[1]}_mode{int(args.mode_row)}"
@@ -275,6 +318,12 @@ def main():
         source_mode_row=int(-1 if args.mode_row is None else args.mode_row),
         source_matrix=np.asarray(source),
         source_expectation_per_pc=complex(source_expect),
+        order_channel_names=np.asarray(order_names),
+        order_local_amplitudes=np.asarray(order_local),
+        order_spectrum=np.asarray(order_spectrum),
+        dominant_order_channel=np.asarray(dominant_order_channel),
+        dominant_order_q=np.asarray(dominant_order_q, dtype=int),
+        dominant_order_amplitude=complex(dominant_order_amplitude),
         seed_kind=np.asarray(seed_kind),
         continuation_source=np.asarray(
             "" if args.continue_from is None else str(args.continue_from)
@@ -323,7 +372,9 @@ def main():
         f"converged={result.converged}, residual={result.final_error:.3e}, "
         f"max Gimp/Gc={np.max(result.impurity_mismatch):.3e}, "
         f"F/pc={thermo.helmholtz_free_energy_per_primitive_cell:+.12e}, "
-        f"<Osrc>/pc={source_expect.real:+.6e}{source_expect.imag:+.2e}i",
+        f"<Osrc>/pc={source_expect.real:+.6e}{source_expect.imag:+.2e}i, "
+        f"dominant={dominant_order_channel}@{dominant_order_q} "
+        f"|A|={abs(dominant_order_amplitude):.3e}",
         flush=True,
     )
 
