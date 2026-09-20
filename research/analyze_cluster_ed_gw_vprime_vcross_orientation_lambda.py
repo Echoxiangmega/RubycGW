@@ -175,7 +175,12 @@ def _physical_field_from_packed(vec: np.ndarray, shape) -> np.ndarray:
 
 
 def _mode_projection(op, field, q_index):
-    """Project the equal-time mode density matrix onto CO/LC pseudospins."""
+    """Return the equal-time order pattern induced by one JF eigenmode.
+
+    The returned static matrix is a density/current-response pattern, not the
+    full JF vertex eigenvector.  It is useful as a conjugate Hamiltonian source
+    template for selecting the same ordered basin in a nonlinear source ramp.
+    """
     p = tuple(int(x) for x in q_index)
     zero = np.zeros((6, 6), dtype=complex)
     ctx = jf_consistent._tail_context(op, zero, p)
@@ -667,6 +672,9 @@ def main():
             mode_lc_opposite_weight=np.asarray([r["lc_opposite"] for r in all_mode_rows], dtype=float),
             mode_uniform_weight=np.asarray([r["uniform"] for r in all_mode_rows], dtype=float),
             mode_static_matrix=np.stack(
+                [r["static_matrix"] for r in all_mode_rows], axis=0
+            ) if all_mode_rows else np.empty((0, 6, 6), dtype=np.complex64),
+            mode_order_matrix=np.stack(
                 [r["static_matrix"] for r in all_mode_rows], axis=0
             ) if all_mode_rows else np.empty((0, 6, 6), dtype=np.complex64),
             mode_vectors=(
