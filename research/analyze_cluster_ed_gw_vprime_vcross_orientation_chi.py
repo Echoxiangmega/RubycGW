@@ -149,9 +149,24 @@ def _eigen_block(block, names):
         1.0 / v if abs(v) > 1e-300 else np.copysign(np.inf, v or 1.0)
         for v in vals
     ], dtype=float)
+    # Eigenvalues of the physical inverse susceptibility ("masses").  Sorting
+    # these algebraically gives the clean stability diagnostic: on a stable
+    # reference branch every mass is positive and the first continuous
+    # instability is min(mass)->0.  After crossing, the negative-mode count
+    # records how many physical directions are already unstable.
+    finite_mass = np.asarray(inv_vals, dtype=float)
+    mass_order = np.argsort(finite_mass)
+    mass_eigvals = finite_mass[mass_order]
+    mass_eigvecs = np.asarray(vecs[:, mass_order], dtype=complex)
+    closest_mass_index = int(np.argmin(np.abs(mass_eigvals)))
     return dict(
         eigvals=vals,
         inverse_eigvals=inv_vals,
+        mass_eigvals=mass_eigvals,
+        mass_eigvecs=mass_eigvecs,
+        min_mass=float(mass_eigvals[0]),
+        closest_mass=float(mass_eigvals[closest_mass_index]),
+        negative_mass_count=int(np.sum(mass_eigvals < 0.0)),
         eigvecs=vecs,
         soft_index=isoft,
         chi_soft=chi_soft,
@@ -352,6 +367,36 @@ def main():
             ),
             full_inverse_eigvals=np.stack(
                 [r["full"]["inverse_eigvals"] for r in all_rows], axis=0
+            ),
+            co_mass_eigvals=np.stack(
+                [r["co"]["mass_eigvals"] for r in all_rows], axis=0
+            ),
+            lc_mass_eigvals=np.stack(
+                [r["lc"]["mass_eigvals"] for r in all_rows], axis=0
+            ),
+            full_mass_eigvals=np.stack(
+                [r["full"]["mass_eigvals"] for r in all_rows], axis=0
+            ),
+            co_min_mass=np.asarray([r["co"]["min_mass"] for r in all_rows], dtype=float),
+            lc_min_mass=np.asarray([r["lc"]["min_mass"] for r in all_rows], dtype=float),
+            full_min_mass=np.asarray([r["full"]["min_mass"] for r in all_rows], dtype=float),
+            co_closest_mass=np.asarray(
+                [r["co"]["closest_mass"] for r in all_rows], dtype=float
+            ),
+            lc_closest_mass=np.asarray(
+                [r["lc"]["closest_mass"] for r in all_rows], dtype=float
+            ),
+            full_closest_mass=np.asarray(
+                [r["full"]["closest_mass"] for r in all_rows], dtype=float
+            ),
+            co_negative_mass_count=np.asarray(
+                [r["co"]["negative_mass_count"] for r in all_rows], dtype=int
+            ),
+            lc_negative_mass_count=np.asarray(
+                [r["lc"]["negative_mass_count"] for r in all_rows], dtype=int
+            ),
+            full_negative_mass_count=np.asarray(
+                [r["full"]["negative_mass_count"] for r in all_rows], dtype=int
             ),
             co_soft_vector=np.stack(
                 [r["co"]["soft_vector"] for r in all_rows], axis=0
