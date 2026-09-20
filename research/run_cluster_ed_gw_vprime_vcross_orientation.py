@@ -182,11 +182,15 @@ def _saved_orientation(path: Path) -> int:
 
 def _load_q0_source_template(path: Path, row: int) -> tuple[np.ndarray, tuple[int, int], str]:
     with np.load(path, allow_pickle=False) as z:
-        if "mode_static_matrix" not in z or "mode_q_index" not in z:
+        matrix_key = (
+            "mode_order_matrix" if "mode_order_matrix" in z
+            else "mode_static_matrix"
+        )
+        if matrix_key not in z or "mode_q_index" not in z:
             raise ValueError(
-                f"{path}: JF file lacks mode_static_matrix; rerun the updated JF analyzer"
+                f"{path}: JF file lacks mode_order_matrix; rerun the updated JF analyzer"
             )
-        mats = np.asarray(z["mode_static_matrix"], dtype=complex)
+        mats = np.asarray(z[matrix_key], dtype=complex)
         q = np.asarray(z["mode_q_index"], dtype=int)
         sectors = (
             np.asarray(z["mode_sector"]).astype(str)
