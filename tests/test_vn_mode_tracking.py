@@ -59,7 +59,7 @@ def test_crossing_uses_signed_mass_not_nearest_distance():
             co_even=1.0, co_odd=0.0, lc_same=0.0, lc_opposite=0.0, uniform=0.0,
         ),
     ]
-    crossings = _crossings(records, imag_tol=1e-6)
+    crossings = _crossings(records, imag_tol=1e-6, min_overlap=0.8)
     assert len(crossings) == 1
     assert np.isclose(crossings[0]["V_cross"], 0.8 + 0.2 * (0.4 / 0.6))
     assert crossings[0]["channel_group"] == "CO"
