@@ -111,9 +111,11 @@ def _valid_chi(path):
         with np.load(path, allow_pickle=False) as z:
             return (
                 "schema" in z
-                and int(np.asarray(z["schema"]).reshape(())) >= 1
+                and int(np.asarray(z["schema"]).reshape(())) >= 2
                 and "inv_chi_co_soft" in z
                 and "inv_chi_lc_soft" in z
+                and "co_mass_eigvals" in z
+                and "lc_mass_eigvals" in z
             )
     except Exception:
         return False
@@ -176,6 +178,24 @@ def _summarize_one(path, Lx, Ly):
     full_w = _reshape_q(
         np.asarray(d["full_soft_weights"], dtype=float), q, Lx, Ly, trailing=(6,)
     )
+    co_mass = _reshape_q(
+        np.asarray(d["co_mass_eigvals"], dtype=float), q, Lx, Ly, trailing=(4,)
+    )
+    lc_mass = _reshape_q(
+        np.asarray(d["lc_mass_eigvals"], dtype=float), q, Lx, Ly, trailing=(2,)
+    )
+    full_mass = _reshape_q(
+        np.asarray(d["full_mass_eigvals"], dtype=float), q, Lx, Ly, trailing=(6,)
+    )
+    co_neg = _reshape_q(
+        np.asarray(d["co_negative_mass_count"], dtype=int), q, Lx, Ly
+    )
+    lc_neg = _reshape_q(
+        np.asarray(d["lc_negative_mass_count"], dtype=int), q, Lx, Ly
+    )
+    full_neg = _reshape_q(
+        np.asarray(d["full_negative_mass_count"], dtype=int), q, Lx, Ly
+    )
     qpair = _reshape_q(np.asarray(d["q_pair_residual"], dtype=float), q, Lx, Ly)
     cross = _reshape_q(np.asarray(d["co_lc_cross_ratio"], dtype=float), q, Lx, Ly)
 
@@ -192,6 +212,12 @@ def _summarize_one(path, Lx, Ly):
         co_weights_q=co_w,
         lc_weights_q=lc_w,
         full_weights_q=full_w,
+        co_mass_q=co_mass,
+        lc_mass_q=lc_mass,
+        full_mass_q=full_mass,
+        co_negative_count_q=co_neg,
+        lc_negative_count_q=lc_neg,
+        full_negative_count_q=full_neg,
         qpair_residual_q=qpair,
         cross_ratio_q=cross,
         chi_co=float(chi_co[ico]),
@@ -212,13 +238,19 @@ def _summarize_one(path, Lx, Ly):
         max_qpair_residual=float(np.nanmax(qpair)),
         max_cross_ratio=float(np.nanmax(cross)),
         max_solver_residual=float(np.nanmax(np.asarray(d["solver_residual"], dtype=float))),
+        global_co_min_mass=float(np.nanmin(co_mass)),
+        global_lc_min_mass=float(np.nanmin(lc_mass)),
+        global_full_min_mass=float(np.nanmin(full_mass)),
+        total_co_negative_modes=int(np.nansum(co_neg)),
+        total_lc_negative_modes=int(np.nansum(lc_neg)),
+        total_full_negative_modes=int(np.nansum(full_neg)),
     )
 
 
 def _save(path, source, meta, Vs, fillings, arrays):
     np.savez_compressed(
         path,
-        schema=np.asarray(1, dtype=int),
+        schema=np.asarray(2, dtype=int),
         source_summary=np.asarray(str(source)),
         V_values=np.asarray(Vs, dtype=float),
         fillings=np.asarray(fillings, dtype=float),
@@ -291,6 +323,18 @@ def main():
         co_soft_weights_q=np.full(qshape + (4,), np.nan),
         lc_soft_weights_q=np.full(qshape + (2,), np.nan),
         full_soft_weights_q=np.full(qshape + (6,), np.nan),
+        co_mass_eigvals_q=np.full(qshape + (4,), np.nan),
+        lc_mass_eigvals_q=np.full(qshape + (2,), np.nan),
+        full_mass_eigvals_q=np.full(qshape + (6,), np.nan),
+        co_negative_mass_count_q=np.zeros(qshape, dtype=int),
+        lc_negative_mass_count_q=np.zeros(qshape, dtype=int),
+        full_negative_mass_count_q=np.zeros(qshape, dtype=int),
+        global_co_min_mass=np.full(shape, np.nan),
+        global_lc_min_mass=np.full(shape, np.nan),
+        global_full_min_mass=np.full(shape, np.nan),
+        total_co_negative_modes=np.zeros(shape, dtype=int),
+        total_lc_negative_modes=np.zeros(shape, dtype=int),
+        total_full_negative_modes=np.zeros(shape, dtype=int),
         q_pair_residual_q=np.full(qshape, np.nan),
         co_lc_cross_ratio_q=np.full(qshape, np.nan),
         max_q_pair_residual=np.full(shape, np.nan),
@@ -347,6 +391,18 @@ def main():
                 arrays["co_soft_weights_q"][inn, iv] = s["co_weights_q"]
                 arrays["lc_soft_weights_q"][inn, iv] = s["lc_weights_q"]
                 arrays["full_soft_weights_q"][inn, iv] = s["full_weights_q"]
+                arrays["co_mass_eigvals_q"][inn, iv] = s["co_mass_q"]
+                arrays["lc_mass_eigvals_q"][inn, iv] = s["lc_mass_q"]
+                arrays["full_mass_eigvals_q"][inn, iv] = s["full_mass_q"]
+                arrays["co_negative_mass_count_q"][inn, iv] = s["co_negative_count_q"]
+                arrays["lc_negative_mass_count_q"][inn, iv] = s["lc_negative_count_q"]
+                arrays["full_negative_mass_count_q"][inn, iv] = s["full_negative_count_q"]
+                arrays["global_co_min_mass"][inn, iv] = s["global_co_min_mass"]
+                arrays["global_lc_min_mass"][inn, iv] = s["global_lc_min_mass"]
+                arrays["global_full_min_mass"][inn, iv] = s["global_full_min_mass"]
+                arrays["total_co_negative_modes"][inn, iv] = s["total_co_negative_modes"]
+                arrays["total_lc_negative_modes"][inn, iv] = s["total_lc_negative_modes"]
+                arrays["total_full_negative_modes"][inn, iv] = s["total_full_negative_modes"]
                 arrays["q_pair_residual_q"][inn, iv] = s["qpair_residual_q"]
                 arrays["co_lc_cross_ratio_q"][inn, iv] = s["cross_ratio_q"]
                 arrays["max_q_pair_residual"][inn, iv] = s["max_qpair_residual"]
@@ -358,7 +414,11 @@ def main():
                     f"CO: chi={s['chi_co']:+.6e}, 1/chi={s['inv_co']:+.6e}, "
                     f"q*={tuple(s['q_co'])}, even/odd={s['co_even']:.3f}/{s['co_odd']:.3f}; "
                     f"LC: chi={s['chi_lc']:+.6e}, 1/chi={s['inv_lc']:+.6e}, "
-                    f"q*={tuple(s['q_lc'])}, same/opp={s['lc_same']:.3f}/{s['lc_opposite']:.3f}",
+                    f"q*={tuple(s['q_lc'])}, same/opp={s['lc_same']:.3f}/{s['lc_opposite']:.3f}; "
+                    f"min masses CO/LC={s['global_co_min_mass']:+.6e}/"
+                    f"{s['global_lc_min_mass']:+.6e}, "
+                    f"negative modes CO/LC={s['total_co_negative_modes']}/"
+                    f"{s['total_lc_negative_modes']}",
                     flush=True,
                 )
             except BaseException as exc:
