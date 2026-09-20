@@ -159,9 +159,18 @@ def _jf_has_full_spectrum(path: Path) -> bool:
         return False
     try:
         with np.load(path, allow_pickle=False) as z:
-            if "full_spectrum_schema" not in z or "mode_vectors_saved" not in z:
+            required = {
+                "full_spectrum_schema",
+                "mode_vectors_saved",
+                "mode_static_matrix",
+            }
+            if not required.issubset(set(z.files)):
                 return False
-            return bool(np.asarray(z["mode_vectors_saved"]).reshape(()))
+            schema = int(np.asarray(z["full_spectrum_schema"]).reshape(()))
+            return (
+                schema >= 2
+                and bool(np.asarray(z["mode_vectors_saved"]).reshape(()))
+            )
     except Exception:
         return False
 
