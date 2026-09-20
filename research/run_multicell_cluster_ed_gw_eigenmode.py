@@ -83,10 +83,14 @@ def _tag(x):
 
 def _source_from_mode(path, row, Lx, Ly):
     d = _load(path)
-    if "mode_static_matrix" not in d or "mode_q_index" not in d:
-        raise ValueError("mode file lacks source-ready JF spectrum fields")
+    matrix_key = (
+        "mode_order_matrix" if "mode_order_matrix" in d
+        else "mode_static_matrix"
+    )
+    if matrix_key not in d or "mode_q_index" not in d:
+        raise ValueError("mode file lacks source-ready JF order-pattern fields")
     row = int(row)
-    M = np.asarray(d["mode_static_matrix"][row], dtype=complex)
+    M = np.asarray(d[matrix_key][row], dtype=complex)
     q = tuple(int(x) for x in np.asarray(d["mode_q_index"][row], dtype=int))
     sector = (
         str(np.asarray(d["mode_sector"][row]))
