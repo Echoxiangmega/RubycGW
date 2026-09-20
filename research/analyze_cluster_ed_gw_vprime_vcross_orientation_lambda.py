@@ -199,7 +199,7 @@ def _mode_projection(op, field, q_index):
     weight["CO_odd"] = weight["x_odd"] + weight["y_odd"]
     weight["LC_same"] = weight["z_even"]
     weight["LC_opposite"] = weight["z_odd"]
-    return amp, weight
+    return amp, weight, np.asarray(Rc, dtype=complex)
 
 
 def _solve_sector(op, q_index, parity, args):
@@ -227,7 +227,7 @@ def _solve_sector(op, q_index, parity, args):
         raw_vec = raw_vec / max(float(np.linalg.norm(raw_vec)), 1e-300)
         field = _physical_field_from_packed(raw_vec, op.G.shape)
         field = _tr_project(field, parity)
-        amp, weight = _mode_projection(op, field, q_index)
+        amp, weight, static_matrix = _mode_projection(op, field, q_index)
         modes.append(
             {
                 "lambda": complex(lam),
@@ -236,6 +236,7 @@ def _solve_sector(op, q_index, parity, args):
                 "tr_residual": _tr_residual(field, parity),
                 "sector": f"TR_{parity}",
                 "vector": raw_vec,
+                "static_matrix": static_matrix,
             }
         )
     return modes
@@ -287,7 +288,7 @@ def _solve_full_q(op, q_index, args):
         raw_vec = np.asarray(vecs[:, j], dtype=complex)
         raw_vec = raw_vec / max(float(np.linalg.norm(raw_vec)), 1e-300)
         field = _physical_field_from_packed(raw_vec, op.G.shape)
-        amp, weight = _mode_projection(op, field, q_index)
+        amp, weight, static_matrix = _mode_projection(op, field, q_index)
         modes.append(
             {
                 "lambda": complex(lam),
@@ -296,6 +297,7 @@ def _solve_full_q(op, q_index, args):
                 "tr_residual": np.nan,
                 "sector": "full",
                 "vector": raw_vec,
+                "static_matrix": static_matrix,
             }
         )
     return modes
@@ -591,6 +593,9 @@ def main():
                         lc_opposite=float(w["LC_opposite"]),
                         uniform=float(w["uniform"]),
                         vector=np.asarray(m["vector"], dtype=np.complex64),
+                        static_matrix=np.asarray(
+                            m["static_matrix"], dtype=np.complex64
+                        ),
                     )
                 )
 
@@ -661,6 +666,9 @@ def main():
             mode_lc_same_weight=np.asarray([r["lc_same"] for r in all_mode_rows], dtype=float),
             mode_lc_opposite_weight=np.asarray([r["lc_opposite"] for r in all_mode_rows], dtype=float),
             mode_uniform_weight=np.asarray([r["uniform"] for r in all_mode_rows], dtype=float),
+            mode_static_matrix=np.stack(
+                [r["static_matrix"] for r in all_mode_rows], axis=0
+            ) if all_mode_rows else np.empty((0, 6, 6), dtype=np.complex64),
             mode_vectors=(
                 np.stack([r["vector"] for r in all_mode_rows], axis=0)
                 if (all_mode_rows and not bool(args.no_save_mode_vectors))
