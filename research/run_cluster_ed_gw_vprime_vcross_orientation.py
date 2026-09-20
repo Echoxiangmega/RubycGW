@@ -34,6 +34,7 @@ import numpy as np
 import rubycgw.cluster_ed_gw_fast as _fast_solver
 from rubycgw.cluster_ed_gw_covariant import fit_finite_bath_complex
 from rubycgw.cluster_ed_gw_fast import ClusterEDGWFastOptions, solve_cluster_ed_gw_fast
+from rubycgw.cluster_ed_gw_free_energy import evaluate_cluster_ed_gw_free_energy
 from rubycgw.cluster_orientation import (
     build_oriented_lattice_fields,
     orientation_b_shift,
@@ -112,6 +113,29 @@ def _args():
         action="store_true",
         help="fit the same number of bath orbitals with complex rather than real couplings",
     )
+    p.add_argument(
+        "--source-mode-file",
+        type=Path,
+        default=None,
+        help="tracking-ready lambda_allq NPZ containing mode_static_matrix",
+    )
+    p.add_argument(
+        "--source-mode-row",
+        type=int,
+        default=None,
+        help="global mode row in --source-mode-file; currently q=(0,0) only",
+    )
+    p.add_argument(
+        "--source-strength",
+        type=float,
+        default=0.0,
+        help="static one-body source h in H_source=-h O_mode",
+    )
+    p.add_argument(
+        "--evaluate-free-energy",
+        action="store_true",
+        help="evaluate the cluster-ED+GW Luttinger-Ward functional for the returned state",
+    )
     p.add_argument("--discard-weight-tol", type=float, default=1e-11)
     p.add_argument("--quiet-gw", action="store_true")
     p.add_argument("--quiet-embed", action="store_true")
@@ -154,6 +178,38 @@ def _saved_interactions(path: Path) -> tuple[float, float]:
 
 def _saved_orientation(path: Path) -> int:
     return int(_saved_scalar(path, ("cluster_orientation",), 0))
+
+
+def _load_q0_source_template(path: Path, row: int) -> tuple[np.ndarray, tuple[int, int], str]:
+    with np.load(path, allow_pickle=False) as z:
+        if "mode_static_matrix" not in z or "mode_q_index" not in z:
+            raise ValueError(
+                f"{path}: JF file lacks mode_static_matrix; rerun the updated JF analyzer"
+            )
+        mats = np.asarray(z["mode_static_matrix"], dtype=complex)
+        q = np.asarray(z["mode_q_index"], dtype=int)
+        sectors = (
+            np.asarray(z["mode_sector"]).astype(str)
+            if "mode_sector" in z
+            else np.full(len(mats), "unknown")
+        )
+    row = int(row)
+    if row < 0 or row >= len(mats):
+        raise IndexError(f"source mode row {row} outside [0,{len(mats)})")
+    qn = tuple(int(x) for x in q[row])
+    if qn != (0, 0):
+        raise ValueError(
+            "primitive-cell source runner can only realize q=(0,0) order; "
+            f"requested q={qn}. Use the finite-q supercell branch workflow."
+        )
+    M = np.asarray(mats[row], dtype=complex)
+    M = 0.5 * (M + M.conj().T)
+    M = M - np.trace(M) * np.eye(M.shape[0], dtype=complex) / float(M.shape[0])
+    scale = float(np.max(np.abs(M), initial=0.0))
+    if not np.isfinite(scale) or scale <= 1e-14:
+        raise ValueError("selected JF mode has a vanishing static traceless source form factor")
+    M = M / scale
+    return M, qn, str(sectors[row])
 
 
 def _lattice_reseed_for_orientation(
@@ -204,6 +260,27 @@ def main():
         ti=float(args.ti), t1=float(args.t1), t2=float(args.t2),
         V=float(args.V), Vprime=float(args.Vprime), Vcross=float(args.Vcross),
     )
+
+    source_matrix = None
+    source_q = (-1, -1)
+    source_sector = ""
+    if args.source_mode_file is not None:
+        if args.source_mode_row is None:
+            raise ValueError("--source-mode-file requires --source-mode-row")
+        source_matrix, source_q, source_sector = _load_q0_source_template(
+            args.source_mode_file, int(args.source_mode_row)
+        )
+        if np.max(np.abs(source_matrix.imag), initial=0.0) > 1e-12:
+            args.complex_bath = True
+            print(
+                "[source] complex q=0 form factor detected: enabling complex bath",
+                flush=True,
+            )
+    elif args.source_mode_row is not None:
+        raise ValueError("--source-mode-row requires --source-mode-file")
+    elif not np.isclose(float(args.source_strength), 0.0):
+        raise ValueError("nonzero --source-strength requires --source-mode-file")
+
     if bool(args.complex_bath):
         if str(args.bath_fit_metric) != "delta":
             raise ValueError("--complex-bath currently supports only --bath-fit-metric delta")
@@ -221,6 +298,10 @@ def main():
     h0_base = build_h0(grid.kmesh(), params)
     Vq_base = build_vprime_vcross_interaction(grid.qmesh(), params)
     h0, Vq = build_oriented_lattice_fields(h0_base, Vq_base, int(args.orientation))
+    if source_matrix is not None and not np.isclose(float(args.source_strength), 0.0):
+        h0 = np.asarray(h0, dtype=complex) - float(args.source_strength) * source_matrix[
+            None, None, :, :
+        ]
 
     gw_opts = GWOptions(
         target_filling=float(args.filling),
@@ -259,7 +340,8 @@ def main():
         f"Vx={args.Vcross:g}, filling={args.filling:g}, T={args.T:g}\n"
         f"ED physical intercell pair terms={pair_intercell}\n"
         f"bath couplings={'complex' if args.complex_bath else 'real'}, "
-        f"metric={args.bath_fit_metric}",
+        f"metric={args.bath_fit_metric}\n"
+        f"source h={args.source_strength:g}, q={source_q}, sector={source_sector or 'none'}",
         flush=True,
     )
     if np.isclose(float(args.t1), float(args.t2), rtol=0.0, atol=1e-14) and args.V != 0.0:
@@ -340,11 +422,62 @@ def main():
                 gw_opts=gw_opts, embed_opts=embed_opts, background=carrier,
             )
 
+    thermo_payload = {}
+    if bool(args.evaluate_free_energy):
+        thermo = evaluate_cluster_ed_gw_free_energy(
+            result,
+            h0,
+            Vq,
+            physical_pair_cluster_interactions(params, int(args.orientation)),
+            grid,
+            target_particles=float(args.filling),
+            discard_weight_tol=float(args.discard_weight_tol),
+        )
+        thermo_payload = {
+            "free_energy_method": np.asarray("cluster_ed_gw_luttinger_ward"),
+            "grand_potential": float(thermo.grand_potential),
+            "helmholtz_free_energy": float(thermo.helmholtz_free_energy),
+            "omega0_lattice": float(thermo.omega0_lattice),
+            "fermionic_lw_lattice": float(thermo.fermionic_lw_lattice),
+            "phi_gw_lattice": float(thermo.phi_gw_lattice),
+            "phi_gw_cluster": float(thermo.phi_gw_cluster),
+            "phi_ed_cluster": float(thermo.phi_ed_cluster),
+            "phi_cluster_correction": float(thermo.phi_cluster_correction),
+            "phi_embedded_total": float(thermo.phi_embedded_total),
+            "free_energy_particle_number_actual": float(thermo.particle_number_actual),
+            "free_energy_particle_number_legendre": float(
+                thermo.particle_number_legendre
+            ),
+            "impurity_grand_potential": float(thermo.impurity_grand_potential),
+            "impurity_internal_energy": float(thermo.impurity_internal_energy),
+            "impurity_entropy": float(thermo.impurity_entropy),
+            "impurity_particle_number": float(thermo.impurity_particle_number),
+            "free_energy_gimp_gc_mismatch": float(
+                thermo.gimp_gc_relative_mismatch
+            ),
+            "free_energy_gimp_reconstruction_mismatch": float(
+                thermo.gimp_reconstruction_mismatch
+            ),
+        }
+        print(
+            "[thermo] "
+            f"F={thermo.helmholtz_free_energy:+.12e}, "
+            f"Omega={thermo.grand_potential:+.12e}, "
+            f"Phi_ED-Phi_GWc={thermo.phi_cluster_correction:+.6e}, "
+            f"Gimp/Gc={thermo.gimp_gc_relative_mismatch:.3e}",
+            flush=True,
+        )
+
     args.out.mkdir(parents=True, exist_ok=True)
+    source_suffix = ""
+    if source_matrix is not None:
+        source_suffix = (
+            f"_mode{int(args.source_mode_row)}_h{_tag(args.source_strength)}"
+        )
     outfile = args.out / (
         f"cluster_ed_gw_vprime_vcross_ori{args.orientation}_L{args.Lx}x{args.Ly}_"
         f"V{_tag(args.V)}_Vp{_tag(args.Vprime)}_Vx{_tag(args.Vcross)}_"
-        f"fill{_tag(args.filling)}.npz"
+        f"fill{_tag(args.filling)}{source_suffix}.npz"
     )
     np.savez_compressed(
         outfile,
@@ -400,8 +533,20 @@ def main():
         bath_energies=np.asarray(result.bath.energies),
         bath_couplings=np.asarray(result.bath.couplings),
         bath_coupling_kind=np.asarray("complex" if args.complex_bath else "real"),
+        source_strength=float(args.source_strength),
+        source_mode_file=np.asarray(
+            "" if args.source_mode_file is None else str(args.source_mode_file)
+        ),
+        source_mode_row=int(-1 if args.source_mode_row is None else args.source_mode_row),
+        source_q=np.asarray(source_q, dtype=int),
+        source_sector=np.asarray(source_sector),
+        source_matrix=(
+            np.zeros((6, 6), dtype=complex)
+            if source_matrix is None else np.asarray(source_matrix, dtype=complex)
+        ),
         G_background=np.asarray(result.background.G),
         mu_background=float(result.background.mu),
+        **thermo_payload,
     )
     print(
         f"saved {outfile}\n"
