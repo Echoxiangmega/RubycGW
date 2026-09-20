@@ -173,6 +173,9 @@ def _summarize_one(path, Lx, Ly):
     lc_w = _reshape_q(
         np.asarray(d["lc_soft_weights"], dtype=float), q, Lx, Ly, trailing=(2,)
     )
+    full_w = _reshape_q(
+        np.asarray(d["full_soft_weights"], dtype=float), q, Lx, Ly, trailing=(6,)
+    )
     qpair = _reshape_q(np.asarray(d["q_pair_residual"], dtype=float), q, Lx, Ly)
     cross = _reshape_q(np.asarray(d["co_lc_cross_ratio"], dtype=float), q, Lx, Ly)
 
@@ -188,6 +191,7 @@ def _summarize_one(path, Lx, Ly):
         inv_full_q=inv_full,
         co_weights_q=co_w,
         lc_weights_q=lc_w,
+        full_weights_q=full_w,
         qpair_residual_q=qpair,
         cross_ratio_q=cross,
         chi_co=float(chi_co[ico]),
@@ -203,6 +207,8 @@ def _summarize_one(path, Lx, Ly):
         chi_full=float(chi_full[ifull]),
         inv_full=float(inv_full[ifull]),
         q_full=np.asarray(ifull, dtype=int),
+        full_co_weight=float(np.sum(full_w[ifull][:4])),
+        full_lc_weight=float(np.sum(full_w[ifull][4:])),
         max_qpair_residual=float(np.nanmax(qpair)),
         max_cross_ratio=float(np.nanmax(cross)),
         max_solver_residual=float(np.nanmax(np.asarray(d["solver_residual"], dtype=float))),
@@ -274,6 +280,8 @@ def main():
         chi_full=np.full(shape, np.nan),
         inv_chi_full=np.full(shape, np.nan),
         q_full=np.full(shape + (2,), -1, dtype=int),
+        full_co_weight=np.full(shape, np.nan),
+        full_lc_weight=np.full(shape, np.nan),
         chi_co_q=np.full(qshape, np.nan),
         inv_chi_co_q=np.full(qshape, np.nan),
         chi_lc_q=np.full(qshape, np.nan),
@@ -282,6 +290,7 @@ def main():
         inv_chi_full_q=np.full(qshape, np.nan),
         co_soft_weights_q=np.full(qshape + (4,), np.nan),
         lc_soft_weights_q=np.full(qshape + (2,), np.nan),
+        full_soft_weights_q=np.full(qshape + (6,), np.nan),
         q_pair_residual_q=np.full(qshape, np.nan),
         co_lc_cross_ratio_q=np.full(qshape, np.nan),
         max_q_pair_residual=np.full(shape, np.nan),
@@ -326,6 +335,8 @@ def main():
                 arrays["chi_full"][inn, iv] = s["chi_full"]
                 arrays["inv_chi_full"][inn, iv] = s["inv_full"]
                 arrays["q_full"][inn, iv] = s["q_full"]
+                arrays["full_co_weight"][inn, iv] = s["full_co_weight"]
+                arrays["full_lc_weight"][inn, iv] = s["full_lc_weight"]
 
                 arrays["chi_co_q"][inn, iv] = s["chi_co_q"]
                 arrays["inv_chi_co_q"][inn, iv] = s["inv_co_q"]
@@ -335,6 +346,7 @@ def main():
                 arrays["inv_chi_full_q"][inn, iv] = s["inv_full_q"]
                 arrays["co_soft_weights_q"][inn, iv] = s["co_weights_q"]
                 arrays["lc_soft_weights_q"][inn, iv] = s["lc_weights_q"]
+                arrays["full_soft_weights_q"][inn, iv] = s["full_weights_q"]
                 arrays["q_pair_residual_q"][inn, iv] = s["qpair_residual_q"]
                 arrays["co_lc_cross_ratio_q"][inn, iv] = s["cross_ratio_q"]
                 arrays["max_q_pair_residual"][inn, iv] = s["max_qpair_residual"]
