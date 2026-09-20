@@ -191,6 +191,46 @@ class FiniteBathImpurityED:
         )
         return probs, navg
 
+    def thermodynamics(self, mu: float, T: float) -> dict[str, float]:
+        """Exact grand-canonical thermodynamics of the finite impurity+bath.
+
+        The stored one-body Hamiltonian contains the correlated orbitals and
+        all auxiliary bath orbitals.  These quantities are useful building
+        blocks for a Luttinger-Ward reconstruction, but the impurity grand
+        potential by itself is not the lattice grand potential.
+        """
+        if self._sectors is None:
+            self.diagonalize()
+        if T <= 0.0:
+            raise ValueError("T must be positive")
+        beta = 1.0 / float(T)
+        logs = [
+            -beta * (sec.energies - float(mu) * sec.n_particles)
+            for sec in self.sectors
+        ]
+        shift = max(float(np.max(x)) for x in logs)
+        zscaled = float(sum(np.sum(np.exp(x - shift)) for x in logs))
+        logZ = float(shift + np.log(zscaled))
+        probs = tuple(np.exp(x - logZ) for x in logs)
+
+        navg = float(
+            sum(sec.n_particles * np.sum(p) for sec, p in zip(self.sectors, probs))
+        )
+        energy = float(
+            sum(
+                np.dot(np.asarray(sec.energies, dtype=float), np.asarray(p, dtype=float))
+                for sec, p in zip(self.sectors, probs)
+            )
+        )
+        omega = float(-float(T) * logZ)
+        entropy = float((energy - float(mu) * navg - omega) / float(T))
+        return {
+            "log_partition": logZ,
+            "grand_potential": omega,
+            "internal_energy": energy,
+            "average_particles": navg,
+            "entropy": entropy,
+        }
     def thermal_selection(
         self,
         mu: float,
