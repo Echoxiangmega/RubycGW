@@ -201,6 +201,16 @@ def _expected_output(background, outdir, *, jf=None, row=None, h=0.0):
 def _diag(path):
     d = _load(path)
     mismatch = np.asarray(d["free_energy_gimp_gc_mismatch"], dtype=float)
+    dominant_amp = complex(
+        np.asarray(d.get("dominant_order_amplitude", 0.0j)).reshape(())
+    )
+    dominant_q = np.asarray(
+        d.get("dominant_order_q", np.asarray([-1, -1], dtype=int)),
+        dtype=int,
+    ).reshape(2)
+    dominant_channel = str(
+        np.asarray(d.get("dominant_order_channel", "unknown")).reshape(())
+    )
     return dict(
         path=str(path),
         converged=bool(_scalar(d, "converged", bool)),
@@ -215,6 +225,10 @@ def _diag(path):
         source_expect_abs=float(
             abs(complex(np.asarray(d["source_expectation_per_pc"]).reshape(())))
         ),
+        final_order_channel=dominant_channel,
+        final_order_q1=int(dominant_q[0]),
+        final_order_q2=int(dominant_q[1]),
+        final_order_abs=float(abs(dominant_amp)),
         F_per_pc=float(_scalar(d, "helmholtz_free_energy_per_primitive_cell", float)),
         Omega_super=float(_scalar(d, "grand_potential_supercell", float)),
         fe_mismatch_max=float(np.max(mismatch)),
@@ -360,7 +374,7 @@ def main():
             source_mode_row=cand["source_mode_row"],
             survives_h0=bool(
                 d["converged"]
-                and d["source_expect_abs"] >= float(args.order_threshold)
+                and d["final_order_abs"] >= float(args.order_threshold)
             ),
             **d,
         ))
@@ -399,6 +413,8 @@ def main():
             f"group={r['endpoint_group']:>2}, branch={r['branch_id']:>4}, "
             f"q=({r['seed_q1']},{r['seed_q2']}), "
             f"seed={r['seed_channel']:<14}, survive={str(r['survives_h0']):<5}, "
+            f"final={r['final_order_channel']}@({r['final_order_q1']},{r['final_order_q2']}), "
+            f"|A|={r['final_order_abs']:.3e}, "
             f"F/pc={r['F_per_pc']:+.10e}, dF/pc={r['DeltaF_per_pc']:+.3e}, "
             f"max Gimp/Gc={r['fe_mismatch_max']:.3e}, "
             f"reliable={r['free_energy_reliable']}"
