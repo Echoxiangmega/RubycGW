@@ -363,8 +363,32 @@ def solve_multicell_cluster_ed_gw(
             int(opts.mu_max_iter),
         )
 
+    # Rebuild lattice quantities on exactly the returned Dyson state.  This is
+    # especially important for free-energy differences, which can be much
+    # smaller than the absolute self-consistency tolerance.
     rho = one_body_density_matrix_tail(G, grid, h0, mu, sigma_h)
     density = np.diagonal(rho[0, 0], axis1=-2, axis2=-1).real
+    P = compute_polarization_matrix(G, grid, backend="fft")
+    W = compute_screened_interaction_matrix(P, Vq)
+    sigma_gw_lattice = compute_sigma_gw_split_matrix(
+        G,
+        W,
+        Vq,
+        grid,
+        h0,
+        mu,
+        sigma_h,
+        backend="fft",
+    )
+    for c in range(ncell):
+        sl = _block_slice(c)
+        Gc_all[c] = np.asarray(G[:, 0, 0, sl, sl], dtype=complex)
+        sigma_cgw_all[c], _, _ = cluster_gw_self_energy(
+            Gc_all[c],
+            np.asarray(rho[0, 0, sl, sl], dtype=complex),
+            Vc,
+            grid,
+        )
 
     bath_energies = np.stack([np.asarray(b.energies, dtype=float) for b in baths])
     bath_couplings = np.stack([np.asarray(b.couplings, dtype=complex) for b in baths])
