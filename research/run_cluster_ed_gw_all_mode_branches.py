@@ -124,7 +124,11 @@ def _candidate_rows(args, tracked):
 
 
 def _canonical_source(jf, row):
-    M = np.asarray(jf["mode_static_matrix"][int(row)], dtype=complex)
+    matrix_key = (
+        "mode_order_matrix" if "mode_order_matrix" in jf
+        else "mode_static_matrix"
+    )
+    M = np.asarray(jf[matrix_key][int(row)], dtype=complex)
     q = tuple(int(x) for x in jf["mode_q_index"][int(row)])
     # Compare the primitive-cell form factor only within the same q.
     n = float(np.linalg.norm(M))
