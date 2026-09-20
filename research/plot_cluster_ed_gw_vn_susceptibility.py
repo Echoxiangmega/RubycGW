@@ -58,8 +58,8 @@ def _plot_single_filling(outdir, d):
         plt.close(fig)
 
     fig, ax = plt.subplots()
-    ax.plot(Vs, np.asarray(d["inv_chi_co"], dtype=float)[0], marker="o", label="CO softest q")
-    ax.plot(Vs, np.asarray(d["inv_chi_lc"], dtype=float)[0], marker="s", label="LC softest q")
+    ax.plot(Vs, np.asarray(d["inv_chi_co"], dtype=float)[0], marker="o", label="CO closest-to-zero mass")
+    ax.plot(Vs, np.asarray(d["inv_chi_lc"], dtype=float)[0], marker="s", label="LC closest-to-zero mass")
     ax.axhline(0.0, linewidth=1.0)
     ax.set_xlabel("V")
     ax.set_ylabel(r"$1/\chi_{\mathrm{soft}}$")
@@ -68,6 +68,51 @@ def _plot_single_filling(outdir, d):
     fig.tight_layout()
     fig.savefig(outdir / f"inv_chi_co_lc_vs_V_fill{n:g}.png", dpi=180)
     plt.close(fig)
+
+    if "co_mass_eigvals_q" in d and "lc_mass_eigvals_q" in d:
+        co_mass = np.asarray(d["co_mass_eigvals_q"], dtype=float)[0]
+        lc_mass = np.asarray(d["lc_mass_eigvals_q"], dtype=float)[0]
+        fig, ax = plt.subplots()
+        for q1 in range(Lx):
+            for q2 in range(Ly):
+                for im in range(co_mass.shape[-1]):
+                    ax.plot(
+                        Vs,
+                        co_mass[:, q1, q2, im],
+                        marker="o",
+                        linewidth=1.0,
+                        alpha=0.75,
+                        label=f"CO q=({q1},{q2}) m{im}" if im == 0 else None,
+                    )
+        ax.axhline(0.0, linewidth=1.0)
+        ax.set_xlabel("V")
+        ax.set_ylabel(r"$m_\nu=\mathrm{eig}(\chi_{CO}^{-1})$")
+        ax.set_title(f"All CO physical masses, filling={n:g}")
+        ax.legend(fontsize="x-small")
+        fig.tight_layout()
+        fig.savefig(outdir / f"co_mass_spectrum_vs_V_fill{n:g}.png", dpi=180)
+        plt.close(fig)
+
+        fig, ax = plt.subplots()
+        for q1 in range(Lx):
+            for q2 in range(Ly):
+                for im in range(lc_mass.shape[-1]):
+                    ax.plot(
+                        Vs,
+                        lc_mass[:, q1, q2, im],
+                        marker="s",
+                        linewidth=1.0,
+                        alpha=0.75,
+                        label=f"LC q=({q1},{q2}) m{im}" if im == 0 else None,
+                    )
+        ax.axhline(0.0, linewidth=1.0)
+        ax.set_xlabel("V")
+        ax.set_ylabel(r"$m_\nu=\mathrm{eig}(\chi_{LC}^{-1})$")
+        ax.set_title(f"All LC physical masses, filling={n:g}")
+        ax.legend(fontsize="x-small")
+        fig.tight_layout()
+        fig.savefig(outdir / f"lc_mass_spectrum_vs_V_fill{n:g}.png", dpi=180)
+        plt.close(fig)
 
 
 def _plot_2d_field(path, Vs, fillings, field, title, cbar):
@@ -134,6 +179,8 @@ def _write_csv(path, d):
         "co_even_weight", "co_odd_weight",
         "chi_lc", "inv_chi_lc", "q_lc_1", "q_lc_2",
         "lc_same_weight", "lc_opposite_weight",
+        "global_co_min_mass", "global_lc_min_mass",
+        "total_co_negative_modes", "total_lc_negative_modes",
         "max_q_pair_residual", "max_co_lc_cross_ratio", "max_solver_residual",
         "failed",
     ]
@@ -159,6 +206,18 @@ def _write_csv(path, d):
                     q_lc_2=int(qlc[1]),
                     lc_same_weight=float(d["lc_same_weight"][inn, iv]),
                     lc_opposite_weight=float(d["lc_opposite_weight"][inn, iv]),
+                    global_co_min_mass=float(
+                        d["global_co_min_mass"][inn, iv]
+                    ) if "global_co_min_mass" in d else np.nan,
+                    global_lc_min_mass=float(
+                        d["global_lc_min_mass"][inn, iv]
+                    ) if "global_lc_min_mass" in d else np.nan,
+                    total_co_negative_modes=int(
+                        d["total_co_negative_modes"][inn, iv]
+                    ) if "total_co_negative_modes" in d else 0,
+                    total_lc_negative_modes=int(
+                        d["total_lc_negative_modes"][inn, iv]
+                    ) if "total_lc_negative_modes" in d else 0,
                     max_q_pair_residual=float(d["max_q_pair_residual"][inn, iv]),
                     max_co_lc_cross_ratio=float(d["max_co_lc_cross_ratio"][inn, iv]),
                     max_solver_residual=float(d["max_solver_residual"][inn, iv]),
