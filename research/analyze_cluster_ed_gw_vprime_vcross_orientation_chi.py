@@ -109,9 +109,11 @@ def _vertices(include_uniform=False):
 
 
 def _hermitianize_pair(chi_q, chi_mq):
+    """Combine q/-q reciprocity and enforce the static Hermitian response."""
     a = np.asarray(chi_q, dtype=complex)
     b = np.asarray(chi_mq, dtype=complex)
-    return 0.5 * (a + b.conj().T)
+    pair = 0.5 * (a + b.conj().T)
+    return 0.5 * (pair + pair.conj().T)
 
 
 def _fixed_filling_schur(chi7):
