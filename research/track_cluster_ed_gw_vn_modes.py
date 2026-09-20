@@ -120,6 +120,7 @@ def _load_modes(path):
             "lc_same": np.asarray(z["mode_lc_same_weight"], dtype=float),
             "lc_opposite": np.asarray(z["mode_lc_opposite_weight"], dtype=float),
             "uniform": np.asarray(z["mode_uniform_weight"], dtype=float),
+            "mode_row": np.arange(len(np.asarray(z["mode_lambda"])), dtype=int),
         }
 
 
@@ -178,6 +179,7 @@ def _append_record(records, *, filling, V, q, sector, branch_id, idx, modes, ove
             overlap_previous=float(overlap),
             dominant_channel=ch,
             channel_group=group,
+            source_mode_row=int(modes["mode_row"][idx]),
             **weights,
         )
     )
@@ -316,6 +318,7 @@ def _save_records(path, records, crossings, meta, Vs, fillings):
         overlap_previous=np.asarray([r["overlap_previous"] for r in records], dtype=float),
         dominant_channel=np.asarray([r["dominant_channel"] for r in records]),
         channel_group=np.asarray([r["channel_group"] for r in records]),
+        source_mode_row=np.asarray([r["source_mode_row"] for r in records], dtype=int),
         co_even=np.asarray([r["co_even"] for r in records], dtype=float),
         co_odd=np.asarray([r["co_odd"] for r in records], dtype=float),
         lc_same=np.asarray([r["lc_same"] for r in records], dtype=float),
