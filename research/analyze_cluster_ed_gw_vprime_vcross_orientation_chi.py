@@ -329,7 +329,7 @@ def main():
         args.out.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
             args.out,
-            schema=np.asarray(1, dtype=int),
+            schema=np.asarray(2, dtype=int),
             channels=np.asarray(CHANNELS),
             co_channels=np.asarray(CO_CHANNELS),
             lc_channels=np.asarray(LC_CHANNELS),
