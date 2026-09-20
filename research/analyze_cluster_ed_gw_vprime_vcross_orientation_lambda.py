@@ -643,7 +643,7 @@ def main():
             lambda_modulus_co=np.asarray([r["modulus_co"] for r in all_rows]),
             all_q=np.asarray(bool(args.all_q)),
             stage=np.asarray(str(args.stage)),
-            full_spectrum_schema=np.asarray(1, dtype=int),
+            full_spectrum_schema=np.asarray(2, dtype=int),
             mode_source_files=np.asarray([r["file"] for r in all_mode_rows]),
             mode_orientation=np.asarray([r["orientation"] for r in all_mode_rows], dtype=int),
             mode_q_index=np.asarray([r["q"] for r in all_mode_rows], dtype=int),
