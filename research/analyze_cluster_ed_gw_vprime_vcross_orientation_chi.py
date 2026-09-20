@@ -36,7 +36,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 import numpy as np
 
-from rubycgw.cluster_ed_gw_jf import response_matrix
+import rubycgw.cluster_ed_gw_jf as cluster_jf
 from rubycgw.cluster_ed_gw_jf_consistent import install_tail_consistent_cluster_jf
 from rubycgw.finite_q_cgw import negative_q_index
 from rubycgw.pseudospin import primitive_cell_pseudospin_channels
@@ -188,7 +188,7 @@ def _solve_all_q(op, grid, qlist, args):
             f"({', '.join(labels)}) ---",
             flush=True,
         )
-        chi, results = response_matrix(
+        chi, results = cluster_jf.response_matrix(
             op,
             K,
             q,
@@ -211,7 +211,7 @@ def _ensure_q_pairs(op, grid, qlist, args, raw, solver_rows):
             f"\n--- q-pair partner {mq}: solving {len(labels)} physical sources ---",
             flush=True,
         )
-        chi, results = response_matrix(
+        chi, results = cluster_jf.response_matrix(
             op,
             K,
             mq,
