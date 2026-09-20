@@ -166,6 +166,8 @@ def _append_record(records, *, filling, V, q, sector, branch_id, idx, modes, ove
     weights = {k: float(modes[k][idx]) for k in WEIGHT_KEYS}
     ch, group = _channel(weights)
     lam = complex(modes["lambda"][idx])
+    mode_rows = modes.get("mode_row")
+    source_mode_row = int(idx) if mode_rows is None else int(mode_rows[idx])
     records.append(
         dict(
             filling=float(filling),
@@ -179,7 +181,7 @@ def _append_record(records, *, filling, V, q, sector, branch_id, idx, modes, ove
             overlap_previous=float(overlap),
             dominant_channel=ch,
             channel_group=group,
-            source_mode_row=int(modes["mode_row"][idx]),
+            source_mode_row=source_mode_row,
             **weights,
         )
     )
