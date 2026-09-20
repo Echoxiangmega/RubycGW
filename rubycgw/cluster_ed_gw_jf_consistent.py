@@ -22,6 +22,8 @@ standalone drivers see the corrected implementation.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 from scipy.sparse.linalg import LinearOperator
 
@@ -369,11 +371,59 @@ def _response_matrix_consistent(
             initial_gamma=initial_gammas[j],
             recycle=CU,
         )
+
+        # Cross-RHS GCROTMK recycling is usually a substantial speedup, but for
+        # a very non-normal / nearly singular response operator a recycled
+        # subspace from a different physical source can occasionally trigger a
+        # catastrophic Krylov breakdown.  A failed driven response is therefore
+        # retried first with a fresh GCROTMK subspace, then (only if necessary)
+        # with plain restarted GMRES.  The physical linear system is unchanged.
+        if not result.converged and str(operator.opts.solver).lower() == "gcrotmk":
+            if operator.opts.verbose:
+                print(
+                    f"[cluster-JF] channel {j} q={q_index}: recycled GCROTMK "
+                    f"failed (residual={result.final_error:.3e}, "
+                    f"info={result.solver_info}); retrying with fresh basis",
+                    flush=True,
+                )
+            result = operator.solve(
+                vertex,
+                q_index,
+                initial_gamma=initial_gammas[j],
+                recycle=[],
+            )
+
+        if not result.converged and str(operator.opts.solver).lower() == "gcrotmk":
+            if operator.opts.verbose:
+                print(
+                    f"[cluster-JF] channel {j} q={q_index}: fresh GCROTMK "
+                    f"failed (residual={result.final_error:.3e}, "
+                    f"info={result.solver_info}); retrying with GMRES",
+                    flush=True,
+                )
+            old_opts = operator.opts
+            operator.opts = replace(
+                old_opts,
+                solver="gmres",
+                maxiter=max(int(old_opts.maxiter), 2 * int(old_opts.maxiter)),
+                restart=max(int(old_opts.restart), 40),
+            )
+            try:
+                result = operator.solve(
+                    vertex,
+                    q_index,
+                    initial_gamma=initial_gammas[j],
+                    recycle=None,
+                )
+            finally:
+                operator.opts = old_opts
+
         results.append(result)
         if not result.converged:
             raise RuntimeError(
-                f"embedded JF channel {j} at q={q_index} did not converge: "
-                f"residual={result.final_error:.3e}, info={result.solver_info}"
+                f"embedded JF channel {j} at q={q_index} did not converge after "
+                f"fresh-basis/GMRES fallback: residual={result.final_error:.3e}, "
+                f"info={result.solver_info}"
             )
 
     chi = np.zeros((len(K), len(K)), dtype=complex)
