@@ -46,8 +46,15 @@ def _args():
     p.add_argument("--jf-dir", type=Path, default=None)
     p.add_argument("--out", type=Path, default=None)
     p.add_argument(
-        "--min-overlap", type=float, default=0.35,
+        "--min-overlap", type=float, default=0.80,
         help="minimum |<v_i|v_j>| required to continue an existing branch",
+    )
+    p.add_argument(
+        "--max-gap-factor", type=float, default=3.0,
+        help=(
+            "do not track through a V gap larger than this factor times the "
+            "median local V spacing; <=0 disables gap splitting"
+        ),
     )
     p.add_argument(
         "--imag-tol", type=float, default=5e-3,
@@ -228,7 +235,7 @@ def _track_group(points, *, filling, q, sector, min_overlap, records, next_branc
     return next_branch
 
 
-def _crossings(records, imag_tol):
+def _crossings(records, imag_tol, min_overlap):
     by_branch = {}
     for r in records:
         by_branch.setdefault(int(r["branch_id"]), []).append(r)
@@ -237,6 +244,10 @@ def _crossings(records, imag_tol):
     for bid, rr in by_branch.items():
         rr = sorted(rr, key=lambda x: x["V"])
         for a, b in zip(rr[:-1], rr[1:]):
+            if not np.isfinite(float(b["overlap_previous"])):
+                continue
+            if float(b["overlap_previous"]) < float(min_overlap):
+                continue
             la = complex(a["lambda_value"])
             lb = complex(b["lambda_value"])
             if abs(la.imag) > imag_tol or abs(lb.imag) > imag_tol:
@@ -361,6 +372,20 @@ def _plot_crossings(path, crossings):
     plt.close(fig)
 
 
+def _split_points_by_gap(points, max_gap):
+    if not points:
+        return []
+    if max_gap is None or not np.isfinite(max_gap) or max_gap <= 0:
+        return [points]
+    segments = [[points[0]]]
+    for point in points[1:]:
+        if float(point[0]) - float(segments[-1][-1][0]) > float(max_gap):
+            segments.append([point])
+        else:
+            segments[-1].append(point)
+    return segments
+
+
 def main():
     args = _args()
     if not args.summary.exists():
@@ -375,6 +400,25 @@ def main():
     records = []
     next_branch = 0
     missing = []
+
+    sorted_Vs = np.sort(np.unique(Vs))
+    vdiff = np.diff(sorted_Vs)
+    positive_vdiff = vdiff[vdiff > 0]
+    typical_dV = (
+        float(np.median(positive_vdiff))
+        if len(positive_vdiff)
+        else np.nan
+    )
+    max_gap = (
+        float(args.max_gap_factor) * typical_dV
+        if float(args.max_gap_factor) > 0 and np.isfinite(typical_dV)
+        else None
+    )
+    if max_gap is not None:
+        print(
+            f"tracking gap guard: typical dV={typical_dV:.6g}, "
+            f"max connected gap={max_gap:.6g}"
+        )
 
     for filling in fillings:
         loaded = []
@@ -399,17 +443,22 @@ def main():
                 points.append((V, modes, idx))
             if not points:
                 continue
-            next_branch = _track_group(
-                points,
-                filling=float(filling),
-                q=q,
-                sector=sector,
-                min_overlap=float(args.min_overlap),
-                records=records,
-                next_branch=next_branch,
-            )
+            for segment in _split_points_by_gap(points, max_gap):
+                next_branch = _track_group(
+                    segment,
+                    filling=float(filling),
+                    q=q,
+                    sector=sector,
+                    min_overlap=float(args.min_overlap),
+                    records=records,
+                    next_branch=next_branch,
+                )
 
-    crossings = _crossings(records, float(args.imag_tol))
+    crossings = _crossings(
+        records,
+        float(args.imag_tol),
+        float(args.min_overlap),
+    )
     tracked_path = outdir / "vn_tracked_modes.npz"
     csv_path = outdir / "vn_mode_crossings.csv"
     _save_records(tracked_path, records, crossings, meta, Vs, fillings)
