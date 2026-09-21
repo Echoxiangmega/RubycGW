@@ -85,7 +85,9 @@ def _args():
     p.add_argument("--embed-mixing-method", choices=("linear", "pulay", "broyden"), default="broyden")
     p.add_argument("--embed-mixing", type=float, default=0.5)
     p.add_argument("--embed-broyden-history", type=int, default=8)
+    p.add_argument("--embed-broyden-regularization", type=float, default=1e-8)
     p.add_argument("--embed-broyden-step-cap", type=float, default=3.0)
+    p.add_argument("--embed-broyden-reset-growth", type=float, default=1.5)
     p.add_argument("--bath-fit-nfreq", type=int, default=12)
     p.add_argument("--bath-fit-max-nfev", type=int, default=300)
     p.add_argument("--bath-fit-metric", choices=("delta", "g0"), default="delta")
@@ -212,7 +214,9 @@ def _background_command(args, V, filling, bgdir, seed):
         "--embed-mixing-method", str(args.embed_mixing_method),
         "--embed-mixing", repr(float(args.embed_mixing)),
         "--embed-broyden-history", str(args.embed_broyden_history),
+        "--embed-broyden-regularization", repr(float(args.embed_broyden_regularization)),
         "--embed-broyden-step-cap", repr(float(args.embed_broyden_step_cap)),
+        "--embed-broyden-reset-growth", repr(float(args.embed_broyden_reset_growth)),
         "--nbath", str(args.nbath),
         "--bath-fit-nfreq", str(args.bath_fit_nfreq),
         "--bath-fit-max-nfev", str(args.bath_fit_max_nfev),
