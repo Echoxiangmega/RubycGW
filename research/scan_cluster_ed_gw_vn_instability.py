@@ -88,6 +88,7 @@ def _args():
     p.add_argument("--embed-broyden-regularization", type=float, default=1e-8)
     p.add_argument("--embed-broyden-step-cap", type=float, default=3.0)
     p.add_argument("--embed-broyden-reset-growth", type=float, default=1.5)
+    p.add_argument("--impurity-mixing", type=float, default=1.0)
     p.add_argument("--bath-fit-nfreq", type=int, default=12)
     p.add_argument("--bath-fit-max-nfev", type=int, default=300)
     p.add_argument("--bath-fit-metric", choices=("delta", "g0"), default="delta")
@@ -217,6 +218,7 @@ def _background_command(args, V, filling, bgdir, seed):
         "--embed-broyden-regularization", repr(float(args.embed_broyden_regularization)),
         "--embed-broyden-step-cap", repr(float(args.embed_broyden_step_cap)),
         "--embed-broyden-reset-growth", repr(float(args.embed_broyden_reset_growth)),
+        "--impurity-mixing", repr(float(args.impurity_mixing)),
         "--nbath", str(args.nbath),
         "--bath-fit-nfreq", str(args.bath_fit_nfreq),
         "--bath-fit-max-nfev", str(args.bath_fit_max_nfev),
