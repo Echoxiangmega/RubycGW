@@ -365,12 +365,34 @@ def _response_matrix_consistent(
     CU = [] if recycle and str(operator.opts.solver).lower() == "gcrotmk" else None
     results = []
     for j, vertex in enumerate(K):
-        result = operator.solve(
-            vertex,
-            q_index,
-            initial_gamma=initial_gammas[j],
-            recycle=CU,
-        )
+        # SciPy's GCROTMK updates CU in place.  A catastrophic failed solve can
+        # therefore poison the shared recycle basis with NaN/Inf entries.  Do
+        # not let that corrupted subspace crash the next physical source in the
+        # QR orthogonalization; discard it and retry from a fresh basis.
+        try:
+            result = operator.solve(
+                vertex,
+                q_index,
+                initial_gamma=initial_gammas[j],
+                recycle=CU,
+            )
+        except (ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:
+            if CU is None or str(operator.opts.solver).lower() != "gcrotmk":
+                raise
+            if operator.opts.verbose:
+                print(
+                    f"[cluster-JF] channel {j} q={q_index}: recycled GCROTMK "
+                    f"raised {type(exc).__name__} ({exc}); clearing recycle "
+                    "basis and retrying fresh",
+                    flush=True,
+                )
+            CU.clear()
+            result = operator.solve(
+                vertex,
+                q_index,
+                initial_gamma=initial_gammas[j],
+                recycle=[],
+            )
 
         # Cross-RHS GCROTMK recycling is usually a substantial speedup, but for
         # a very non-normal / nearly singular response operator a recycled
@@ -386,6 +408,11 @@ def _response_matrix_consistent(
                     f"info={result.solver_info}); retrying with fresh basis",
                     flush=True,
                 )
+            # The failed call may have mutated the shared CU in place and left
+            # non-finite vectors behind.  Clear the shared basis before moving
+            # to either this fresh retry or the next right-hand side.
+            if CU is not None:
+                CU.clear()
             result = operator.solve(
                 vertex,
                 q_index,
