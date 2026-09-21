@@ -71,6 +71,14 @@ def _args():
     p.add_argument("--gw-tol", type=float, default=1e-8)
     p.add_argument("--gw-mixing", type=float, default=0.25)
     p.add_argument("--gw-mixing-method", choices=("linear", "pulay"), default="pulay")
+    p.add_argument(
+        "--allow-unconverged-gw-background",
+        action="store_true",
+        help=(
+            "allow the standalone SC-GW stage to hit --gw-max and pass its last "
+            "finite iterate to cluster ED+GW as an initializer"
+        ),
+    )
 
     p.add_argument("--embed-max", type=int, default=120)
     p.add_argument("--embed-tol", type=float, default=5e-7)
@@ -211,6 +219,8 @@ def _background_command(args, V, filling, bgdir, seed):
         "--bath-fit-metric", str(args.bath_fit_metric),
         "--out", str(bgdir),
     ]
+    if bool(args.allow_unconverged_gw_background):
+        cmd.append("--allow-unconverged-gw-background")
     if seed is not None:
         cmd.extend(["--continue-from", str(seed)])
     if bool(args.quiet_solvers):
