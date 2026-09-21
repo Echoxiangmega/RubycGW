@@ -299,7 +299,10 @@ def _solve_consistent(operator, K, q_index, *, initial_gamma=None, recycle=None)
             atol=0.0,
             maxiter=int(operator.opts.maxiter),
             m=int(operator.opts.restart),
-            k=int(operator.opts.recycle_dim),
+            # recycle=None means the caller explicitly requested no Krylov
+            # recycling.  In that mode also disable GCROT's within-solve
+            # carried subspace, rather than merely preventing cross-RHS reuse.
+            k=(0 if recycle is None else int(operator.opts.recycle_dim)),
             CU=CU,
             callback=callback,
         )
