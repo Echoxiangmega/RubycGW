@@ -73,6 +73,7 @@ def _args():
     p.add_argument("--bath-fd-scheme", choices=("centered", "forward"), default="centered")
     p.add_argument("--discard-weight-tol", type=float, default=1e-11)
     p.add_argument("--stage", choices=("mt", "full"), default="full")
+    p.add_argument("--jf-solver", choices=("gcrotmk", "gmres"), default="gcrotmk")
     p.add_argument("--jf-tol", type=float, default=1e-8)
     p.add_argument("--jf-maxiter", type=int, default=100)
     p.add_argument("--jf-restart", type=int, default=28)
@@ -277,6 +278,7 @@ def main():
         d, orientation, grid, params, op, tangent = _build_operator(path, args)
         op.opts = replace(
             op.opts,
+            solver=str(args.jf_solver),
             tol=float(args.jf_tol),
             maxiter=int(args.jf_maxiter),
             restart=int(args.jf_restart),
@@ -423,6 +425,7 @@ def main():
                 [np.max(r["solver_residual"]) for r in all_rows], dtype=float
             ),
             stage=np.asarray(str(args.stage)),
+            jf_solver=np.asarray(str(args.jf_solver)),
             fixed_filling_q0=np.asarray(True),
             bath_rank=np.asarray(int(args.bath_rank)),
             bath_svd_rcond=np.asarray(float(args.bath_svd_rcond)),
