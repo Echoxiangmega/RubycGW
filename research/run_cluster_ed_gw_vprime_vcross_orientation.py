@@ -82,6 +82,14 @@ def _args():
     p.add_argument("--gw-tol", type=float, default=1e-8)
     p.add_argument("--gw-mixing", type=float, default=0.25)
     p.add_argument("--gw-mixing-method", choices=("linear", "pulay"), default="pulay")
+    p.add_argument(
+        "--allow-unconverged-gw-background",
+        action="store_true",
+        help=(
+            "if standalone SC-GW reaches --gw-max with a finite last iterate, "
+            "use that iterate only as the initializer for the coupled cluster-ED+GW map"
+        ),
+    )
 
     p.add_argument("--embed-max", type=int, default=150)
     p.add_argument("--embed-tol", type=float, default=2e-5)
@@ -331,6 +339,7 @@ def main():
         bath_energy_window=float(args.bath_energy_window),
         bath_coupling_bound=float(args.bath_coupling_bound),
         discard_weight_tol=float(args.discard_weight_tol),
+        allow_unconverged_background=bool(args.allow_unconverged_gw_background),
         verbose=not bool(args.quiet_embed),
     )
 
@@ -501,6 +510,10 @@ def main():
             "orientation_parameter_continuation" if args.continue_from is not None
             else "orientation_standalone_scgw"
         ),
+        allow_unconverged_gw_background=bool(args.allow_unconverged_gw_background),
+        initial_gw_converged=bool(result.background.converged),
+        initial_gw_iterations=int(result.background.iterations),
+        initial_gw_residual=float(result.background.final_error),
         Lx=int(args.Lx), Ly=int(args.Ly),
         V=float(args.V), Vprime=float(args.Vprime), Vp=float(args.Vprime),
         Vcross=float(args.Vcross), Vx=float(args.Vcross),
