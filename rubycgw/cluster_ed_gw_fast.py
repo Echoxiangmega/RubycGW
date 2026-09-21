@@ -81,6 +81,11 @@ class ClusterEDGWFastOptions:
     bath_fit_xtol: float = 1.0e-9
     bath_fit_metric: str = "delta"  # "delta" or "g0"
     discard_weight_tol: float = 1.0e-11
+    # A standalone SC-GW solve is only an initializer for the coupled
+    # cluster-ED+GW map.  By default we keep the historical strict behavior,
+    # but research continuations may opt to use the last finite SC-GW iterate
+    # even when its fixed-point residual has not reached gw_opts.tol.
+    allow_unconverged_background: bool = False
     verbose: bool = True
 
 
@@ -340,9 +345,30 @@ def solve_cluster_ed_gw_fast(
             flush=True,
         )
     if not background.converged:
-        raise RuntimeError(
-            f"initial lattice GW background is not converged: {background.final_error:.3e}"
+        finite_seed = (
+            np.isfinite(float(background.mu))
+            and np.all(np.isfinite(np.asarray(background.G)))
+            and np.all(np.isfinite(np.asarray(background.Sigma_H)))
+            and np.all(np.isfinite(np.asarray(background.Sigma_GW)))
         )
+        if not bool(embed_opts.allow_unconverged_background):
+            raise RuntimeError(
+                f"initial lattice GW background is not converged: "
+                f"{background.final_error:.3e}"
+            )
+        if not finite_seed:
+            raise RuntimeError(
+                "initial lattice GW background reached its iteration limit but "
+                "contains non-finite G/Sigma/mu, so it cannot seed cluster ED+GW"
+            )
+        if embed_opts.verbose:
+            print(
+                "[cluster-ED+GW] WARNING: standalone SC-GW did not converge "
+                f"(iterations={background.iterations}, residual="
+                f"{background.final_error:.3e}); using its last finite iterate "
+                "only as an initializer for the coupled cluster map",
+                flush=True,
+            )
 
     h_cluster_strict = build_intracell_h0(params)
     h_cluster = np.mean(h0, axis=(0, 1))
