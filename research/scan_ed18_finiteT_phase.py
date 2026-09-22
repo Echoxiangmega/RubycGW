@@ -194,7 +194,7 @@ def _plot(out, V, fillings, chi_max, q_soft, phase_code, threshold, temperature,
         shading="flat",
     )
     fig.colorbar(im, ax=ax, label=r"$\chi_{\max}$")
-    ax.contour(V, fillings, chi_max, levels=[float(threshold)], linewidths=1.4)
+    if len(V) >= 2 and len(fillings) >= 2:\n        ax.contour(V, fillings, chi_max, levels=[float(threshold)], linewidths=1.4)
     ax.set_xlabel("V")
     ax.set_ylabel("primitive filling n")
     ax.set_title(f"18-site finite-T ED max susceptibility, T={temperature:g}")
