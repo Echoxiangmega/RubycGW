@@ -55,6 +55,7 @@ def _args():
     p.add_argument("--bath-fd-scheme", choices=("centered", "forward"), default="centered")
     p.add_argument("--discard-weight-tol", type=float, default=1e-11)
     p.add_argument("--stage", choices=("mt", "full"), default="full")
+    p.add_argument("--jf-solver", choices=("gcrotmk", "gmres"), default="gcrotmk")
     p.add_argument("--jf-tol", type=float, default=1e-8)
     p.add_argument("--jf-maxiter", type=int, default=100)
     p.add_argument("--jf-restart", type=int, default=28)
@@ -134,6 +135,7 @@ def _command(args, checkpoint, outfile):
         "--bath-fd-scheme", str(args.bath_fd_scheme),
         "--discard-weight-tol", repr(float(args.discard_weight_tol)),
         "--stage", str(args.stage),
+        "--jf-solver", str(args.jf_solver),
         "--jf-tol", repr(float(args.jf_tol)),
         "--jf-maxiter", str(args.jf_maxiter),
         "--jf-restart", str(args.jf_restart),
