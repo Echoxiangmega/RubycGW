@@ -1,0 +1,61 @@
+name: ED18 coarse phase scan
+
+on:
+  push:
+    paths:
+      - ".github/workflows/ed18-coarse-phase.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - filling: "1"
+            tag: "n1"
+          - filling: "1.3333333333333333"
+            tag: "n4over3"
+          - filling: "1.6666666666666667"
+            tag: "n5over3"
+          - filling: "2"
+            tag: "n2"
+          - filling: "2.3333333333333335"
+            tag: "n7over3"
+          - filling: "2.6666666666666665"
+            tag: "n8over3"
+          - filling: "3"
+            tag: "n3"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e .
+      - name: Run finite-T ED18 scan
+        run: |
+          python research/scan_ed18_finiteT_phase.py \
+            --V-values "0.4,0.8,1.2,1.6,1.8" \
+            --fillings "${{ matrix.filling }}" \
+            --T 0.01 \
+            --ti 0.4 \
+            --t1 0.2 \
+            --t2 0.2 \
+            --Vp -0.1 \
+            --Vx -0.07 \
+            --chi-threshold 20 \
+            --thermal-samples 2 \
+            --tau-points 9 \
+            --out "results/ed18_phase_T001/${{ matrix.tag }}/ed18_softmode_phase.npz"
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "ed18-${{ matrix.tag }}"
+          path: "results/ed18_phase_T001/${{ matrix.tag }}"
+          if-no-files-found: warn
