@@ -1,4 +1,4 @@
-name: ED18 coarse phase scan
+name: ED18 coarse phase scan\n# coarse benchmark: T=0.01, two typicality vectors
 
 on:
   push:
