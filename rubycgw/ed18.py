@@ -25,13 +25,20 @@ from scipy import sparse
 from scipy.sparse.linalg import eigsh
 
 from .model import RubyParameters, NSUB
+from .models.ruby import (
+    ExtendedRubyParameters,
+    INTRATRIANGLE_BONDS,
+    INTERTRIANGLE_BONDS,
+    CROSS_INTERTRIANGLE_BONDS,
+)
 from .pseudospin import primitive_pseudospin_vertex
 from .supercell import (
     NSECTOR,
     NSUP,
     SUPERCELL_REPRESENTATIVES,
     build_supercell_h0,
-    supercell_interaction_bonds,
+    primitive_cell_to_supercell,
+    supercell_site_index,
 )
 
 ED18_CHANNELS = (
@@ -176,29 +183,61 @@ class ED18Solver:
         if sparse.linalg.norm(self.H_t - self.H_t.T) > 1e-10:
             raise RuntimeError("ED hopping Hamiltonian is not symmetric")
 
-        # H_V = V * D, where D counts occupied intra-triangle interaction bonds.
-        p1 = RubyParameters(ti=params.ti, t1=params.t1, t2=params.t2, V=1.0)
-        pairs: set[tuple[int, int]] = set()
-        for I, J, S, coupling in supercell_interaction_bonds(p1):
-            if np.any(np.asarray(S, dtype=int) != 0):
-                raise RuntimeError("18-site ED expects all V bonds to be intra-supercell")
-            if abs(complex(coupling)) > 1e-14:
-                pairs.add(tuple(sorted((int(I), int(J)))))
-        self.interaction_pairs = tuple(sorted(pairs))
-        self.interaction_count = np.zeros(self.dimension, dtype=float)
-        for ib, raw in enumerate(self.basis):
-            state = int(raw)
-            self.interaction_count[ib] = sum(
-                ((state >> i) & 1) * ((state >> j) & 1)
-                for i, j in self.interaction_pairs
-            )
+        # Density interactions on the literal three-cell torus.  Each
+        # primitive real-space bond is translated into all three sectors and
+        # counted once.  Intercell V'/Vx bonds may wrap through the one-
+        # supercell PBC; distinct physical bonds are deliberately NOT
+        # deduplicated if they collapse onto the same finite-cluster pair.
+        def interaction_diagonal(motif):
+            diag = np.zeros(self.dimension, dtype=float)
+            mapped: list[tuple[int, int]] = []
+            for s, Rs in enumerate(SUPERCELL_REPRESENTATIVES):
+                for a, b, delta in motif:
+                    sp, _S = primitive_cell_to_supercell(
+                        np.asarray(Rs, dtype=int) + np.asarray(delta, dtype=int)
+                    )
+                    I = supercell_site_index(s, int(a))
+                    J = supercell_site_index(sp, int(b))
+                    if I == J:
+                        raise RuntimeError("density bond collapsed onto one ED orbital")
+                    mapped.append((I, J))
+            for ib, raw in enumerate(self.basis):
+                state = int(raw)
+                diag[ib] = sum(
+                    ((state >> i) & 1) * ((state >> j) & 1)
+                    for i, j in mapped
+                )
+            return diag, tuple(mapped)
+
+        self.interaction_count, self.interaction_pairs = interaction_diagonal(
+            INTRATRIANGLE_BONDS
+        )
+        self.vprime_count, self.vprime_pairs = interaction_diagonal(
+            INTERTRIANGLE_BONDS
+        )
+        self.vcross_count, self.vcross_pairs = interaction_diagonal(
+            CROSS_INTERTRIANGLE_BONDS
+        )
+        self.Vprime = float(getattr(params, "Vprime", 0.0))
+        self.Vcross = float(getattr(params, "Vcross", 0.0))
+        self.fixed_interaction_diagonal = (
+            self.Vprime * self.vprime_count + self.Vcross * self.vcross_count
+        )
 
         self.translation_a1 = self._build_translation_a1()
         if sparse.linalg.norm(self.translation_a1 @ self.H_t - self.H_t @ self.translation_a1) > 1e-10:
             raise RuntimeError("primitive translation does not commute with H_t")
-        permuted_diag = self.translation_a1 @ sparse.diags(self.interaction_count) - sparse.diags(self.interaction_count) @ self.translation_a1
-        if sparse.linalg.norm(permuted_diag) > 1e-10:
-            raise RuntimeError("primitive translation does not commute with H_V")
+        for name, diag in (
+            ("V", self.interaction_count),
+            ("Vprime", self.vprime_count),
+            ("Vcross", self.vcross_count),
+        ):
+            dmat = sparse.diags(diag)
+            comm = self.translation_a1 @ dmat - dmat @ self.translation_a1
+            if sparse.linalg.norm(comm) > 1e-10:
+                raise RuntimeError(
+                    f"primitive translation does not commute with H_{name}"
+                )
 
         self._operator_cache: dict[tuple[float, float, str], sparse.csr_matrix] = {}
 
@@ -221,7 +260,11 @@ class ED18Solver:
         return sparse.csr_matrix((signs, (rows, cols)), shape=(self.dimension, self.dimension))
 
     def hamiltonian(self, V: float) -> sparse.csr_matrix:
-        return self.H_t + sparse.diags(float(V) * self.interaction_count, format="csr")
+        diag = (
+            float(V) * self.interaction_count
+            + self.fixed_interaction_diagonal
+        )
+        return self.H_t + sparse.diags(diag, format="csr")
 
     def solve(
         self,
