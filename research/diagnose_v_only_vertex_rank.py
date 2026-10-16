@@ -73,6 +73,27 @@ def embed_q0(mats, cells):
     return out
 
 
+def embed_real_q(mats, coordinates, q):
+    """Hermitian supercell sources for primitive-cell Q with phases +/-1.
+
+    Non-real phases require separate cosine/sine Hermitian sources and
+    are intentionally excluded from this 36-channel diagnostic.
+    """
+    base = np.asarray(mats, dtype=complex)
+    coordinates = np.asarray(coordinates, dtype=float)
+    q = np.asarray(q, dtype=float).reshape(2)
+    if not np.allclose(2*q, np.rint(2*q), atol=1e-12, rtol=0):
+        raise ValueError("This 36-channel Q driver supports only 2Q integer")
+    phases = np.exp(-2j*np.pi * coordinates @ q)
+    if np.max(np.abs(phases.imag)) > 1e-10:
+        raise ValueError("Selected Q is not a real harmonic on this torus")
+    ncell, n = len(coordinates), base.shape[-1]
+    result = np.zeros((len(base), ncell*n, ncell*n), dtype=complex)
+    for c, phase in enumerate(phases.real):
+        result[:, c*n:(c+1)*n, c*n:(c+1)*n] = phase * base/np.sqrt(ncell)
+    return result
+
+
 def symmetric(a):
     a = np.asarray(a)
     return 0.5 * (a.real + a.real.T)
@@ -237,6 +258,10 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--L1", type=int, default=1)
     p.add_argument("--L2", type=int, default=1)
+    p.add_argument("--Q1", type=float, default=0.0,
+                   help="primitive reduced transfer Q1; only 2Q integer")
+    p.add_argument("--Q2", type=float, default=0.0,
+                   help="primitive reduced transfer Q2; only 2Q integer")
     p.add_argument("--V", nargs="+", type=float, default=[0.2])
     p.add_argument("--ti", type=float, default=0.4)
     p.add_argument("--t1", type=float, default=0.2)
@@ -257,20 +282,26 @@ def main():
     args = parse_args()
     if args.L1 * args.L2 * 6 > 16:
         raise ValueError("Full thermal ED requires no more than 16 sites")
+    q = np.array([args.Q1, args.Q2], dtype=float)
+    if np.max(abs(q * np.array([args.L1, args.L2]) -
+                      np.rint(q * np.array([args.L1, args.L2])))) > 1e-11:
+        raise ValueError("Q must be commensurate with the L1 x L2 torus")
+    if np.max(abs(2*q - np.rint(2*q))) > 1e-11:
+        raise ValueError("Only q with real +/- cell phases supported")
     mats, labels, kinds = hermitian_form_factors()
     refs = target_vectors(mats)
     grid = MatsubaraGrid(nk1=1, nk2=1, nw=args.nw,
                          nOmega=args.nomega, T=args.T)
     for V in args.V:
         print(f"==== Original V-only Ruby: V={V:g}, "
-              f"{args.L1}x{args.L2} ====", flush=True)
+              f"{args.L1}x{args.L2}, Q=({q[0]:g},{q[1]:g}) ====", flush=True)
         params = RubyParameters(ti=args.ti, t1=args.t1,
                                 t2=args.t2, V=V)
         ed = ExactSmallRubyThermal(args.L1, args.L2, params)
         ed.diagonalize(V)
         filling = args.filling * ed.n_cells
         mu = ed.solve_mu(filling, args.T)
-        sources = embed_q0(mats, ed.n_cells)
+        sources = embed_real_q(mats, ed.cell_coordinates, q)
         chi_ed, means = ed.static_susceptibility_matrix(
             sources, mu, args.T
         )
@@ -313,7 +344,8 @@ def main():
             chi_ed, chi_cgw, bubble_gw, bubble_ed,
             rcond=args.rcond
         )
-        folder = args.out / f"V_{V:.6g}"
+        suffix = "" if np.allclose(q, 0.) else f"_Q_{q[0]:.6g}_{q[1]:.6g}"
+        folder = args.out / f"V_{V:.6g}{suffix}"
         folder.mkdir(parents=True, exist_ok=True)
         for name, vec in refs.items():
             print(f" {name:14s} ED={vec@chi_ed@vec:+.7g} "
@@ -329,7 +361,7 @@ def main():
         ])
         np.savez_compressed(
             folder / "rank_diagnostic.npz",
-            V=V, T=args.T, mu_ed=mu, mu_gw=gw.mu,
+            V=V, T=args.T, mu_ed=mu, mu_gw=gw.mu, Q=q,
             L1=args.L1, L2=args.L2,
             labels=labels, kinds=kinds, operators=mats,
             chi_ed=chi_ed, chi_cgw=chi_cgw,
