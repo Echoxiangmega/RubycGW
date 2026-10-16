@@ -1,4 +1,4 @@
-name: Ruby V-only 2x1 finite-Q rank pilot
+name: Ruby V-only 2x1 finite-Q rank comparison
 
 on:
   push:
@@ -27,20 +27,21 @@ jobs:
         run: |
           python research/diagnose_v_only_vertex_rank.py \
             --L1 2 --L2 1 --Q1 0.5 --Q2 0 \
-            --V 0.6 --T 0.08 --filling 3 \
-            --nw 28 --nomega 7 --gw-max-iter 140 \
-            --vertex-max-iter 150 \
+            --V 0.2 0.6 --T 0.08 --filling 3 \
+            --nw 55 --nomega 12 --gw-max-iter 140 \
+            --vertex-max-iter 180 \
             --out results/v_only_finiteQ_pilot
       - name: Analyze finite-Q response correction
         run: |
           python research/analyze_v_only_response_rank.py \
+            results/v_only_finiteQ_pilot/V_0.2_Q_0.5_0/rank_diagnostic.npz \
             results/v_only_finiteQ_pilot/V_0.6_Q_0.5_0/rank_diagnostic.npz \
             --out results/v_only_finiteQ_rank
       - name: Persist finite-Q calculations
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ruby-v-only-2x1-qpi
+          name: ruby-v-only-2x1-qpi-refined
           path: |
             results/v_only_finiteQ_pilot/
             results/v_only_finiteQ_rank/
