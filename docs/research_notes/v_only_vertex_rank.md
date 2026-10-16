@@ -181,3 +181,43 @@ those require separate cosine/sine Hermitian components.
 The preferred next benchmark is convergence in Matsubara windows
 and the comparison of additional finite momenta and charge
 form factors before making a claim about the ordering competition.
+
+
+### Refined 12-site q=0 convergence and cross-V modes
+
+A second [12-site q=0 job](https://github.com/Echoxiangmega/RubycGW/actions/runs/38911508679)
+used `nw=55,nOmega=12` at the same temperature and filling.
+
+| V | channel | ED | cGW |
+|---|---|---:|---:|
+| 0.2 | LC_same | 1.624014 | 1.691236 |
+| 0.2 | LC_opposite | 1.542006 | 1.595567 |
+| 0.2 | CO_AminusB | 0.6074731 | 0.5881776 |
+| 0.6 | LC_same | 1.933250 | 2.853599 |
+| 0.6 | LC_opposite | 1.882308 | 2.654854 |
+| 0.6 | CO_AminusB | 0.5777883 | 0.4284481 |
+
+The GW/ED bubble matrix relative errors are about `0.00347` and
+`0.02685` at V=0.2 and V=0.6. The cGW vertex residuals at V=0.6
+are below `4.6e-9`; the GW residual is about `1.75e-8`.
+Direct `DeltaChi` spectra give `R4=0.787943` and `0.886689`,
+with 95% capture requiring 7 and 5 modes respectively.
+
+The **first two** response-difference eigenvectors at V=0.2 and V=0.6
+have unsigned inner products approximately `0.99964` and `0.99905`,
+respectively. The seven-dimensional leading subspaces also show
+strong overlap (their seven principal-angle singular values are
+all above ~0.996). At V=0.6 the leading eigenvectors are dominated
+by imaginary-bond (current) operators, while the seventh important
+eigenvector predominantly contributes to the A-minus-B charge
+response.
+
+Projecting the V=0.6 DeltaChi onto the *fixed seven-dimensional
+subspace* derived at V=0.2 while obtaining **new amplitudes from ED
+at V=0.6** yields about -1.05%, -1.48%, and +0.42% errors for the
+same, opposite and CO observables. These values diagnose structural
+transferability but do not validate an ED-independent prediction.
+
+Comparing V=0.6 q=0 cGW using `nw=28,nOmega=7` versus
+`nw=55,nOmega=12` changes the shown current responses by ~0.5%;
+this is encouraging but is **not** a rigorous cutoff extrapolation.
