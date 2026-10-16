@@ -2,7 +2,7 @@
 import numpy as np
 
 from research.diagnose_v_only_vertex_rank import (
-    effective_rank_diagnostic, embed_q0, hermitian_form_factors,
+    effective_rank_diagnostic, embed_q0, embed_real_q, hermitian_form_factors,
     target_vectors,
 )
 from rubycgw.model import RubyParameters, ruby_interaction_bonds
@@ -75,3 +75,22 @@ def test_driver_invocation_from_checkout_without_editable_install(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     assert "--filling" in proc.stdout
+
+
+def test_commensurate_q_pi_preserves_orthonormal_hermitian_basis():
+    mats, _, _ = hermitian_form_factors()
+    coord = np.array([[0, 0], [1, 0]], dtype=int)
+    q_zero = embed_real_q(mats, coord, (0.0, 0.0))
+    q_pi = embed_real_q(mats, coord, (0.5, 0.0))
+    np.testing.assert_allclose(q_zero, embed_q0(mats, 2))
+    for operators in (q_zero, q_pi):
+        np.testing.assert_allclose(operators, operators.conj().swapaxes(-1, -2))
+        np.testing.assert_allclose(
+            np.einsum("aij,bji->ab", operators, operators),
+            np.eye(36), atol=1e-13
+        )
+    # q=0 and q=pi operators are orthogonal on the two-cell torus.
+    np.testing.assert_allclose(
+        np.einsum("aij,bji->ab", q_zero, q_pi),
+        np.zeros((36, 36)), atol=1e-13
+    )
