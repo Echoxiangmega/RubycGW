@@ -1,0 +1,47 @@
+name: Ruby V-only 2x1 finite-Q rank pilot
+
+on:
+  push:
+    paths:
+      - .github/workflows/v-only-2x1-qpi.yml
+  workflow_dispatch:
+
+jobs:
+  qpi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      PYTHONUNBUFFERED: "1"
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install RubycGW
+        run: python -m pip install -e .
+      - name: Compute 12-site finite-Q=(1/2,0) ED and cGW
+        run: |
+          python research/diagnose_v_only_vertex_rank.py \
+            --L1 2 --L2 1 --Q1 0.5 --Q2 0 \
+            --V 0.6 --T 0.08 --filling 3 \
+            --nw 28 --nomega 7 --gw-max-iter 140 \
+            --vertex-max-iter 150 \
+            --out results/v_only_finiteQ_pilot
+      - name: Analyze finite-Q response correction
+        run: |
+          python research/analyze_v_only_response_rank.py \
+            results/v_only_finiteQ_pilot/V_0.6_Q_0.5_0/rank_diagnostic.npz \
+            --out results/v_only_finiteQ_rank
+      - name: Persist finite-Q calculations
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ruby-v-only-2x1-qpi
+          path: |
+            results/v_only_finiteQ_pilot/
+            results/v_only_finiteQ_rank/
+          if-no-files-found: warn
