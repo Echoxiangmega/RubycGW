@@ -221,3 +221,49 @@ transferability but do not validate an ED-independent prediction.
 Comparing V=0.6 q=0 cGW using `nw=28,nOmega=7` versus
 `nw=55,nOmega=12` changes the shown current responses by ~0.5%;
 this is encouraging but is **not** a rigorous cutoff extrapolation.
+
+
+### Refined 12-site finite-Q comparison
+
+The [refined Q=(1/2,0) run](https://github.com/Echoxiangmega/RubycGW/actions/runs/38912441224)
+uses `nw=55,nOmega=12` for both `V=0.2` and `V=0.6`.
+This modulation is relative to the primitive cell and is represented
+by opposite real phases on the two cells of the finite torus.
+
+| V | Q | target | ED | cGW |
+|---|---|---|---:|---:|
+| 0.2 | (1/2,0) | LC_same | 1.542006 | 1.595567 |
+| 0.2 | (1/2,0) | LC_opposite | 1.624014 | 1.691236 |
+| 0.2 | (1/2,0) | CO_AminusB | 0.7030093 | 0.6888156 |
+| 0.6 | (1/2,0) | LC_same | 1.882308 | 2.654854 |
+| 0.6 | (1/2,0) | LC_opposite | 1.933250 | 2.853599 |
+| 0.6 | (1/2,0) | CO_AminusB | 0.5597473 | 0.4447949 |
+
+Direct-DeltaChi R(4)=0.794573/0.845350 and rank95=7/6
+at V=0.2/0.6. The first seven eigenspaces at these two V values
+have principal-angle singular values in the interval
+`[0.99671555,0.99992052]`. Transferring the seven-dimensional
+basis from V=0.2 to 0.6, **while refitting its amplitudes with test-V
+ED**, yields approximately -1.48%, -1.05%, and -0.004% errors
+in LC_same, LC_opposite and CO_AminusB.
+
+The sign and ordering of physical currents must be interpreted
+with the geometric eta convention in `rubycgw/model.py`; in the
+2x1 finite torus the two listed current responses exchange
+values between Q=0 and Q=(1/2,0). The exchange is a finite-torus
+fact, not an established thermodynamic symmetry.
+
+The leading two direct-response eigenmodes at V=0.6, Q=0
+are entirely in the time-reversal-odd imaginary-bond sector,
+with about 77% and 83% of their squared form-factor weight
+on the six triangle-internal imaginary-bond operators. The
+remaining 23%/17% belongs to intertriangle bilinears. Thus
+a pure two-triangle loop-current ansatz is a good starting point
+but need not be an exact basis for the correction.
+
+Finally, `DeltaChi` is **not** `Delta I_ph`:
+`DeltaChi` may be low-rank because critical susceptibility modes
+amplify selected directions of a full-rank irreducible correction.
+The inverse-response effective kernel remains strongly sensitive
+to its weak-eigenvalue truncation. A genuine dynamic `I_ph`
+test requires the generalized frequency-resolved susceptibility.
