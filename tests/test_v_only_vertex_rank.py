@@ -57,3 +57,21 @@ def test_rank_two_correction_reconstructs_static_target():
     np.testing.assert_allclose(
         result["chi_reconstructed"][2], chi_ed, atol=1e-12
     )
+
+
+def test_driver_invocation_from_checkout_without_editable_install(tmp_path):
+    """An isolated Python process cannot rely on cwd or PYTHONPATH for imports."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    driver = Path(__file__).resolve().parents[1] / "research" / "diagnose_v_only_vertex_rank.py"
+    proc = subprocess.run(
+        [sys.executable, "-I", str(driver), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "--filling" in proc.stdout
