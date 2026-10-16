@@ -14,6 +14,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+# Support both "python -m research.diagnose_v_only_vertex_rank" and direct
+# invocation "python research/diagnose_v_only_vertex_rank.py" from a checkout
+# that has not been installed with "pip install -e .".
+if __package__ in (None, ""):
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import numpy as np
 
 from rubycgw.ed_cgw_benchmark import relative_frobenius_error
