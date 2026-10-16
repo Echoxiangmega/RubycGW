@@ -111,3 +111,73 @@ energies or other momenta/frequencies. In particular:
 
 The baseline `V=0` case is particularly useful for checking
 operator normalization, ED/GW consistency, and Matsubara tail accuracy.
+
+
+## Follow-up: stable response-difference diagnostic (2026-10-16)
+
+The original eigenvalue plot is unstable in tiny-response directions
+because of explicit inverse susceptibilities. For the original
+`1x1` data at `V=0.6`, varying the relative cutoff from `0.001`
+to `0.01` changes whether the first four reconstructed inverse
+modes correct the loop currents at all. Do not interpret its original
+rank-1 result as proof that the irreducible vertex is rank one.
+
+The additional script
+[`research/analyze_v_only_response_rank.py`](../../research/analyze_v_only_response_rank.py)
+instead diagonalizes
+`DeltaChi = chi_ED - chi_cGW` **without matrix inversion**.
+This captures response-error modes, not a fully irreducible
+or particle-hole irreducible four-point vertex.
+
+Original 1x1 `V=0.2`/`0.6`:
+
+* first four DeltaChi eigenvectors capture about 82.7% / 94.7%
+  of the squared Frobenius error;
+* 95% squared-error capture needs 7 / 5 modes, respectively;
+* the LC response errors are largely captured by the first two
+  directions in both cases.
+* Reusing the **subspace** learned at V=0.2 for V=0.6 and refitting
+  its coefficients with ED at V=0.6 nearly reproduces all three selected
+  target susceptibilities after seven directions. This is a
+  transferability *oracle*, not a prediction without ED.
+
+### Independent 12-site tests
+
+The following were run on GitHub Actions with `L1=2,L2=1`,
+`V=0.6`, `T=0.08`, and filling=3 per primitive cell,
+with the preliminary `nw=28,nOmega=7` Matsubara window:
+
+| Primitive momentum | Quantity | ED | covariant GW |
+|---|---|---:|---:|
+| (0,0) | LC_same | 1.93325 | 2.838101 |
+| (0,0) | LC_opposite | 1.882308 | 2.640437 |
+| (0,0) | CO_AminusB | 0.5777883 | 0.429482 |
+| (1/2,0) | LC_same | 1.882308 | 2.640437 |
+| (1/2,0) | LC_opposite | 1.93325 | 2.838101 |
+| (1/2,0) | CO_AminusB | 0.5597473 | 0.445984 |
+
+Direct-DeltaChi squared-Frobenius weights:
+* Q=(0,0): R(4)=0.886613, rank95=5;
+* Q=(1/2,0): R(4)=0.846301, rank95=6.
+
+These are finite-torus static responses; only the *specific* A/B
+charge-difference form factor is tested as CO here. They cannot establish
+the leading CO instability over all q, nor an ordered-state free-energy
+comparison. No fitted correction is inserted into the self-energy.
+
+Workflow logs and downloadable NPZ/PNG artifacts:
+* [Q=(0,0) pilot](https://github.com/Echoxiangmega/RubycGW/actions/runs/38911132976)
+* [Q=(1/2,0) pilot](https://github.com/Echoxiangmega/RubycGW/actions/runs/38911786935)
+
+### Real finite-Q sources
+
+The driver also accepts `--Q1 0.5 --Q2 0` for the 2x1 torus.
+This implements **real** alternating cell phases and embeds them as
+Hermitian source matrices into the twelve-site supercell, allowing
+reuse of the ordinary supercell q=0 cGW source-derivative solver.
+It does not yet handle generic complex-momentum sources;
+those require separate cosine/sine Hermitian components.
+
+The preferred next benchmark is convergence in Matsubara windows
+and the comparison of additional finite momenta and charge
+form factors before making a claim about the ordering competition.
