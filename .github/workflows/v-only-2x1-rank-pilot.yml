@@ -1,15 +1,13 @@
-name: Ruby V-only 2x1 rank pilot
+name: Ruby V-only 2x1 rank comparison
 
 on:
-  # Run once when this workflow is first added; subsequent edits to the
-  # numerical driver do not retrigger this expensive experiment.
   push:
     paths:
       - .github/workflows/v-only-2x1-rank-pilot.yml
   workflow_dispatch:
 
 jobs:
-  pilot:
+  benchmark:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -25,24 +23,25 @@ jobs:
           python-version: "3.11"
       - name: Install RubycGW
         run: python -m pip install -e .
-      - name: Run same-torus ED and full cGW (2x1, V=0.6)
+      - name: Full 12-site ED/cGW comparison V=0.2 and V=0.6
         run: |
           python research/diagnose_v_only_vertex_rank.py \
-            --L1 2 --L2 1 --V 0.6 --T 0.08 --filling 3 \
-            --nw 28 --nomega 7 --gw-max-iter 140 \
-            --vertex-max-iter 150 \
-            --out results/v_only_vertex_rank_pilot
-      - name: Analyze direct physical response correction
+            --L1 2 --L2 1 --V 0.2 0.6 --T 0.08 --filling 3 \
+            --nw 55 --nomega 12 --gw-max-iter 140 \
+            --vertex-max-iter 180 \
+            --out results/v_only_vertex_rank_refined
+      - name: Robust direct-DeltaChi rank and cross-V oracle transfer
         run: |
           python research/analyze_v_only_response_rank.py \
-            results/v_only_vertex_rank_pilot/V_0.6/rank_diagnostic.npz \
-            --out results/v_only_response_rank_pilot
-      - name: Persist diagnostics
+            results/v_only_vertex_rank_refined/V_0.2/rank_diagnostic.npz \
+            results/v_only_vertex_rank_refined/V_0.6/rank_diagnostic.npz \
+            --out results/v_only_response_rank_refined
+      - name: Persist calculations
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ruby-v-only-2x1-rank-pilot
+          name: ruby-v-only-2x1-rank-refined
           path: |
-            results/v_only_vertex_rank_pilot/
-            results/v_only_response_rank_pilot/
+            results/v_only_vertex_rank_refined/
+            results/v_only_response_rank_refined/
           if-no-files-found: warn
