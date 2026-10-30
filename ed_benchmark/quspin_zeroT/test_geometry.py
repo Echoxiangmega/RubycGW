@@ -18,7 +18,8 @@ def test_lattice_and_loops():
         assert g.point_maps()['C2'] is not None
         if label!='3x1':assert g.point_maps()['C6'] is not None
         else:assert g.point_maps()['C6'] is None
-        for p in g.point_maps().values():
+        pm=g.point_maps()
+        for p in [pm['C6'],pm['C3'],pm['C2'],*pm['mirrors'].values()]:
             if p is None:continue
             assert sorted(p.tolist())==list(range(g.Ns))
 

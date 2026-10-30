@@ -15,11 +15,70 @@ python run_zeroT.py --cluster 3x1 --nf 6 --V 1.0 --no-point --save-psi --out res
 
 **Validation before scans:** run the 18-site case with `--no-point` and compare ground energies and the exact number of symmetry-state dimensions with the point-group-enabled mode. The code checks the latter. Run `--check-signs` to compare a full fixed-`Nf` QuSpin Hamiltonian to an independently constructed fermion-action matrix-vector product. Raise/disable `--max-full` if postprocessing a very large full fixed-N basis would exceed available RAM.
 
-## Symmetry policy
+## Symmetry policy: ordinary C3 / mirrors / gauge-twisted C6
 
-All translation sectors are searched. At Gamma the point-group symmetry `C6` (2x2, ring3) or `C2` (3x1) is applied. A reflection block is only combined with a rotation block when their eigenvalues are compatible (`q=0` or `q=m/2` for an even-order rotation); this avoids assuming that `C6` and a mirror commute. Away from Gamma we use translation blocks only (a conservative valid subset of the little group, not the maximal possible speedup). Point operations are **checked as permutations of the actual PBC bond network including bond strengths**. When `t1 != t2`, operations that exchange their bonds are disabled automatically.
+We do **not** presume `t1==t2` to identify valid symmetries. All candidate
+permutations are checked against every PBC hopping amplitude and every
+intra-triangle `V` edge. The following is for the specific 18/24-site PBCs:
 
-The algorithm scans every allowed sector and selects `min(E0_sector)`. This does **not** assume the ground state itself preserves point-group/time-reversal symmetry.
+| PBC cluster | generic `t1,t2` | `t1=t2` | `t1=-t2` (both nonzero) |
+|---|---|---|---|
+| `2x2` | ordinary `C3` and three mirrors | ordinary `C6` and six mirrors | ordinary `C3`/three mirrors plus gauge-twisted `C6` |
+| `ring3` | ordinary `C3` and three mirrors | ordinary `C6` and six mirrors | ordinary `C3`/three mirrors plus gauge-twisted `C6` |
+| `3x1` | one ordinary mirror | ordinary `C2` and two mirrors | one ordinary mirror plus gauge-twisted `C2` (no `C3`/`C6`) |
+
+The **3x1 finite torus does not preserve C3**, even though the infinite ruby
+lattice preserves C3 for arbitrary t1/t2. A generic mirror for the `3x1`
+cluster is at 120 degrees in our real-space embedding; for `2x2`/`ring3`,
+ordinary generic mirror axes are 0, 60, 120 degrees, measured from x.
+
+The `run_zeroT.py` solver automatically chooses the **full little group of each
+momentum sector**, and only combines commuting point-group eigenvalues:
+`C6` when ordinary, otherwise `C3` when available, otherwise `C2`, together
+with a compatible reflection. Mirrors cannot generally be imposed on
+non-real rotation eigenvalue sectors. All sectors are still included when
+searching for the global ground state. `--no-point` switches this off for
+comparison. This sector implementation needs verification with an installed
+QuSpin, in particular the sum of projected dimensions and energies.
+
+**Gauge-twisted C6 at `t1=-t2`:** Let `G` flip the sign of fermion operators
+on the B triangle (orbitals 3,4,5) but not A (0,1,2); let `R6` rotate 60
+degrees around the physical hexagon center. `G R6` preserves H when
+`t1=-t2`; its sixth power is `(-1)^Nf` on the Fock space. Negative indices
+in QuSpin site-permutation maps correspond to **particle-hole transforms**,
+not these on-site phase changes. We therefore use an **exact local U(1)
+gauge change**, `H' = D H D^dagger` with `D` diagonal in the occupation
+basis, so the 60-degree site permutation is ordinary for H'. QuSpin can
+then use `C6` blocks directly. The physical eigenvalue of `G R6` in a
+fixed-Nf block whose QuSpin C6 label is q is
+`exp(i*pi*Nf/6) * exp(-2*pi*i*q/6)` for the gauge convention used in
+`geometry.twisted_c6_gauge`.
+
+This mode is **automatic** for `2x2`/`ring3` at `t1=-t2` (unless `--no-point`
+or `--no-twisted-c6` is passed). The resulting **wavefunction is restored
+to the ORIGINAL hopping gauge before any rho/current/flux/Green-function
+calculation or saved psi**. In the C6-adapted gauge, plain mirror blocks
+are disabled: the original mirror is generally gauge-dressed and cannot
+be represented by a site permutation alone. We instead use C6; a future
+custom signed-map basis could combine both. For `3x1`, no sixfold
+rotation of the PBC exists; its gauge-twisted C2 is **verified but not yet
+used to reduce the QuSpin blocks**. Ordinary mirror blocks still work.
+
+**Independent tests:** `python test_point_symmetry.py` verifies all ordinary
+and signed symmetries for `(t1,t2)=(0.5,0.5),(0.5,-0.5),(0.6,0.2)` and
+all three PBCs. It also verifies fermionic signs, the relation
+`(G R6)^6=(-1)^Nf`, the gauge-transformed Hamiltonian, and the reverse
+many-body wavefunction gauge change without QuSpin.
+
+Examples:
+
+```bash
+python test_geometry.py
+python test_point_symmetry.py
+python run_zeroT.py --cluster ring3 --nf 6 --t1 0.6 --t2 0.2 --V 1 --out results/generic
+python run_zeroT.py --cluster ring3 --nf 6 --t1 0.5 --t2 -0.5 --V 1 --save-psi --out results/twisted_C6
+python run_zeroT.py --cluster 3x1 --nf 6 --t1 0.6 --t2 0.2 --V 1 --out results/stripe_mirror
+```
 
 ## Outputs (each parameter point)
 

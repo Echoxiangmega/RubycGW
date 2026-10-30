@@ -90,9 +90,10 @@ class RubyPBC:
         c=Counter(e.kind for e in self.edges)
         assert c=={'t':6*self.num_cells,'t1':3*self.num_cells,'t2':3*self.num_cells}
 
-    def symmetry(self, matrix, center=POINT_CENTER):
-        """Return a site permutation only when the geometric map preserves H.
-        The check compares HOPPING AMPLITUDES (not bond labels) and V edges.
+    def site_map(self, matrix, center=POINT_CENTER):
+        """Geometric site permutation, irrespective of t1/t2 amplitudes.
+
+        A candidate is valid only if it maps the finite torus into itself.
         """
         p=np.empty(self.Ns,dtype=np.int32)
         for i,r in enumerate(self.positions):
@@ -100,29 +101,91 @@ class RubyPBC:
             candidates=[]
             for j,s in enumerate(self.positions):
                 d=np.linalg.solve(self.B,q-s)
-                if np.max(np.abs(d-np.rint(d)))<1e-8: candidates.append(j)
+                if np.max(np.abs(d-np.rint(d)))<1e-8:candidates.append(j)
             if len(candidates)!=1:return None
             p[i]=candidates[0]
         if len(set(map(int,p)))!=self.Ns:return None
-        def signature(edge):
-            return (min(edge.i,edge.j),max(edge.i,edge.j),
-                    round(self.t[edge.kind],11),edge.kind=='t')
-        before=sorted(map(signature,self.edges))
-        after=sorted((min(p[e.i],p[e.j]),max(p[e.i],p[e.j]),
-                      round(self.t[e.kind],11),e.kind=='t') for e in self.edges)
-        return p if before==after else None
+        return p
+
+    def check_signed_map(self,p,signs=None):
+        """Test c_i -> signs[i]*c_{p[i]} against ALL independent edges.
+
+        This check tests the actual hopping numbers and the interaction
+        (intra-triangle) bonds, not a guessed geometric point-group label.
+        """
+        if p is None:return False
+        if signs is None:signs=np.ones(self.Ns,dtype=np.int8)
+        if len(signs)!=self.Ns:return False
+        edges={}
+        for e in self.edges:
+            key=tuple(sorted((e.i,e.j)))
+            edges[key]=(self.t[e.kind],e.kind=='t')
+        for e in self.edges:
+            key=tuple(sorted((int(p[e.i]),int(p[e.j]))))
+            value=edges.get(key)
+            if value is None:return False
+            target_t,target_v=value
+            if target_v != (e.kind=='t'):return False
+            if not np.isclose(self.t[e.kind]*signs[e.i]*signs[e.j],target_t,
+                              atol=1.e-11,rtol=1.e-11):return False
+        return True
+
+    def symmetry(self,matrix,center=POINT_CENTER):
+        """Plain geometric symmetry suitable for QuSpin site permutations."""
+        p=self.site_map(matrix,center)
+        return p if self.check_signed_map(p) else None
+
+    def signed_symmetry(self,matrix,center=POINT_CENTER):
+        """Gauge-compensated rotation/reflection for t1=-t2.
+
+        A and B triangle orbitals receive relative sign (-1). This is
+        a NUMBER-CONSERVING phase gauge, NOT QuSpin negative-site mapping
+        (which represents particle-hole conjugation instead).
+        Returns (permutation, source-site signs) when the test succeeds.
+        """
+        p=self.site_map(matrix,center)
+        if p is None:return None
+        signs=np.array([1 if (i%6)<3 else -1 for i in range(self.Ns)],
+                       dtype=np.int8)
+        return (p,signs) if self.check_signed_map(p,signs) else None
+
+    @staticmethod
+    def _rotation(degrees):
+        a=math.radians(degrees)
+        return np.array([[math.cos(a),-math.sin(a)],
+                         [math.sin(a),math.cos(a)]])
+
+    @staticmethod
+    def _mirror(degrees):
+        a=math.radians(degrees)
+        return np.array([[math.cos(2*a),math.sin(2*a)],
+                         [math.sin(2*a),-math.cos(2*a)]])
 
     def point_maps(self):
-        """Use only generators verified against the exact PBC bond list."""
-        angle=math.pi/3
-        rot=lambda a:np.array([[math.cos(a),-math.sin(a)],[math.sin(a),math.cos(a)]])
-        axis=math.pi/6 if self.name=='3x1' else 0.
-        u=np.array([math.cos(axis),math.sin(axis)])
-        mirror=2*np.outer(u,u)-np.eye(2)
-        r6=self.symmetry(rot(angle))
-        r2=self.symmetry(rot(math.pi))
-        m=self.symmetry(mirror)
-        return {'C6':r6,'C2':r2,'mirror':m}
+        """All validated *plain* point group maps of the finite torus.
+
+        Generic t1/t2: 2x2 and ring3 have C3 and 3 mirrors, while
+        3x1 retains one mirror but breaks C3 by its boundary conditions.
+        When t1=t2, C6 and the additional mirrors are ordinary symmetries.
+        """
+        out={f'C{n}':self.symmetry(self._rotation(360/n)) for n in (6,3,2)}
+        out['mirrors']={str(a):p for a in range(0,180,30)
+                        if (p:=self.symmetry(self._mirror(a))) is not None}
+        # Keep legacy key, but choose a verified mirror, not an assumed axis.
+        out['mirror']=next(iter(out['mirrors'].values()),None)
+        return out
+
+    def gauge_point_maps(self):
+        """Validated gauge-compensated symmetries, NOT ordinary QuSpin blocks.
+
+        In particular, (G*C6)^6=(-1)^N on the fixed-N Fock space,
+        because C6 exchanges A and B triangles and G changes the B sign.
+        The point map and fermion phases are returned separately.
+        """
+        out={f'C{n}':self.signed_symmetry(self._rotation(360/n)) for n in (6,3,2)}
+        out['mirrors']={str(a):op for a in range(0,180,30)
+                        if (op:=self.signed_symmetry(self._mirror(a))) is not None}
+        return out
 
     def _directed_edge(self,i,j):
         for e in self.edges:
@@ -189,3 +252,40 @@ class RubyPBC:
                 'reps':self.reps,'t':self.t,'primitive_vectors':A.tolist(),
                 'orbitals':ORBITALS.tolist(), 'momenta':self.permitted_momenta(),
                 'edges':[vars(e) for e in self.edges]}
+
+
+def twisted_c6_gauge(g):
+    """Gauge d_i=z_i c_i in which the t1=-t2 twisted C6 is plain C6.
+
+    For U c_i U^-1 = s_i c_{p(i)} and a six-cycle with product(s)=-1,
+    choose lambda=exp(i*pi/6) and z_{p(i)}=lambda*s_i*z_i. Then
+    H'_{ij}=z_i*H_{ij}*conj(z_j) is invariant under site permutation p.
+    Return (site_permutation, phases z), or None when unavailable.
+    """
+    signed=g.gauge_point_maps()['C6']
+    if signed is None:return None
+    p,signs=signed
+    lam=np.exp(1j*np.pi/6)
+    z=np.zeros(g.Ns,dtype=np.complex128)
+    for a in range(g.Ns):
+        if abs(z[a])>0:continue
+        z[a]=1.
+        i=a
+        while True:
+            j=int(p[i]);next_z=lam*signs[i]*z[i]
+            if abs(z[j])>0:
+                if abs(z[j]-next_z)>1.e-9:
+                    raise RuntimeError('Inconsistent C6 orbit phase gauge')
+                break
+            z[j]=next_z
+            i=j
+    if not np.allclose(np.abs(z),1.,atol=1.e-9):raise AssertionError('nonunitary gauge')
+    # Verify actual transformed H' rather than assuming signed symmetry alone.
+    hopp={tuple(sorted((e.i,e.j))):g.t[e.kind] for e in g.edges}
+    for e in g.edges:
+        i,j=e.i,e.j
+        ref=hopp[tuple(sorted((int(p[i]),int(p[j]))))]
+        amp=z[i]*g.t[e.kind]*np.conj(z[j])
+        target=z[int(p[i])]*ref*np.conj(z[int(p[j])])
+        if abs(amp-target)>1.e-9:raise AssertionError('twisted gauge does not restore ordinary C6')
+    return p,z
