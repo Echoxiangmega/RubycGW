@@ -254,3 +254,25 @@ If `plot_charge_pattern.py` was already used, its saved
 `charge_patterns/V_.../charge_pattern.npz` can be read **without rerunning ED**.
 New `plot_charge_pattern.py` runs automatically export these q-resolved
 results into each `charge_patterns/V_.../momentum_charge` subfolder.
+
+## Fixed-n symmetry interval map and crossing brackets
+
+Use [analyze_symmetry_intervals.py](analyze_symmetry_intervals.py) to convert
+already computed `scan_susceptibility.py` sector energies into a one-dimensional
+map of *finite-torus ground-state symmetry regions*, with multi-particle
+momentum, C3/C6 representation, compatible mirror parity, near-degenerate
+ground multiplet, energy gaps, and observed change brackets. The interval
+table includes the CO leading wavevector and LC ground-multiplet current
+diagnostics whenever they are saved. It deliberately **does not auto-assign
+thermodynamic CO/LC phase labels based only on a symmetry sector**.
+
+```powershell
+python test_symmetry_intervals.py
+python analyze_symmetry_intervals.py --input results\chi_E_matrix_gaps_n2
+python analyze_symmetry_intervals.py --input results\chi_E_matrix_gaps_n2 --refine --refine-tol 0.02
+```
+
+The first command reads existing scan files only; the `--refine` variant
+adds ED diagonalizations **only at bracket midpoints**, reusing the symmetry
+basis and not recomputing Green functions or susceptibilities. See
+[SYMMETRY_INTERVALS.md](SYMMETRY_INTERVALS.md) for output paths and limits.
