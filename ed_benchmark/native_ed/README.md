@@ -202,3 +202,24 @@ Replace the input with your actual scan folder. If the scan stored
 otherwise only the V points requested for the plot are solved again.
 Outputs are in `SCAN/current_patterns/V_+.../bond_current.png`,
 `triangle_current.png`, bond/plaquette CSVs and reproducible NPZ data.
+
+## Site charge density, local variance, and CO-polarized ground states
+
+The new [plot_charge_pattern.py](plot_charge_pattern.py) complements the
+current diagrams. It saves real-space site densities for both the **unbiased
+equal ground-state mixture** and the **maximally charge-disproportionated pure
+ground-state superposition**, along with on-site quantum variances,
+connected site-density covariances, physical triangle pseudospins and
+variance-vs-V plots. See [CHARGE_PATTERN.md](CHARGE_PATTERN.md) for the
+difference between `Var(n_i)=<n_i>(1-<n_i>)` and the **spatial variance of
+the site-mean densities**, which is more relevant to CO.
+
+```powershell
+python test_charge_pattern.py
+python plot_charge_pattern.py --input results\chi_ring3_n2 --V 1 2 3 --kind triangle
+python plot_charge_pattern.py --input results\chi_ring3_n2 --V 1 2 3 --source CO_E_odd_x --polarity positive --output results\chi_ring3_n2\CO_E_odd_x_patterns
+```
+
+Existing scan folders can be used: saved `ground_states.npz` avoids ED
+reruns, otherwise only the selected V values are re-solved. The script
+never interprets nonzero on-site variance alone as evidence of charge order.
