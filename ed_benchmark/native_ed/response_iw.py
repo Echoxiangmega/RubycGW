@@ -48,9 +48,13 @@ def compute(path,orbitals=None,nfreq=32,beta_reference=100.,krylov=80,mu=None,me
     g=RubyPBC(cfg['name'],**cfg['t'])
     nf=int(cfg['Nf']);V=float(cfg['V'])
     if not 0<nf<g.Ns:raise ValueError('Green requires 0<Nf<Ns')
-    d=np.load(path/'ground_state.npz')
-    psi=np.asarray(d['psi']);st=np.asarray(d['basis_states'])
-    e0=float(d['e0']);ns=g.Ns
+    # Load all needed arrays while the NPZ file is open, then release its
+    # handle before building the adjacent-particle-number Hamiltonians.
+    with np.load(path/'ground_state.npz') as d:
+        psi=np.asarray(d['psi']).copy()
+        st=np.asarray(d['basis_states']).copy()
+        e0=float(d['e0'])
+    ns=g.Ns
     if not np.array_equal(st,make_states(ns,nf)):raise AssertionError('Unexpected ground basis ordering')
     orbs=list(range(6)) if orbitals is None else list(orbitals)
     if not all(0<=i<ns for i in orbs):raise ValueError('orbital indices out of range')
