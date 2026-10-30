@@ -43,7 +43,7 @@ Generate all plots again **without running ED**:
 python plot_susceptibility.py --input results\chi_ring3_full
 ```
 
-The main figures are `chi_overview.png`, `chi_charge.png`, `chi_loop_current.png`, and (when selected) `chi_pairing.png`. The singular/near-degenerate response diagnostic is `chi_zero_mode_weight.png`.
+The main figures are `chi_overview.png`, `chi_charge.png`, `chi_charge_components.png`, `chi_loop_current.png`, and (when selected) `chi_pairing.png`. The singular/near-degenerate response diagnostic is `chi_zero_mode_weight.png`.
 
 **Optional pairing response** (more costly, may become undefined if the fixed-N sector is not locally stable in the grand canonical ensemble):
 
@@ -85,10 +85,46 @@ O_{\rm opposite}=\frac{1}{\sqrt{2N_c}}\sum_{p\in\triangle}s_pI_p,\quad s_{A/B}=\
 
 This is *physical* same/opposite circulation, not the earlier raw Gamma-plus/minus naming. `LC_square` and `LC_hexagon` are the similarly normalized sums of geometrically CCW current operators around each elementary 4/6-site plaquette. For all plaquette channels, `sum_p |w_p|^2=1`; the magnitudes are meaningful within the same operator definition across V and must not be treated as phase labels by comparing against a density response with different operator units.
 
-Charge:
+Charge (including the HF/strong-coupling pseudospin channels):
 
-* `CO_AB` uses the **fixed** q=Gamma A-minus-B density contrast `O=sum_i w_i n_i`, with `w_{A/B}=±1/sqrt(Ns)`.
-* `CO_leading` is **adaptive**: at each V, diagonalize the charge connected covariance matrix in the **allowed supercell momenta**. For the largest eigenvalue, use normalized real/imaginary components of its site-space charge vector as Hermitian density sources. Their responses are summed. The mode/q can change along V, and the selected `q` and orbital coefficients are saved. It is **not**, in general, the maximum eigenvalue of the full dynamical susceptibility matrix.
+* **CO_E_even_x/y** and **CO_E_odd_x/y** are fixed `q=Gamma` real
+  E-type triangle-charge sources that match our earlier physical pseudospin
+  convention. They are included in every new susceptibility scan.
+  Define on A=(0,1,2):
+  `tauAx=2n0-n1-n2`, `tauAy=sqrt(3)(n2-n1)`.
+  On B=(3,4,5), the physical chirality frame reverses the algebraic y sign:
+  `tauBx=2n3-n4-n5`, `tauBy=sqrt(3)(n4-n5)`.
+  The normalized sources are
+  `O_even_x=(sum_R(tauAx+tauBx))/sqrt(12*Nc)`,
+  `O_even_y=(sum_R(tauAy+tauBy))/sqrt(12*Nc)`,
+  `O_odd_x=(sum_R(tauAx-tauBx))/sqrt(12*Nc)`, and
+  `O_odd_y=(sum_R(tauAy-tauBy))/sqrt(12*Nc)`.
+  Every source has `sum_i w_i^2=1`; in the projected E doublet, tau_x/y
+  become Pauli pseudospins, but in the full ED Fock space they are microscopic
+  density combinations and remain meaningful at other fillings.
+* **CO_E_even** and **CO_E_odd** are the averages of their two corresponding
+  static diagonal susceptibilities, `(chi_xx+chi_yy)/2`.
+  The individual x/y values, poles and weights are also saved. These
+  averages are useful for tracking the two-component E sector, but **do not**
+  replace the full `4x4` charge susceptibility matrix (off-diagonal
+  x/y/even/odd mixing is not yet computed).
+* Equivalently, with `omega=exp(2*pi*i/3)`, define
+  `etaA=n0+omega^2*n1+omega*n2=(tauAx+i*tauAy)/2`, and
+  `etaB=n3+omega*n4+omega^2*n5=(tauBx+i*tauBy)/2`.
+  The `even/odd` combinations are `etaA +/- etaB`.
+  Thus the **real and imaginary** parts are precisely the two CO components,
+  not current operators. For example tauAx=+1 gives the projected
+  `(2/3,1/6,1/6)` density pattern, tauAx=-1 gives
+  `(0,1/2,1/2)`. The physically corresponding B y-pattern is
+  mirrored relative to A.
+* `CO_AB` is still available, but it tests **only** the total A-minus-B
+  density imbalance, not internal E-type charge disproportionation.
+  It uses the fixed `q=Gamma` source `w_(A/B)=+/-1/sqrt(Ns)`.
+* `CO_leading` remains an **adaptive** measure chosen independently at each
+  `V` from the site-density connected-covariance matrix at all allowed
+  supercell momenta. It can pick E-type CO, other charge order or mixtures,
+  and its momentum and shape can change with `V`. It is *not* necessarily the
+  dominant eigenmode of the complete dynamical susceptibility matrix.
 
 Pairing (optional `--pair`):
 
@@ -104,7 +140,7 @@ Each `V_+...` parameter directory contains:
 * `sectors.json`: per-symmetry-sector low energies.
 * `geometry.json`: PBC and hopping conventions. Optionally `ground_states.npz` and `ground_state.npz` with `--save-state`.
 
-The root contains `susceptibility.csv`, individual plot PNGs, `scan_metadata.json`, and `failures.json`. A scan is resumable and `--V` can be extended later while preserving all already computed points. To prevent silent numerical miscomparisons, **different t1/t2, n, symmetry or response-accuracy parameters require separate output folders**.
+The root contains `susceptibility.csv`, individual plot PNGs, `scan_metadata.json`, and `failures.json`. A scan is resumable and `--V` can be extended later while preserving all already computed points. To prevent silent numerical miscomparisons, **different t1/t2, n, symmetry, channel schema or response-accuracy parameters require separate output folders**. Old pre-pseudospin scans must be rerun in a fresh output folder to add E-type channels.
 
 ## Validation and limitations
 
