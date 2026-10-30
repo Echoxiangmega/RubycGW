@@ -180,3 +180,25 @@ New scans additionally save `lc_ground_projected.npz`,
 `LC_same_ground_Jmax_abs` and `LC_opposite_ground_Jmax_abs` in the CSV.
 These are currents optimized inside the exactly degenerate ground-state
 subspace, not by mixing arbitrary excited states.
+
+## Real-space bond-current maps (new)
+
+[Current-map guide](CURRENT_PATTERN.md) and [plot_current_pattern.py](plot_current_pattern.py)
+produce **physical directed currents on every hopping bond**, plus the six
+triangle CCW circulations, PBC image arrows, charge-continuity residual, and
+plaquette correlation-loop phases. The plotted state is the exact ED
+ground-multiplet superposition maximizing the specified same/opposite
+triangle-current operator (not an arbitrary excited-state mixture).
+
+Windows PowerShell or CMD, from this directory:
+
+```powershell
+python test_current_pattern.py
+python plot_current_pattern.py --input results\chi_ring3_n2 --V 1 2 3 --channel opposite
+```
+
+Replace the input with your actual scan folder. If the scan stored
+`ground_states.npz` via `--save-state`, plotting needs **no new ED**;
+otherwise only the V points requested for the plot are solved again.
+Outputs are in `SCAN/current_patterns/V_+.../bond_current.png`,
+`triangle_current.png`, bond/plaquette CSVs and reproducible NPZ data.
