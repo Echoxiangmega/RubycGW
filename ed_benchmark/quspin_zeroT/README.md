@@ -42,3 +42,11 @@ The algorithm scans every allowed sector and selects `min(E0_sector)`. This does
 ## Next steps
 
 Once QuSpin is available, verify every case with and without point-group reduction, and compare first at `V=0` against the filled single-particle spectrum. Then scan `V` and integer `Nf`, extract charge/current/pair eigenmodes and dynamic response data; only after these tests interpret a finite-size correlation-dominance map as an incipient phase diagram.
+
+## Batch scans
+
+```bash
+python scan_phase.py --cluster ring3 --nf 6 7 8 9 --V 0 0.5 1 1.5 2 3 --pair --chi-lanczos 80 --output results/ring3_scan
+```
+
+The scan resumes by skipping folders with an existing `summary.json`; it writes a compact `summary.csv` and preserves each individual spectral/correlation archive. No absolute phase assignment is made by comparing differently normalized channels.
