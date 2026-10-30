@@ -76,19 +76,21 @@ def test_observables_and_green():
                                   '--symmetry','point','--save-psi','--out',tmp])
         r=main(flags)
         assert abs(r['E0']+9.614627004195)<1e-8
-        data=np.load(Path(tmp)/'equal_time.npz')
-        assert abs(data['density'].sum()-6.)<1e-8
-        assert np.max(abs(data['rho']-data['rho'].conj().T))<1e-10
-        assert abs(data['current_mean']).max()<1e-8  # no TR-breaking in unique ground state
+        # NpzFile holds an OS file handle. Windows forbids removal of open
+        # files, so close it before TemporaryDirectory cleans up.
+        with np.load(Path(tmp)/'equal_time.npz') as data:
+            assert abs(data['density'].sum()-6.)<1e-8
+            assert np.max(abs(data['rho']-data['rho'].conj().T))<1e-10
+            assert abs(data['current_mean']).max()<1e-8  # unique TR-symmetric ground state
         G=compute(tmp,orbitals=[0,1,2],nfreq=4,krylov=60)
-        f=np.load(Path(tmp)/'green_iw.npz')
         g=RubyPBC('3x1')
         h=np.zeros((g.Ns,g.Ns))
         for e in g.edges:
             h[e.i,e.j]+=g.t[e.kind];h[e.j,e.i]+=g.t[e.kind]
-        for omega,Gz in zip(f['omega'],G):
-            exact=np.linalg.inv((1j*omega+f['mu'])*np.eye(g.Ns)-h)[:3,:3]
-            assert np.max(abs(Gz-exact))<1e-9
+        with np.load(Path(tmp)/'green_iw.npz') as f:
+            for omega,Gz in zip(f['omega'],G):
+                exact=np.linalg.inv((1j*omega+f['mu'])*np.eye(g.Ns)-h)[:3,:3]
+                assert np.max(abs(Gz-exact))<1e-9
 
 
 if __name__=='__main__':
