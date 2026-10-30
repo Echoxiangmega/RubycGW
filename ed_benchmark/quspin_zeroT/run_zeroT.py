@@ -17,6 +17,26 @@ from geometry import RubyPBC,twisted_c6_gauge
 from observables import (apply_ops,build_observables,op_sum,current_terms,
                          lanczos_spectral,max_current_in_manifold)
 
+def numpy_json_default(value):
+    """Convert NumPy scalar/array metadata to ordinary JSON values.
+
+    Used for all output JSON files, not only geometry.json. A tuple can
+    already be encoded by json; np.int64 inside it cannot.
+    """
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (np.complexfloating, complex)):
+        return {"real": float(value.real), "imag": float(value.imag)}
+    raise TypeError(f"Cannot JSON-encode {type(value).__name__}")
+
+
+
 
 def get_quspin():
     try:
@@ -307,9 +327,9 @@ def run(args):
         spec['twisted_c6_map']=twisted[0].tolist()
         spec['twisted_c6_physical_eigenvalue']='exp(i*pi*Nf/6)*exp(-2*pi*i*rotation_q/6)' 
         spec['twisted_c6_note']='Diagonalize gauge-transformed H; rotate eigenvectors back before observables.' 
-    (folder/'geometry.json').write_text(json.dumps(spec,indent=2),encoding='utf-8')
+    (folder/'geometry.json').write_text(json.dumps(spec,indent=2,default=numpy_json_default),encoding='utf-8')
     report,found=sector_scan(g,args.V,nf,args.low,args.point,twisted=twisted)
-    with (folder/'sectors.json').open('w') as f:json.dump(report,f,indent=2)
+    with (folder/'sectors.json').open('w') as f:json.dump(report,f,indent=2,default=numpy_json_default)
     if not found:raise RuntimeError('No eigenstates found')
     e0=found[0][0]
     summary={'E0':e0,'Nf':nf,'Ns':g.Ns,'cluster':args.cluster,'V':args.V,
@@ -353,8 +373,8 @@ def run(args):
         summary['charge_corr_max']=float(np.max(data['charge_eigs']))
         summary['current_corr_max']=float(np.max(data['current_eigs']))
         if 'pair_eigs' in data:summary['pair_corr_max']=float(np.max(data['pair_eigs']))
-    (folder/'summary.json').write_text(json.dumps(summary,indent=2,default=str))
-    print(json.dumps({k:v for k,v in summary.items() if k not in ('ground_blocks','max_current_manifold')},indent=2,default=str))
+    (folder/'summary.json').write_text(json.dumps(summary,indent=2,default=numpy_json_default))
+    print(json.dumps({k:v for k,v in summary.items() if k not in ('ground_blocks','max_current_manifold')},indent=2,default=numpy_json_default))
     print('Saved:',folder)
     return summary
 

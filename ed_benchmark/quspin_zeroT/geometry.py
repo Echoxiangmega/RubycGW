@@ -251,7 +251,10 @@ class RubyPBC:
         return {'name':self.name,'Ns':self.Ns,'M':self.M.tolist(),
                 'reps':self.reps,'t':self.t,'primitive_vectors':A.tolist(),
                 'orbitals':ORBITALS.tolist(), 'momenta':self.permitted_momenta(),
-                'edges':[vars(e) for e in self.edges]}
+                'edges':[{'i':int(e.i),'j':int(e.j),'kind':str(e.kind),
+                          'delta':[int(v) for v in e.delta],
+                          'winding':[int(v) for v in e.winding]}
+                         for e in self.edges]}
 
 
 def twisted_c6_gauge(g):

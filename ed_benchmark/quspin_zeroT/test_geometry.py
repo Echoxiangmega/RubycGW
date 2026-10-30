@@ -1,4 +1,5 @@
 """Numerical tests run WITHOUT QuSpin; full ED requires QuSpin separately."""
+import json
 from math import comb
 import numpy as np
 from geometry import RubyPBC
@@ -71,7 +72,31 @@ def test_equal_time_single_particle_no_flux():
     assert np.allclose(data['rho'],data['rho'].conj().T)
 
 
+
+def test_json_metadata_serialization():
+    """Regression: np.int64 in PBC winding used to crash geometry.json."""
+    from run_zeroT import numpy_json_default, symmetry_diagnostics
+    for label in ('2x2','3x1','ring3'):
+        for t1,t2 in ((.5,.5),(.5,-.5),(.6,.2)):
+            g=RubyPBC(label,t1=t1,t2=t2)
+            payload=g.metadata()
+            payload['point_symmetry_maps']=symmetry_diagnostics(g)
+            payload['V']=np.float64(1.0)
+            payload['Nf']=np.int64(6)
+            encoded=json.dumps(payload,indent=2,default=numpy_json_default)
+            decoded=json.loads(encoded)
+            assert len(decoded['edges'])==g.Ns*2
+            for edge in decoded['edges']:
+                assert isinstance(edge['i'],int)
+                assert isinstance(edge['winding'][0],int)
+                assert isinstance(edge['winding'][1],int)
+    assert json.loads(json.dumps({'flag':np.bool_(True), 'z':np.complex128(1+2j)},
+                                 default=numpy_json_default)) == {
+             'flag':True,'z':{'real':1.0,'imag':2.0}}
+
+
 if __name__=='__main__':
+    test_json_metadata_serialization()
     test_lattice_and_loops()
     test_no_false_rotation_if_t1_ne_t2()
     test_fermion_operator_anticommutation()
