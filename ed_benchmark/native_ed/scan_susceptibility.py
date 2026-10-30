@@ -206,7 +206,7 @@ def source_action(ch,psi,states,ns,occ,g):
     return [op_sum(psi,states,ns,terms)]
 
 
-def spectral_chi(H,source,e0,ground,depth=80,precision=1e-8):
+def spectral_chi(H,source,e0,ground,depth=80,precision=1e-8,return_resolvent=False):
     """Fully reorthogonalized, ground-manifold-deflated Hermitian Lanczos.
 
     Reports regular Lehmann χ=2Σ |<n|O|gs>|²/(En-E0), n outside G.
@@ -217,8 +217,10 @@ def spectral_chi(H,source,e0,ground,depth=80,precision=1e-8):
     f=source-ground@overlap
     norm=float(np.linalg.norm(f))
     if norm<1e-13:
-        return {'regular':0.,'zero_weight':zero_weight,'poles':np.empty(0),
-                'weights':np.empty(0),'convergence':0.,'unresolved':False}
+        out={'regular':0.,'zero_weight':zero_weight,'poles':np.empty(0),
+             'weights':np.empty(0),'convergence':0.,'unresolved':False}
+        if return_resolvent:out['resolvent_vector']=np.zeros_like(source,dtype=complex)
+        return out
     prev=np.zeros_like(f);q=f/norm;beta=0.;Q=[];aa=[];bb=[]
     # Reorthogonalization is essential near exact degeneracy.
     for j in range(min(depth,H.shape[0]-ground.shape[1])):
@@ -254,12 +256,20 @@ def spectral_chi(H,source,e0,ground,depth=80,precision=1e-8):
         chi_half=float(np.sum(2*half_weights[good]/half_poles[good]))
         convergence=abs(regular-chi_half)/(1+abs(regular))
     else:convergence=np.nan
-    return {'regular':regular,'zero_weight':zero_weight,'poles':poles,
-            'weights':weights,'convergence':float(convergence),'unresolved':unresolved}
+    out={'regular':regular,'zero_weight':zero_weight,'poles':poles,
+         'weights':weights,'convergence':float(convergence),'unresolved':unresolved}
+    if return_resolvent:
+        # Apply the same ground-deflated positive-gap Krylov inverse used
+        # to compute the diagonal chi to a source. Needed for chi_ab cross terms.
+        inv_coeff=np.zeros_like(poles)
+        inv_coeff[positive]=1./poles[positive]
+        krylov_coeff=norm*(U@(inv_coeff*U[0,:]))
+        out['resolvent_vector']=np.column_stack(Q)@krylov_coeff
+    return out
 
 
-def one_channel(ch,H,e0,psis,states,occ,g,depth,precision,ground_incomplete=False):
-    total=0.;z0=0.;conv=0.;danger=False;detail=[]
+def one_channel(ch,H,e0,psis,states,occ,g,depth,precision,ground_incomplete=False,capture=False):
+    total=0.;z0=0.;conv=0.;danger=False;detail=[];captured=[]
     actions=[source_action(ch,psi,states,g.Ns,occ,g) for psi in psis.T]
     if not actions:return None
     # Subtract the ensemble-average expectation, including the exact
@@ -268,21 +278,122 @@ def one_channel(ch,H,e0,psis,states,occ,g,depth,precision,ground_incomplete=Fals
     means=[sum(np.vdot(psis[:,j],actions[j][k]) for j in range(psis.shape[1]))
            /psis.shape[1] for k in range(len(actions[0]))]
     for j,psi in enumerate(psis.T):
+        this=[]
         for k,source in enumerate(actions[j]):
-            res=spectral_chi(H,source-means[k]*psi,e0,psis,depth,precision)
+            centered=source-means[k]*psi
+            res=spectral_chi(H,centered,e0,psis,depth,precision,
+                             return_resolvent=capture)
+            if capture:this.append((centered,res.pop('resolvent_vector')))
             total+=res['regular']/len(psis.T)
             z0+=res['zero_weight']/len(psis.T)
             conv=max(conv,res['convergence'])
             danger=danger or res['unresolved']
             detail.append(res)
+        if capture:captured.append(this)
     tol=1e-7
     status='incomplete_ground_manifold' if ground_incomplete else ('zero_mode' if z0>tol else ('unresolved_pole' if danger else 'ok'))
     # We intentionally leave the total static susceptibility undefined for a
     # zero-mode rather than dropping its divergent/ambiguous contribution.
     chi=total if status=='ok' else np.nan
-    return {'chi_static':chi,'chi_regular':total,'zero_mode_weight':z0,
-            'status':status,'max_krylov_change':conv,'spectra':detail}
+    out={'chi_static':chi,'chi_regular':total,'zero_mode_weight':z0,
+         'status':status,'max_krylov_change':conv,'spectra':detail}
+    if capture:out['captured']=captured
+    return out
 
+
+
+E_CHANNEL_NAMES=('CO_E_even_x','CO_E_even_y','CO_E_odd_x','CO_E_odd_y')
+
+
+def e_charge_response_matrix(captures, psis, status_by_channel, zero_tol=1e-7):
+    """Full 4x4 REAL static Kubo susceptibility (Hessian) for four E sources.
+
+    Each source is normalized in site space. The matrix averages over the
+    maximally mixed exact ground-state manifold at zero T, consistently with
+    one_channel(). Its regular part excludes all of the ground manifold.
+
+    The response is 2 Re <(O_a-<O_a>)psi|R|(O_b-<O_b>)psi>, where R is
+    the positive-gap inverse of H-E0. Ground-manifold overlaps form a separate
+    positive-semidefinite 4x4 zero-mode Gram matrix. A nonzero zero-mode makes
+    the full h->0 static response undefined without a ground-state prescription.
+    """
+    dim=psis.shape[1]
+    if any(len(captures[name])!=dim for name in E_CHANNEL_NAMES):
+        raise AssertionError('Incomplete E-channel captured resolvents')
+    chi=np.zeros((4,4),float)
+    zero=np.zeros((4,4),float)
+    for state_id in range(dim):
+        f=np.column_stack([captures[name][state_id][0][0]
+                           for name in E_CHANNEL_NAMES])
+        x=np.column_stack([captures[name][state_id][0][1]
+                           for name in E_CHANNEL_NAMES])
+        chi+=2*np.real(f.conj().T@x)/dim
+        projection=psis.conj().T@f
+        zero+=np.real(projection.conj().T@projection)/dim
+    chi=(chi+chi.T)/2
+    zero=(zero+zero.T)/2
+    ew,ev=np.linalg.eigh(chi)
+    iz,uz=np.linalg.eigh(zero)
+    # Eigenvectors are defined up to a sign; fix largest-amplitude component.
+    for k in range(ev.shape[1]):
+        j=int(np.argmax(np.abs(ev[:,k])))
+        if ev[j,k]<0:ev[:,k]*=-1
+    issues=[status_by_channel[name] for name in E_CHANNEL_NAMES]
+    if 'incomplete_ground_manifold' in issues:
+        status='incomplete_ground_manifold'
+    elif np.max(iz)>zero_tol:
+        status='zero_mode'
+    elif 'unresolved_pole' in issues:
+        status='unresolved_pole'
+    else:
+        status='ok'
+    # C3 may enforce an exactly degenerate two-dimensional leading mode.
+    # Individual eigenvectors in a degenerate subspace are arbitrary;
+    # classify the whole leading eigenspace by its even/odd projection.
+    leading_mask=(ew[-1]-ew)<=1e-7*(1+abs(ew[-1]))
+    lead_columns=ev[:,leading_mask]
+    projector=lead_columns@lead_columns.T
+    rank=int(lead_columns.shape[1])
+    even_fraction=float(np.trace(projector[:2,:2])/rank)
+    odd_fraction=float(np.trace(projector[2:,2:])/rank)
+    return {'matrix_regular':chi, 'matrix_static':chi if status=='ok' else np.full((4,4),np.nan),
+            'zero_mode_matrix':zero,'zero_mode_eigenvalues':iz,
+            'eigenvalues_regular':ew,'eigenvectors_regular':ev,
+            'eigenvalues_static':ew if status=='ok' else np.full(4,np.nan),
+            'leading_vector':ev[:,-1], 'leading_projector':projector,
+            'leading_rank':rank,'leading_even_weight':even_fraction,
+            'leading_odd_weight':odd_fraction,'status':status,
+            'leading_zero_mode':float(max(iz[-1],0.))}
+
+
+def first_active_gap(spectra, pole_tol=1e-8, relative_weight=1e-3):
+    """Minimum POSITIVE pole with appreciable spectral weight.
+
+    Returns (gap, weight) for an operator's resolvent spectral response.
+    Threshold relative to total spectral weight avoids numerical ghost poles.
+    The result depends on this explicit threshold and finite Krylov depth.
+    """
+    best=(np.inf,np.nan)
+    for spec in spectra:
+        poles=np.asarray(spec['poles'],float)
+        weights=np.asarray(spec['weights'],float)
+        total=float(np.sum(weights))
+        threshold=max(1e-12,relative_weight*total)
+        keep=np.flatnonzero((poles>pole_tol)&(weights>threshold))
+        for j in keep:
+            if poles[j]<best[0]:best=float(poles[j]),float(weights[j])
+    return (float('nan'),float('nan')) if not np.isfinite(best[0]) else best
+
+
+def level_gap_diagnostics(records, E0, deg_tol, number=4):
+    """Ordered global low-energy levels; repeated E0 includes degeneracies."""
+    all_levels=sorted(float(e) for r in records for e in r['energies'])
+    result={}
+    for rank in range(1,number+1):
+        result[f'gap_E{rank}']=float(all_levels[rank]-E0) if len(all_levels)>rank else np.nan
+    nonzero=[x-E0 for x in all_levels if x-E0>deg_tol]
+    result['gap_above_manifold']=float(nonzero[0]) if nonzero else np.nan
+    return result
 
 
 def pairing_response(g,nf,V,e0,psis,states,depth,pole_tol,mu_override=None,
@@ -387,11 +498,12 @@ def run(args):
     if not Vs:raise ValueError('Empty V grid')
     if any(not math.isfinite(x) for x in Vs):raise ValueError('Nonfinite V')
     Vs=sorted(set(Vs))
-    ident={'channel_schema':'hf_pseudospin_E_v1','cluster':args.cluster,'t':args.t,'t1':args.t1,'t2':args.t2,
+    ident={'channel_schema':'full_E_matrix_gaps_v2','cluster':args.cluster,'t':args.t,'t1':args.t1,'t2':args.t2,
            'nf':nf,'symmetry':args.symmetry,'depth':args.depth,'low':args.low,
            'extra_loops':not args.no_extra_loops,'degeneracy_tol':args.degeneracy_tol,
            'pair':args.pair,'mu':args.mu,'max_adjacent_basis':args.max_adjacent_basis,
-           'save_state':args.save_state,'pole_tol':args.pole_tol}
+            'save_state':args.save_state,'pole_tol':args.pole_tol,
+            'active_weight_fraction':args.active_weight_fraction}
     root=Path(args.output)
     root.mkdir(parents=True,exist_ok=True)
     meta=root/'scan_metadata.json'
@@ -428,28 +540,38 @@ def run(args):
             row={'V':V,'n':nf/g.num_cells,'Nf':nf,'E0':e0,
                  'ground_dim':psis.shape[1],'ground_incomplete':incomplete,
                  'residual':residual}
+            row.update(level_gap_diagnostics(records,e0,args.degeneracy_tol))
             spectra={}
+            captures={};statuses={}
             definitions={}
             for ch in channels:
                 name=ch['name']
+                capture=name in E_CHANNEL_NAMES
                 resp=one_channel(ch,H,e0,psis,solver.states,solver.occ,g,args.depth,
-                                 args.pole_tol,incomplete)
+                                 args.pole_tol,incomplete,capture=capture)
+                if capture:
+                    captures[name]=resp.pop('captured')
+                    statuses[name]=resp['status']
                 row[f'{name}_chi']=resp['chi_static']
                 row[f'{name}_chi_regular']=resp['chi_regular']
                 row[f'{name}_status']=resp['status']
                 row[f'{name}_zero_weight']=resp['zero_mode_weight']
                 row[f'{name}_krylov_difference']=resp['max_krylov_change']
                 spectra[name]=resp['spectra']
+                gap,weight=first_active_gap(resp['spectra'],args.pole_tol,
+                                             args.active_weight_fraction)
+                row[f'{name}_active_gap']=gap
+                row[f'{name}_active_weight']=weight
                 definitions[name]={k:v for k,v in ch.items() if k not in ('loops','weights','weight_vectors','orbital_vector')}
             # Fixed E-type CO susceptibility traces, averaged over the
             # two real components. Keep separate x/y poles and weights.
             for parity in ('even','odd'):
                 label=f'CO_E_{parity}'
                 names=[f'{label}_x',f'{label}_y']
-                statuses=[row[f'{name}_status'] for name in names]
+                component_statuses=[row[f'{name}_status'] for name in names]
                 status=next((s for s in
                     ('incomplete_ground_manifold','zero_mode','unresolved_pole')
-                    if s in statuses),'ok')
+                    if s in component_statuses),'ok')
                 row[f'{label}_status']=status
                 row[f'{label}_chi']=(
                     sum(row[f'{name}_chi'] for name in names)/2
@@ -465,6 +587,36 @@ def run(args):
                     f'physical E-type {parity} q=Gamma sector. '
                     'x and y spectra are archived separately; this is not '
                     'a full off-diagonal dynamical response matrix.'}
+            matrix=e_charge_response_matrix(captures,psis,statuses)
+            # Audit that diagonal parts match independently computed single
+            # source Lehmann responses; catches source-order/normalization bugs.
+            for k,name in enumerate(E_CHANNEL_NAMES):
+                a=matrix['matrix_regular'][k,k]
+                b=row[f'{name}_chi_regular']
+                if abs(a-b)>1e-6*(1+abs(b)):
+                    raise AssertionError(f'E susceptibility diagonal mismatch {name}: {a}, {b}')
+            row['CO_E_matrix_status']=matrix['status']
+            row['CO_E_matrix_chi']=float(matrix['eigenvalues_static'][-1])
+            row['CO_E_matrix_chi_regular']=float(matrix['eigenvalues_regular'][-1])
+            row['CO_E_matrix_zero_weight']=matrix['leading_zero_mode']
+            row['CO_E_matrix_lambda_max']=float(matrix['eigenvalues_static'][-1])
+            row['CO_E_matrix_lambda_regular']=float(matrix['eigenvalues_regular'][-1])
+            row['CO_E_matrix_zero_eigenmax']=matrix['leading_zero_mode']
+            row['CO_E_matrix_leading_rank']=matrix['leading_rank']
+            for k,ev in enumerate(matrix['eigenvalues_regular']):
+                row[f'CO_E_matrix_eig{k}_regular']=float(ev)
+                row[f'CO_E_matrix_eig{k}_static']=(
+                    float(ev) if matrix['status']=='ok' else np.nan)
+            row['CO_E_matrix_even_fraction']=matrix['leading_even_weight']
+            row['CO_E_matrix_odd_fraction']=matrix['leading_odd_weight']
+            for index,name in enumerate(E_CHANNEL_NAMES):
+                row['CO_E_matrix_v_'+name]=float(matrix['leading_vector'][index])
+            # What fraction of the adaptive leading charge mode lies in the
+            # HF pseudospin E subspace? This projection is phase-independent.
+            vectors=pseudospin_e_charge_modes(g)
+            lead_site=lead['site_vector']
+            row['CO_leading_E_fraction']=float(sum(
+                abs(np.vdot(vectors[name],lead_site))**2 for name in E_CHANNEL_NAMES))
             if args.pair:
                 pres,pspec,pmode=pairing_response(g,nf,V,e0,psis,solver.states,
                     args.depth,args.pole_tol,mu_override=args.mu,
@@ -487,6 +639,21 @@ def run(args):
                     arrays[f'{ch}_src{ix}_poles']=result['poles']
                     arrays[f'{ch}_src{ix}_weights']=result['weights']
             np.savez_compressed(folder/'spectra.npz',**arrays)
+            np.savez_compressed(folder/'co_e_matrix.npz',
+                source_names=np.array(E_CHANNEL_NAMES),
+                chi_regular=matrix['matrix_regular'],
+                chi_static=matrix['matrix_static'],
+                zero_mode_matrix=matrix['zero_mode_matrix'],
+                zero_mode_eigenvalues=matrix['zero_mode_eigenvalues'],
+                eigenvalues_regular=matrix['eigenvalues_regular'],
+                eigenvectors_regular=matrix['eigenvectors_regular'],
+                eigenvalues_static=matrix['eigenvalues_static'],
+                leading_vector=matrix['leading_vector'],
+                leading_projector=matrix['leading_projector'],
+                leading_rank=matrix['leading_rank'],
+                leading_even_weight=matrix['leading_even_weight'],
+                leading_odd_weight=matrix['leading_odd_weight'],
+                status=matrix['status'])
             # These two files retain compatibility with the separate native
             # zero-T Green-function evaluator. In a degenerate manifold the
             # first vector is merely a representative; all vectors are saved.
@@ -504,6 +671,12 @@ def run(args):
             (folder/'sectors.json').write_text(json.dumps(records,indent=2,default=safe_json),encoding='utf-8')
             result={'parameters':ident,'V':V,'row':row,'definitions':definitions,
                     'charge_leading_vector':lead['orbital_vector'],
+                    'CO_E_matrix_regular':matrix['matrix_regular'].tolist(),
+                    'CO_E_matrix_zero_mode':matrix['zero_mode_matrix'].tolist(),
+                    'CO_E_matrix_eigenvectors':matrix['eigenvectors_regular'].tolist(),
+                    'CO_E_matrix_source_order':list(E_CHANNEL_NAMES),
+                    'CO_E_matrix_leading_projector':matrix['leading_projector'].tolist(),
+                    'CO_E_matrix_leading_rank':matrix['leading_rank'],
                     'note':'chi_static is NaN on zero-mode/incomplete/unstable poles; χregular excludes these poles.'}
             csvpath.write_text(json.dumps(result,indent=2,default=safe_json),encoding='utf-8')
             rows_by_v[V]=row
@@ -516,68 +689,204 @@ def run(args):
             if not args.continue_on_error:raise
         finally:
             if rows_by_v:
+                attach_mode_identity(root,rows_by_v,g,nf)
                 all_rows=[rows_by_v[v] for v in sorted(rows_by_v)]
                 fieldnames=list(all_rows[0]);out=root/'susceptibility.csv'
                 with out.open('w',encoding='utf-8',newline='') as fp:
                     w=csv.DictWriter(fp,fieldnames=fieldnames)
                     w.writeheader();w.writerows(all_rows)
     (root/'failures.json').write_text(json.dumps(failed,indent=2),encoding='utf-8')
-    if rows_by_v: plot_results(root,[rows_by_v[v] for v in sorted(rows_by_v)])
+    if rows_by_v:
+        attach_mode_identity(root,rows_by_v,g,nf)
+        plot_results(root,[rows_by_v[v] for v in sorted(rows_by_v)])
     print(f'Wrote {len(rows_by_v)} V points to {root}',flush=True)
 
 
+def attach_mode_identity(root,rows_by_v,g,nf):
+    """Track the adaptive leading charge eigenvector between adjacent V.
+
+    The mode eigenvector is phase-gauge ambiguous, so store only squared
+    overlaps; mode changes across different q are flagged rather than
+    comparing vectors in inequivalent momentum sectors.
+    """
+    previous=None
+    for V,row in sorted(rows_by_v.items()):
+        point=unique_dir(root,g,nf,V)/'responses.json'
+        if not point.exists():continue
+        dat=json.loads(point.read_text(encoding='utf-8'))
+        q=(float(row['CO_leading_q1']),float(row['CO_leading_q2']))
+        vv=np.array([complex(x['real'],x['imag']) if isinstance(x,dict)
+                     else complex(x[0],x[1]) for x in dat['charge_leading_vector']])
+        vv=vv/(np.linalg.norm(vv)+1e-30)
+        overlap=np.nan
+        changed=False
+        conjugate_momentum=False
+        if previous is not None:
+            pq,pv=previous
+            same=all(abs(((a-b+.5)%1)-.5)<1e-7 for a,b in zip(q,pq))
+            conjugate_momentum=(not same and
+                all(abs(((a+b+.5)%1)-.5)<1e-7 for a,b in zip(q,pq)))
+            changed=not (same or conjugate_momentum)
+            if not changed:
+                # Charge fluctuations at q and -q are conjugate and produce
+                # the SAME physical real-space density modulation. Compare
+                # eigenvectors accordingly rather than treating K<->K' as
+                # a genuine charge-pattern switch.
+                partner=np.conj(vv) if conjugate_momentum else vv
+                overlap=float(abs(np.vdot(pv,partner))**2)
+        row['CO_leading_q_changed']=changed
+        row['CO_leading_q_conjugated_to_prev']=conjugate_momentum
+        row['CO_leading_overlap_prev']=overlap
+        previous=(q,vv)
+
+
 def plot_results(root,rows):
+    """Render susceptibility and gap figures with degeneracy-aware line styles.
+
+    Solid segments: both endpoints have unique ground state.
+    Dashed segments: at least one endpoint is degenerate.
+    Missing/zero-mode static chi: NO line; regular part shown with x markers.
+    """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    rows=sorted(rows,key=lambda x:x['V'])
-    xx=np.array([r['V'] for r in rows],float)
-    groups=[('charge',['CO_E_even','CO_E_odd','CO_AB','CO_leading']),
-            ('charge_components',['CO_E_even_x','CO_E_even_y','CO_E_odd_x','CO_E_odd_y']),
-            ('loop_current',['LC_same','LC_opposite','LC_square','LC_hexagon'])]
-    if 'SC_pair_chi' in rows[0]:groups.append(('pairing',['SC_pair']))
+    rows=sorted(rows,key=lambda r:float(r['V']))
+    xx=np.array([float(r['V']) for r in rows])
+    degeneracy=np.array([int(r.get('ground_dim',1))>1 for r in rows])
+    incomplete=np.array([bool(r.get('ground_incomplete',False)) for r in rows])
+
+    def line(ax,values,label,linestyle=True):
+        y=np.array(values,dtype=float)
+        valid=np.isfinite(y)
+        color=ax._get_lines.get_next_color()
+        for i in range(len(xx)-1):
+            if valid[i] and valid[i+1]:
+                style='--' if degeneracy[i] or degeneracy[i+1] else '-'
+                ax.plot(xx[i:i+2],y[i:i+2],color=color,linestyle=style,lw=1.8)
+        good=valid&~degeneracy&~incomplete
+        if good.any():ax.scatter(xx[good],y[good],color=color,s=29,zorder=4)
+        deg=valid&degeneracy&~incomplete
+        if deg.any():ax.scatter(xx[deg],y[deg],facecolors='white',edgecolors=color,s=56,zorder=5,lw=1.7)
+        partial=valid&incomplete
+        if partial.any():ax.scatter(xx[partial],y[partial],marker='x',color=color,s=65,zorder=5)
+        # legend proxy
+        ax.plot([],[],color=color,marker='o',label=label)
+        return color
 
     def draw(ax,name):
         key=f'{name}_chi'
         if key not in rows[0]:return
-        yy=np.array([r.get(key,np.nan) for r in rows],float)
-        reg=np.array([r.get(f'{name}_chi_regular',np.nan) for r in rows],float)
+        yy=[r.get(key,np.nan) for r in rows]
+        c=line(ax,yy,name)
+        regular=np.array([r.get(f'{name}_chi_regular',np.nan) for r in rows],float)
         bad=np.array([r.get(f'{name}_status')!='ok' for r in rows])
-        ax.plot(xx,yy,'-o',label=name,linewidth=1.7,markersize=4)
-        # A flagged point is NOT a finite static χ. Its finite regular part is
-        # shown only as an open X and is never connected to valid points.
-        if np.any(bad):
-            ax.scatter(xx[bad],reg[bad],marker='x',s=60,
-                       label=name+' regular part (flagged)')
+        mask=bad&np.isfinite(regular)
+        if mask.any():ax.scatter(xx[mask],regular[mask],marker='x',color=c,s=45,
+                                  label=name+' regular (flagged)')
 
+    groups=[('charge',['CO_E_even','CO_E_odd','CO_AB','CO_leading']),
+            ('charge_components',['CO_E_even_x','CO_E_even_y','CO_E_odd_x','CO_E_odd_y']),
+            ('loop_current',['LC_same','LC_opposite','LC_square','LC_hexagon'])]
+    if 'SC_pair_chi' in rows[0]:groups.append(('pairing',['SC_pair']))
     for group,names in groups:
-        fig,ax=plt.subplots(figsize=(8,4.8))
+        fig,ax=plt.subplots(figsize=(8.7,5.0))
         for name in names:draw(ax,name)
-        ax.set_xlabel('V / t (intra-triangle density interaction)')
-        ax.set_ylabel(r'Static susceptibility $\chi_O(0)$')
-        ax.set_title(f'{group}: n={rows[0]["n"]:.6g} per primitive cell')
-        ax.legend(fontsize=8);ax.grid(alpha=.25);fig.tight_layout()
-        fig.savefig(root/f'chi_{group}.png',dpi=180);plt.close(fig)
+        if group=='charge':draw(ax,'CO_E_matrix')
+        ax.set_xlabel('V / t');ax.set_ylabel(r'Static susceptibility $\chi_O(0)$')
+        ax.set_title(f'{group}: n={float(rows[0]["n"]):.6g} per primitive cell')
+        ax.legend(fontsize=8);ax.grid(alpha=.25)
+        fig.tight_layout();fig.savefig(root/f'chi_{group}.png',dpi=180);plt.close(fig)
 
-    fig,ax=plt.subplots(figsize=(8,4.8))
-    for name in ['CO_E_even','CO_E_odd','LC_same','LC_opposite']:draw(ax,name)
+    fig,ax=plt.subplots(figsize=(8.7,5.0))
+    for name in ['CO_E_matrix','CO_E_even','CO_E_odd','LC_same','LC_opposite']:draw(ax,name)
     ax.set_xlabel('V / t');ax.set_ylabel(r'Static $\chi_O(0)$')
-    ax.set_title(f'Zero-T ED responses, n={rows[0]["n"]:.6g}')
+    ax.set_title(f'Zero-T ED responses, n={float(rows[0]["n"]):.6g}')
     ax.legend(fontsize=8);ax.grid(alpha=.25);fig.tight_layout()
     fig.savefig(root/'chi_overview.png',dpi=180);plt.close(fig)
 
-    fig,ax=plt.subplots(figsize=(8,4.8))
-    zero_lines=0
-    for name in ['CO_E_even','CO_E_odd','CO_AB','CO_leading','LC_same','LC_opposite','LC_square','LC_hexagon']:
-        key=f'{name}_zero_weight'
+    # Selected low-energy levels, counting exact degeneracies as E1-E0 = 0.
+    fig,ax=plt.subplots(figsize=(8.7,5.0))
+    for k in (1,2,3):
+        key=f'gap_E{k}'
+        if key in rows[0]:line(ax,[r.get(key,np.nan) for r in rows],f'E{k}-E0')
+    line(ax,[r.get('gap_above_manifold',np.nan) for r in rows],
+         'first gap above ground manifold')
+    ax.set_xlabel('V / t');ax.set_ylabel(r'Excitation gap $\Delta E/t$')
+    ax.set_title('Low-energy spectrum relative to ground-state energy')
+    ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
+    fig.savefig(root/'gap_levels.png',dpi=180);plt.close(fig)
+
+    fig,ax=plt.subplots(figsize=(8.7,5.0))
+    for name in ['CO_leading','CO_E_even','CO_E_odd','LC_same','LC_opposite']:
+        key=f'{name}_active_gap'
+        if key in rows[0]:line(ax,[r.get(key,np.nan) for r in rows],name)
+    ax.set_xlabel('V / t');ax.set_ylabel(r'Active spectral pole gap $\Delta_O/t$')
+    ax.set_title('Lowest appreciably O-coupled pole (threshold-dependent)')
+    ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
+    fig.savefig(root/'gap_active.png',dpi=180);plt.close(fig)
+
+    fig,ax=plt.subplots(figsize=(8.7,5.0))
+    line(ax,[r['ground_dim'] for r in rows],'ground multiplet dimension')
+    ax.set_xlabel('V / t');ax.set_ylabel('Ground-state manifold dimension')
+    ax.set_title('Ground-state degeneracy (energy tolerance in scan metadata)')
+    ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
+    fig.savefig(root/'ground_degeneracy.png',dpi=180);plt.close(fig)
+
+    fig,ax=plt.subplots(figsize=(8.7,5.0))
+    draw(ax,'CO_E_matrix')
+    ax.set_xlabel('V / t');ax.set_ylabel(r'$\lambda_{\max}[\chi_E(0)]$')
+    ax.set_title('Largest static eigen-response of 4x4 E charge matrix')
+    ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
+    fig.savefig(root/'chi_E_matrix_leading.png',dpi=180);plt.close(fig)
+
+    fig,ax=plt.subplots(figsize=(8.7,5.0))
+    for k in range(4):
+        key=f'CO_E_matrix_eig{k}_static'
+        if key in rows[0]:line(ax,[r.get(key,np.nan) for r in rows],f'E eigenvalue {k+1}')
+    ax.set_xlabel('V / t');ax.set_ylabel(r'Static E susceptibility eigenvalues')
+    ax.set_title('All four eigenvalues of the HF E charge response matrix')
+    ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
+    fig.savefig(root/'chi_E_matrix_eigenvalues.png',dpi=180);plt.close(fig)
+
+    fig,ax=plt.subplots(figsize=(8.7,5.0))
+    for name,col in [('Even component','CO_E_matrix_even_fraction'),
+                     ('Odd component','CO_E_matrix_odd_fraction')]:
+        if col in rows[0]:line(ax,[r.get(col,np.nan) for r in rows],name)
+    ax.set_ylim(-.04,1.04);ax.set_xlabel('V / t')
+    ax.set_ylabel('Weight in leading E eigenspace')
+    ax.set_title('HF pseudospin pattern of leading E response')
+    ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
+    fig.savefig(root/'chi_E_matrix_character.png',dpi=180);plt.close(fig)
+
+    fig,ax=plt.subplots(figsize=(8.7,5.0))
+    for label,col in [('HF E-subspace overlap','CO_leading_E_fraction'),
+                      ('Adaptive mode overlap to previous V','CO_leading_overlap_prev')]:
+        if col in rows[0]:line(ax,[r.get(col,np.nan) for r in rows],label)
+    ax.set_ylim(-.04,1.04);ax.set_xlabel('V / t')
+    ax.set_ylabel('Squared normalized overlap');ax.set_title('Charge-mode identity')
+    ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
+    fig.savefig(root/'charge_mode_identity.png',dpi=180);plt.close(fig)
+
+    fig,ax=plt.subplots(figsize=(8.7,5.0))
+    for label,col in [('q1','CO_leading_q1'),('q2','CO_leading_q2')]:
+        if col in rows[0]:line(ax,[r.get(col,np.nan) for r in rows],label)
+    ax.set_ylim(-.05,1.05);ax.set_xlabel('V / t')
+    ax.set_ylabel('Reciprocal primitive lattice units')
+    ax.set_title('Momentum of adaptive charge eigenmode')
+    ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
+    fig.savefig(root/'charge_mode_momentum.png',dpi=180);plt.close(fig)
+
+    fig,ax=plt.subplots(figsize=(8.7,5.0));cnt=0
+    for name in ['CO_E_matrix','CO_E_even','CO_E_odd','CO_AB','CO_leading',
+                 'LC_same','LC_opposite','LC_square','LC_hexagon']:
+        key=f'{name}_zero_weight' if name!='CO_E_matrix' else 'CO_E_matrix_zero_eigenmax'
         if key not in rows[0]:continue
         z=np.array([r.get(key,np.nan) for r in rows],float)
         if np.isfinite(z).any() and np.nanmax(z)>1e-10:
-            ax.plot(xx,z,'o-',label=name);zero_lines+=1
-    if zero_lines:
-        ax.set_xlabel('V / t')
-        ax.set_ylabel(r'Weight of $P_0(O-\overline{O})P_0$')
-        ax.set_title('Degenerate-ground-manifold zero-mode response')
+            line(ax,z,name);cnt+=1
+    if cnt:
+        ax.set_xlabel('V / t');ax.set_ylabel('Ground-subspace zero-mode weight')
+        ax.set_title('Zero modes of degenerate ground-state manifold')
         ax.legend(fontsize=8);ax.grid(alpha=.25);fig.tight_layout()
         fig.savefig(root/'chi_zero_mode_weight.png',dpi=180)
     plt.close(fig)
@@ -600,6 +909,8 @@ def parser():
     p.add_argument('--low',type=int,default=5,help='lowest eigenvectors kept per symmetry block')
     p.add_argument('--depth',type=int,default=60,help='Lanczos Krylov depth for susceptibilities')
     p.add_argument('--pole-tol',type=float,default=1e-8)
+    p.add_argument('--active-weight-fraction',type=float,default=1e-3,
+                   help='relative spectral weight needed to call a pole active')
     p.add_argument('--degeneracy-tol',type=float,default=1e-7)
     p.add_argument('--max-basis',type=int,default=70_000)
     p.add_argument('--no-extra-loops',action='store_true',help='skip square and hexagon channels')

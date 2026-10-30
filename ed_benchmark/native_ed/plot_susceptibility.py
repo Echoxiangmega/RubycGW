@@ -16,7 +16,10 @@ def main():
     if not rows:raise ValueError('CSV contains no completed V points')
     for r in rows:
         for key,value in list(r.items()):
-            if key in ('V','n') or key.endswith('_chi') or key.endswith('_chi_regular') or key.endswith('_zero_weight'):
+            # Preserve booleans from CSV. bool('False') is True in Python.
+            if value in ('True','False'):
+                r[key]=(value=='True')
+            elif key in ('V','n') or key.endswith('_chi') or key.endswith('_chi_regular') or key.endswith('_zero_weight'):
                 r[key]=float(value)
     plot_results(root,rows)
     print('Wrote susceptibility figures to',root)

@@ -6,35 +6,60 @@ import numpy as np
 from geometry import RubyPBC
 from core import FixedHamiltonian
 from scan_susceptibility import (VScanSolver,channel_specs,one_channel,source_action,
-    spectral_chi,charge_real_sources,pseudospin_e_charge_modes,pairing_response,parser,run)
+    spectral_chi,charge_real_sources,pairing_response,parser,run,
+    E_CHANNEL_NAMES,e_charge_response_matrix,first_active_gap,level_gap_diagnostics)
 
 
+def test_full_e_response_against_dense_lehmann():
+    """Check all 16 susceptibility matrix elements, including off-diagonals."""
+    from scan_susceptibility import pseudospin_e_charge_modes
+    g=RubyPBC('ring3',t1=.6,t2=.2)
+    solver=VScanSolver(g,2,'point',low=4)
+    H,e0,psis,records,partial,res=solver.solve(.7,1e-9)
+    assert not partial and psis.shape[1]==1
+    es,U=np.linalg.eigh(H.toarray())
+    channels,_=channel_specs(g,solver.occ,psis,include_extra=False)
+    lookup={ch['name']:ch for ch in channels}
+    capture={};states={};diags={}
+    for name in E_CHANNEL_NAMES:
+        rr=one_channel(lookup[name],H,e0,psis,solver.states,solver.occ,g,
+                       depth=H.shape[0],precision=1e-10,capture=True)
+        capture[name]=rr['captured'];states[name]=rr['status']
+        diags[name]=rr['chi_regular']
+    result=e_charge_response_matrix(capture,psis,states)
+    source=np.column_stack([source_action(lookup[name],psis[:,0],solver.states,
+                             g.Ns,solver.occ,g)[0] for name in E_CHANNEL_NAMES])
+    source-=psis@(psis.conj().T@source)
+    amp=U.conj().T@source
+    exact=2*np.real(amp[1:].conj().T@((1/(es[1:]-es[0]))[:,None]*amp[1:]))
+    np.testing.assert_allclose(result['matrix_regular'],exact,rtol=5e-9,atol=1e-9)
+    np.testing.assert_allclose(np.diag(result['matrix_regular']),
+                              [diags[x] for x in E_CHANNEL_NAMES],atol=1e-9)
+    assert result['status']=='ok'
+    assert result['leading_rank']>=1
+    assert abs(result['leading_even_weight']+result['leading_odd_weight']-1)<1e-11
+    assert np.allclose(result['leading_projector']@result['leading_projector'],
+                       result['leading_projector'],atol=1e-10)
+    assert abs(result['matrix_regular'][0,3])>1e-3  # genuine E mixing!
 
-def test_hf_physical_pseudospin_charge_modes():
-    """Six-site HF density patterns, B physical tau_y sign, orthogonal sectors."""
-    omega=np.exp(2j*np.pi/3)
-    for name in ('ring3','3x1','2x2'):
-        g=RubyPBC(name)
-        modes=pseudospin_e_charge_modes(g)
-        names=['CO_E_even_x','CO_E_even_y','CO_E_odd_x','CO_E_odd_y']
-        W=np.array([modes[n] for n in names])
-        np.testing.assert_allclose(W@W.T,np.eye(4),atol=1e-12)
-        scale=np.sqrt(12*g.num_cells)
-        np.testing.assert_allclose(W[0,:6]*scale,[2,-1,-1,2,-1,-1])
-        np.testing.assert_allclose(W[1,:6]*scale,[0,-np.sqrt(3),np.sqrt(3),
-                                                 0,np.sqrt(3),-np.sqrt(3)])
-        np.testing.assert_allclose(W[2,:6]*scale,[2,-1,-1,-2,1,1])
-        np.testing.assert_allclose(W[3,:6]*scale,[0,-np.sqrt(3),np.sqrt(3),
-                                                 0,-np.sqrt(3),np.sqrt(3)])
-        # The local doublet CO along x is a one-rich/two-poor density pattern.
-        nA=np.array([2/3,1/6,1/6])
-        assert abs(2*nA[0]-nA[1]-nA[2]-1.)<1e-12
-        assert abs(np.sqrt(3)*(nA[2]-nA[1]))<1e-12
-        nB=np.array([1/3,1/3-1/(2*np.sqrt(3)),1/3+1/(2*np.sqrt(3))])
-        # For physical B tau_y this yields negative unity, not positive.
-        assert abs(np.sqrt(3)*(nB[1]-nB[2])+1.)<1e-12
-        qa=nA[0]+omega**2*nA[1]+omega*nA[2]
-        np.testing.assert_allclose(qa,(1.+0j)/2,atol=1e-12)
+
+def test_gap_and_zero_mode_diagnostics():
+    from scan_susceptibility import pseudospin_e_charge_modes
+    g=RubyPBC('ring3',t1=.6,t2=.2)
+    solver=VScanSolver(g,2,'point',low=4)
+    H,e0,psis,records,partial,res=solver.solve(.7,1e-9)
+    out=level_gap_diagnostics(records,e0,1e-8)
+    assert out['gap_E1']>=0
+    assert out['gap_above_manifold']>0
+    channels,_=channel_specs(g,solver.occ,psis,include_extra=False)
+    ch=next(x for x in channels if x['name']=='CO_E_odd_x')
+    response=one_channel(ch,H,e0,psis,solver.states,solver.occ,g,
+                         80,1e-10,capture=True)
+    d,w=first_active_gap(response['spectra'],1e-10,1e-3)
+    assert np.isfinite(d) and d>0 and w>0
+    # No ground-state overlap in a nondegenerate eigenstate after subtraction.
+    src=response['captured'][0][0][0]
+    assert abs(np.vdot(psis[:,0],src))<1e-9
 
 
 def test_against_dense_lehmann():
@@ -111,9 +136,26 @@ def test_scan_and_resume():
         run(a)
         with (Path(tmp)/'susceptibility.csv').open(encoding='utf-8') as f:
             text=f.read()
-        assert 'LC_same_chi' in text and 'CO_E_even_chi' in text
-        assert 'CO_E_odd_chi' in text and 'CO_E_odd_y_chi' in text
+        assert 'LC_same_chi' in text and 'CO_leading_chi' in text
+        assert 'CO_E_matrix_chi' in text and 'gap_E1' in text
         assert (Path(tmp)/'chi_overview.png').exists()
+        assert (Path(tmp)/'gap_levels.png').exists()
+        assert (Path(tmp)/'gap_active.png').exists()
+        assert (Path(tmp)/'ground_degeneracy.png').exists()
+        assert (Path(tmp)/'chi_E_matrix_eigenvalues.png').exists()
+        assert (Path(tmp)/'charge_mode_identity.png').exists()
+        from plot_e_matrix import main as plot_e_main
+        import sys
+        original=sys.argv
+        try:
+            sys.argv=['plot_e_matrix.py','--input',tmp,'--V','0.75']
+            plot_e_main()
+        finally:
+            sys.argv=original
+        assert list(Path(tmp).glob('V_*/chi_E_matrix.png'))
+        with np.load(next(Path(tmp).glob('V_*/co_e_matrix.npz'))) as z:
+            assert z['chi_regular'].shape==(4,4)
+            assert z['leading_projector'].shape==(4,4)
         run(a)  # reuses cached points; must not change output schema
         with (Path(tmp)/'susceptibility.csv').open(encoding='utf-8') as f:
             assert f.read()==text
@@ -129,7 +171,8 @@ def test_n_grid_validation():
 
 
 if __name__=='__main__':
-    for test in (test_hf_physical_pseudospin_charge_modes,
+    for test in (test_full_e_response_against_dense_lehmann,
+                 test_gap_and_zero_mode_diagnostics,
                  test_against_dense_lehmann,test_degenerate_response_flags,
                  test_pairing_against_sparse_resolvent,test_scan_and_resume,test_n_grid_validation):
         print('Testing',test.__name__,flush=True)

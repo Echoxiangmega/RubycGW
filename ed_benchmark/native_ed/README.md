@@ -133,7 +133,7 @@ categorical phase diagram.
 
 ## Fixed-filling susceptibility vs V (new)
 
-Use [`scan_susceptibility.py`](scan_susceptibility.py) for a direct **zero-temperature ED scan at fixed `n` or `Nf`**, with CSV + line plots for HF-compatible physical E-type charge pseudospin channels (`CO_E_even_x/y`, `CO_E_odd_x/y`, and their half-traces), `CO_AB`, `CO_leading`, physical `LC_same`, `LC_opposite`, square/hexagon currents, and optional `Nf±2` bond pairing susceptibility. The analysis checks exact degeneracies and records undefined singular responses as `NaN` with separate zero-mode weights. The pseudospin CO sources use `tauAx=2n0-n1-n2`, `tauAy=sqrt(3)(n2-n1)`, `tauBx=2n3-n4-n5`, `tauBy=sqrt(3)(n4-n5)`, preserving our earlier A/B physical pseudospin convention. For full source definitions, run options and Windows commands, see [`SUSCEPTIBILITY_SCAN.md`](SUSCEPTIBILITY_SCAN.md).
+Use [`scan_susceptibility.py`](scan_susceptibility.py) for a direct **zero-temperature ED scan at fixed `n` or `Nf`**, with CSV + line plots for `CO_AB`, `CO_leading`, physical `LC_same`, `LC_opposite`, square/hexagon currents, and optional `Nf±2` bond pairing susceptibility. The analysis checks exact degeneracies and records undefined singular responses as `NaN` with separate zero-mode weights. For full source definitions, run options and Windows commands, see [`SUSCEPTIBILITY_SCAN.md`](SUSCEPTIBILITY_SCAN.md).
 
 ```powershell
 python test_susceptibility.py
@@ -142,3 +142,15 @@ python plot_susceptibility.py --input results\chi_ring3_n2
 ```
 
 This scan is a separate workflow from [`scan_phase.py`](scan_phase.py), which saves primarily equal-time correlation maxima and optional selected legacy χ; the new scan uses explicit fixed source definitions and saves full Lanczos spectra for each channel.
+
+## Full E-charge 4x4 response and gap diagnostics (new)
+
+The fixed-filling `scan_susceptibility.py` now includes the complete real symmetric static susceptibility matrix in the four HF pseudospin charge sources `(even_x, even_y, odd_x, odd_y)` and saves its full `4x4` entries, eigenvalues, **leading eigenspace projector**, and zero-mode matrix. The same scan stores low-energy level gaps, source-active spectral gaps, ground-manifold degeneracy and leading charge-mode momentum/overlap. Solid vs dashed segments flag unique vs degenerate finite-size grounds. For full definitions and Windows commands, see [FULL_E_MATRIX_AND_GAPS.md](FULL_E_MATRIX_AND_GAPS.md).
+
+```powershell
+python test_susceptibility.py
+python scan_susceptibility.py --cluster ring3 --n 2 --t1 0.5 --t2 0.5 --Vmin 1 --Vmax 5 --Vstep 0.25 --depth 80 --no-extra-loops --output results\chi_E_matrix_gaps_n2
+python plot_e_matrix.py --input results\chi_E_matrix_gaps_n2 --V 3
+```
+
+Old scan directories from the previous channel schema must not be reused; the scanner explicitly prevents accidental mixing.
