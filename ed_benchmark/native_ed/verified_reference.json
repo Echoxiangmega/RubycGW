@@ -1,0 +1,18 @@
+{
+  "method": "NumPy/SciPy native fixed-N ED, checked in current environment, no QuSpin",
+  "conventions": "spinless, t=+1, t1=t2=0.5, only intra-triangle V, PBC",
+  "energies": [
+    {"cluster": "ring3", "Ns": 18, "Nf": 6, "V": 0.0, "E0": -9.162277660168407},
+    {"cluster": "ring3", "Ns": 18, "Nf": 6, "V": 1.0, "E0": -7.9938493221581854},
+    {"cluster": "3x1", "Ns": 18, "Nf": 6, "V": 0.0, "E0": -9.61462700419457},
+    {"cluster": "3x1", "Ns": 18, "Nf": 6, "V": 1.0, "E0": -8.27297684667166},
+    {"cluster": "2x2", "Ns": 24, "Nf": 4, "V": 1.0, "E0": -6.830013489593009}
+  ],
+  "validation": {
+    "symmetry_dim_sum": "Passed for all 3 clusters, Nf=2, and (t1,t2)=(0.5,0.5),(0.6,0.2),(0.5,-0.5)",
+    "energy_consistency": "ring3 Nf=6 V=1: symmetry point/translation/none energies agree within 5e-14",
+    "signed_rotation": "Confirmed in original hopping gauge, including odd Nf and eigenstate residuals",
+    "noninteracting_G": "3x1 Nf=6, selected site block, max error approximately 1e-13 compared with (iomega+mu-h0)^-1",
+    "phase_assignment": "No thermodynamic phase assigned"
+  }
+}
