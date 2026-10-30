@@ -300,3 +300,35 @@ within-symmetry *finite-difference secant*. Crossings are excluded from
 these slopes. By Hellmann-Feynman, the exact derivative of E0 is the sum
 of triangle-bond density correlations in a differentiable, nondegenerate
 ground-state branch; the plotted secants only approximate it.
+
+## Full loop-current S(q,V), off-site correlations and V=0 control
+
+The new [plot_lc_structure.py](plot_lc_structure.py) analyzes the
+**complete triangle-triangle connected current correlation matrix** in the
+fixed-N exact ground-state multiplet and builds all allowed PBC momentum
+**2x2 A/B** LC structure-factor matrices. It also separates local
+p=q self-correlations from nonlocal p!=q correlations, resolves exact
+ground-multiplet zero modes versus finite-energy fluctuations, and
+compares all these quantities with the **same model at V=0**.
+For each V it archives the full matrices, pair-distance correlations
+and maximal same/opposite J in the ground manifold.
+
+```powershell
+python test_lc_structure.py
+python plot_lc_structure.py --input results\chi_ring3_n2 --V 0 1 2 3 4
+python plot_lc_structure.py --input results\chi_ring3_n2 --cache-only
+```
+
+Old scan results with `ground_states.npz` can be reused; otherwise missing
+full ground multiplets (including V=0 if absent) are re-solved at the
+requested V values only. A scalar `susceptibility.csv` is not enough to
+reconstruct the complete inter-triangle correlation matrix.
+
+The plots `lc_structure/lc_comparison.png`,
+`lc_structure/lc_Sq_vs_V.png`, `lc_structure/lc_nonlocal_vs_V.png`
+compare all-q structure factors, V=0-subtracted correlations, ground zero
+modes, and Jmax **without treating nonzero Jmax as an LC phase label**.
+The off-site-only Fourier diagnostic can be negative and is not a
+positive-definite structure factor. See
+[LC_STRUCTURE_BENCHMARK.md](LC_STRUCTURE_BENCHMARK.md) for normalization,
+file layouts and caveats on finite-size order.
