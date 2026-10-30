@@ -117,6 +117,20 @@ Charge (including the HF/strong-coupling pseudospin channels):
   `(2/3,1/6,1/6)` density pattern, tauAx=-1 gives
   `(0,1/2,1/2)`. The physically corresponding B y-pattern is
   mirrored relative to A.
+**Interpretation of the 2+1 vs 1+2 charge patterns.** The x/y E
+susceptibilities probe the **quadratic** coefficient of the two-component
+charge order. For a C3-symmetric triangle, the local E-order parameter
+`eta=|eta| exp(i phi)` allows a cubic anisotropy
+`F = r|eta|^2 + u|eta|^4 + v(eta^3+conj(eta)^3)+...`
+(subject to the full point-group constraints). Thus linear static
+susceptibility alone cannot choose `+tau_x` (one high, two low) versus
+`-tau_x` (one low, two high): they are opposite signs of the SAME
+linear-response operator. Their energetic selection requires nonlinear
+source-field responses, higher-order charge correlations or comparing
+near-degenerate symmetry-broken combinations. Even/odd here refers to
+the relative **physical pseudospin components** of A and B, not simply
+identical-looking site-density pictures on both triangles.
+
 * `CO_AB` is still available, but it tests **only** the total A-minus-B
   density imbalance, not internal E-type charge disproportionation.
   It uses the fixed `q=Gamma` source `w_(A/B)=+/-1/sqrt(Ns)`.
