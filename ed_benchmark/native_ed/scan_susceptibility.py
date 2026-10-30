@@ -138,6 +138,29 @@ def charge_real_sources(mode):
     return basis
 
 
+def pseudospin_e_charge_modes(g):
+    """HF-compatible real E-type triangle CO operators in physical A/B frames.
+
+    A=(0,1,2): tau_x=2n0-n1-n2, tau_y=sqrt(3)(n2-n1)
+    B=(3,4,5): tau_x=2n3-n4-n5, tau_y=sqrt(3)(n4-n5)
+    The B-y sign follows the opposite geometric chirality of triangle B.
+    Physical density operators work at all fillings; their projected Pauli
+    interpretation applies only inside the local one-fermion E doublet.
+    The q=Gamma A +/- B combinations are Euclidean-unit normalized.
+    """
+    nc=g.num_cells
+    xa=np.tile([2.,-1.,-1.,0.,0.,0.],nc)
+    ya=np.tile([0.,-np.sqrt(3.),np.sqrt(3.),0.,0.,0.],nc)
+    xb=np.tile([0.,0.,0.,2.,-1.,-1.],nc)
+    yb=np.tile([0.,0.,0.,0.,np.sqrt(3.),-np.sqrt(3.)],nc)
+    out={}
+    for parity,sign in (('even',1.),('odd',-1.)):
+        for axis,aa,bb in (('x',xa,xb),('y',ya,yb)):
+            weights=aa+sign*bb
+            out[f'CO_E_{parity}_{axis}']=weights/np.linalg.norm(weights)
+    return out
+
+
 def channel_specs(g,occ,ground,include_extra=True):
     ns=g.Ns;triangle=[p for p in g.cycles() if len(p)==3]
     nc=g.num_cells
@@ -149,6 +172,15 @@ def channel_specs(g,occ,ground,include_extra=True):
                'q':lead['q'], 'structure_factor':lead['structure_factor'],
                'orbital_vector':[[float(z.real),float(z.imag)] for z in lead['orbital_vector']],
                'definition':'leading equal-time charge eigenmode, real quadratures, sum w_i^2=1'}]
+    for name,weights in pseudospin_e_charge_modes(g).items():
+        parity='even' if '_even_' in name else 'odd'
+        axis=name.rsplit('_',1)[1]
+        channels.append({
+            'name':name,'type':'charge','weights':weights,'q':[0.,0.],
+            'definition':f'HF physical E-type tau_{axis}, '
+                         f'A {"+" if parity=="even" else "-"} B, '
+                         'q=Gamma, ||site weights||_2=1'
+        })
     for key,signs in [('LC_same',[1.]*len(triangle)),
                       ('LC_opposite',[1. if p[0]%6<3 else -1. for p in triangle])]:
         channels.append({'name':key,'type':'current','loops':triangle,
@@ -355,7 +387,7 @@ def run(args):
     if not Vs:raise ValueError('Empty V grid')
     if any(not math.isfinite(x) for x in Vs):raise ValueError('Nonfinite V')
     Vs=sorted(set(Vs))
-    ident={'cluster':args.cluster,'t':args.t,'t1':args.t1,'t2':args.t2,
+    ident={'channel_schema':'hf_pseudospin_E_v1','cluster':args.cluster,'t':args.t,'t1':args.t1,'t2':args.t2,
            'nf':nf,'symmetry':args.symmetry,'depth':args.depth,'low':args.low,
            'extra_loops':not args.no_extra_loops,'degeneracy_tol':args.degeneracy_tol,
            'pair':args.pair,'mu':args.mu,'max_adjacent_basis':args.max_adjacent_basis,
@@ -409,6 +441,30 @@ def run(args):
                 row[f'{name}_krylov_difference']=resp['max_krylov_change']
                 spectra[name]=resp['spectra']
                 definitions[name]={k:v for k,v in ch.items() if k not in ('loops','weights','weight_vectors','orbital_vector')}
+            # Fixed E-type CO susceptibility traces, averaged over the
+            # two real components. Keep separate x/y poles and weights.
+            for parity in ('even','odd'):
+                label=f'CO_E_{parity}'
+                names=[f'{label}_x',f'{label}_y']
+                statuses=[row[f'{name}_status'] for name in names]
+                status=next((s for s in
+                    ('incomplete_ground_manifold','zero_mode','unresolved_pole')
+                    if s in statuses),'ok')
+                row[f'{label}_status']=status
+                row[f'{label}_chi']=(
+                    sum(row[f'{name}_chi'] for name in names)/2
+                    if status=='ok' else np.nan)
+                row[f'{label}_chi_regular']=sum(
+                    row[f'{name}_chi_regular'] for name in names)/2
+                row[f'{label}_zero_weight']=sum(
+                    row[f'{name}_zero_weight'] for name in names)/2
+                row[f'{label}_krylov_difference']=max(
+                    row[f'{name}_krylov_difference'] for name in names)
+                definitions[label]={'definition':
+                    'Average of xx and yy static susceptibilities in fixed '
+                    f'physical E-type {parity} q=Gamma sector. '
+                    'x and y spectra are archived separately; this is not '
+                    'a full off-diagonal dynamical response matrix.'}
             if args.pair:
                 pres,pspec,pmode=pairing_response(g,nf,V,e0,psis,solver.states,
                     args.depth,args.pole_tol,mu_override=args.mu,
@@ -476,7 +532,8 @@ def plot_results(root,rows):
     import matplotlib.pyplot as plt
     rows=sorted(rows,key=lambda x:x['V'])
     xx=np.array([r['V'] for r in rows],float)
-    groups=[('charge',['CO_AB','CO_leading']),
+    groups=[('charge',['CO_E_even','CO_E_odd','CO_AB','CO_leading']),
+            ('charge_components',['CO_E_even_x','CO_E_even_y','CO_E_odd_x','CO_E_odd_y']),
             ('loop_current',['LC_same','LC_opposite','LC_square','LC_hexagon'])]
     if 'SC_pair_chi' in rows[0]:groups.append(('pairing',['SC_pair']))
 
@@ -503,7 +560,7 @@ def plot_results(root,rows):
         fig.savefig(root/f'chi_{group}.png',dpi=180);plt.close(fig)
 
     fig,ax=plt.subplots(figsize=(8,4.8))
-    for name in ['CO_AB','LC_same','LC_opposite']:draw(ax,name)
+    for name in ['CO_E_even','CO_E_odd','LC_same','LC_opposite']:draw(ax,name)
     ax.set_xlabel('V / t');ax.set_ylabel(r'Static $\chi_O(0)$')
     ax.set_title(f'Zero-T ED responses, n={rows[0]["n"]:.6g}')
     ax.legend(fontsize=8);ax.grid(alpha=.25);fig.tight_layout()
@@ -511,7 +568,7 @@ def plot_results(root,rows):
 
     fig,ax=plt.subplots(figsize=(8,4.8))
     zero_lines=0
-    for name in ['CO_AB','CO_leading','LC_same','LC_opposite','LC_square','LC_hexagon']:
+    for name in ['CO_E_even','CO_E_odd','CO_AB','CO_leading','LC_same','LC_opposite','LC_square','LC_hexagon']:
         key=f'{name}_zero_weight'
         if key not in rows[0]:continue
         z=np.array([r.get(key,np.nan) for r in rows],float)
