@@ -196,6 +196,62 @@ def channel_specs(g,occ,ground,include_extra=True):
     return channels,lead
 
 
+def lc_triangle_channels(g):
+    """The existing normalized physical CCW triangle LC order operators."""
+    triangle=[p for p in g.cycles() if len(p)==3]
+    if not triangle:
+        raise ValueError('No elementary triangle loops in PBC cluster')
+    count=len(triangle)
+    return {
+        'LC_same': {'name':'LC_same','type':'current','loops':triangle,
+                    'loop_coefficients':(np.ones(count)/np.sqrt(count)).tolist()},
+        'LC_opposite': {'name':'LC_opposite','type':'current','loops':triangle,
+                    'loop_coefficients':(np.array([1. if p[0]%6<3 else -1.
+                                      for p in triangle])/np.sqrt(count)).tolist()},
+    }
+
+
+def projected_current_manifold(g,psis,states,channels=None):
+    """Calculate the exact current operators in the degenerate ground space.
+
+    M_ab=<psi_a|O|psi_b>; all psi columns must be orthonormal. The largest
+    absolute eigenvalue is the maximum attainable |<O>| within this *exact*
+    ground multiplet. Ground-manifold variance (Tr[(M-mean)^2]/d) must equal
+    the source's zero-mode weight used by one_channel(). A finite W0 alone
+    does NOT determine Jmax (the full matrix is required).
+    """
+    psis=np.asarray(psis,dtype=complex)
+    if psis.ndim!=2 or psis.shape[1]<1:
+        raise ValueError('Expected orthonormal ground-state column vectors')
+    d=psis.shape[1]
+    if np.linalg.norm(psis.conj().T@psis-np.eye(d))>1e-7:
+        raise ValueError('Ground vectors are not orthonormal')
+    if channels is None:channels=lc_triangle_channels(g)
+    result={}
+    for name,ch in channels.items():
+        actions=np.column_stack([source_action(ch,psi,states,g.Ns,None,g)[0]
+                                 for psi in psis.T])
+        matrix=psis.conj().T@actions
+        herm_error=float(np.linalg.norm(matrix-matrix.conj().T))
+        if herm_error>1e-7:raise AssertionError(f'{name} projected current not Hermitian: {herm_error}')
+        matrix=.5*(matrix+matrix.conj().T)
+        eigen,U=np.linalg.eigh(matrix)
+        mean=float(np.trace(matrix).real/d)
+        centered=matrix-mean*np.eye(d)
+        w0=float(np.vdot(centered,centered).real/d)
+        imax=int(np.argmax(abs(eigen)))
+        result[name]={
+            'matrix':matrix, 'eigenvalues':eigen,
+            'eigenvectors':U, 'jmax_abs':float(abs(eigen[imax])),
+            'jmax_signed':float(eigen[-1]), 'jmin_signed':float(eigen[0]),
+            'jmean':mean, 'zero_weight':w0,
+            'rms_centered':float(np.sqrt(max(0.,w0))),
+            'jmax_per_triangle':float(abs(eigen[imax])/np.sqrt(len(ch['loops']))),
+            'n_triangle':len(ch['loops'])
+        }
+    return result
+
+
 def source_action(ch,psi,states,ns,occ,g):
     if ch['type']=='charge':
         vectors=ch['weight_vectors'] if 'weight_vectors' in ch else [ch['weights']]
@@ -498,7 +554,7 @@ def run(args):
     if not Vs:raise ValueError('Empty V grid')
     if any(not math.isfinite(x) for x in Vs):raise ValueError('Nonfinite V')
     Vs=sorted(set(Vs))
-    ident={'channel_schema':'full_E_matrix_gaps_v2','cluster':args.cluster,'t':args.t,'t1':args.t1,'t2':args.t2,
+    ident={'channel_schema':'full_E_matrix_gaps_lcJ_v3','cluster':args.cluster,'t':args.t,'t1':args.t1,'t2':args.t2,
            'nf':nf,'symmetry':args.symmetry,'depth':args.depth,'low':args.low,
            'extra_loops':not args.no_extra_loops,'degeneracy_tol':args.degeneracy_tol,
            'pair':args.pair,'mu':args.mu,'max_adjacent_basis':args.max_adjacent_basis,
@@ -563,6 +619,25 @@ def run(args):
                 row[f'{name}_active_gap']=gap
                 row[f'{name}_active_weight']=weight
                 definitions[name]={k:v for k,v in ch.items() if k not in ('loops','weights','weight_vectors','orbital_vector')}
+            # Resolve the current order *inside* the exactly degenerate
+            # ground multiplet. This remains meaningful when static chi=NaN.
+            # Verify against the previously computed zero-mode spectral weight.
+            ground_currents=projected_current_manifold(g,psis,solver.states)
+            for name,current in ground_currents.items():
+                difference=abs(current['zero_weight']-row[f'{name}_zero_weight'])
+                if difference>1e-7*(1+abs(row[f'{name}_zero_weight'])):
+                    raise AssertionError(f'{name} ground-current zero-weight mismatch: '
+                                         f'{current["zero_weight"]}, '
+                                         f'{row[f"{name}_zero_weight"]}')
+                for key,value in (
+                    ('Jmax_abs',current['jmax_abs']),
+                    ('Jmax_signed',current['jmax_signed']),
+                    ('Jmin_signed',current['jmin_signed']),
+                    ('Jmean',current['jmean']),
+                    ('J_rms',current['rms_centered']),
+                    ('Jmax_per_triangle',current['jmax_per_triangle']),
+                ):
+                    row[f'{name}_ground_{key}']=value
             # Fixed E-type CO susceptibility traces, averaged over the
             # two real components. Keep separate x/y poles and weights.
             for parity in ('even','odd'):
@@ -639,6 +714,15 @@ def run(args):
                     arrays[f'{ch}_src{ix}_poles']=result['poles']
                     arrays[f'{ch}_src{ix}_weights']=result['weights']
             np.savez_compressed(folder/'spectra.npz',**arrays)
+            np.savez_compressed(folder/'lc_ground_projected.npz',
+                LC_same_matrix=ground_currents['LC_same']['matrix'],
+                LC_opposite_matrix=ground_currents['LC_opposite']['matrix'],
+                LC_same_eigenvalues=ground_currents['LC_same']['eigenvalues'],
+                LC_opposite_eigenvalues=ground_currents['LC_opposite']['eigenvalues'],
+                LC_same_eigenvectors=ground_currents['LC_same']['eigenvectors'],
+                LC_opposite_eigenvectors=ground_currents['LC_opposite']['eigenvectors'],
+                operator_normalization='sum physical CCW triangle loop-average currents / sqrt(Ntriangle)',
+                n_ground=int(psis.shape[1]))
             np.savez_compressed(folder/'co_e_matrix.npz',
                 source_names=np.array(E_CHANNEL_NAMES),
                 chi_regular=matrix['matrix_regular'],
@@ -876,6 +960,35 @@ def plot_results(root,rows):
     ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
     fig.savefig(root/'charge_mode_momentum.png',dpi=180);plt.close(fig)
 
+    # Distinguish finite-energy susceptibility from the exact ground-multiplet
+    # response. These are separately meaningful when chi_static is NaN.
+    fig,ax=plt.subplots(figsize=(8.7,5.0))
+    count=0
+    for name in ('LC_same','LC_opposite'):
+        key=f'{name}_chi_regular'
+        if key in rows[0]:
+            line(ax,[r.get(key,np.nan) for r in rows],name+' finite-energy')
+            count+=1
+    if count:
+        ax.set_xlabel('V / t')
+        ax.set_ylabel(r'$\chi_{\rm regular}(0)$ (zero-mode omitted)')
+        ax.set_title('Finite-energy LC susceptibility (NOT total static response)')
+        ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
+        fig.savefig(root/'chi_lc_regular.png',dpi=180)
+    plt.close(fig)
+
+    if 'LC_same_ground_Jmax_abs' in rows[0]:
+        fig,ax=plt.subplots(figsize=(8.7,5.0))
+        for name in ('LC_same','LC_opposite'):
+            line(ax,[r.get(f'{name}_ground_Jmax_abs',np.nan) for r in rows],
+                 name+' maximum |J|')
+        ax.set_xlabel('V / t')
+        ax.set_ylabel('Maximum |<O_LC>| in ground multiplet')
+        ax.set_title('Current maximized over exactly degenerate ground states')
+        ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
+        fig.savefig(root/'lc_ground_Jmax.png',dpi=180)
+        plt.close(fig)
+
     fig,ax=plt.subplots(figsize=(8.7,5.0));cnt=0
     for name in ['CO_E_matrix','CO_E_even','CO_E_odd','CO_AB','CO_leading',
                  'LC_same','LC_opposite','LC_square','LC_hexagon']:
@@ -885,43 +998,3 @@ def plot_results(root,rows):
         if np.isfinite(z).any() and np.nanmax(z)>1e-10:
             line(ax,z,name);cnt+=1
     if cnt:
-        ax.set_xlabel('V / t');ax.set_ylabel('Ground-subspace zero-mode weight')
-        ax.set_title('Zero modes of degenerate ground-state manifold')
-        ax.legend(fontsize=8);ax.grid(alpha=.25);fig.tight_layout()
-        fig.savefig(root/'chi_zero_mode_weight.png',dpi=180)
-    plt.close(fig)
-
-
-def parser():
-    p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--cluster',choices=['ring3','3x1','2x2'],default='ring3')
-    g=p.add_mutually_exclusive_group(required=True)
-    g.add_argument('--n',type=float,default=None,help='particles per six-site primitive cell; must map to integer Nf')
-    g.add_argument('--nf',type=int,default=None,help='exact integer total number of particles')
-    p.add_argument('--t',type=float,default=1.)
-    p.add_argument('--t1',type=float,default=.5)
-    p.add_argument('--t2',type=float,default=.5)
-    p.add_argument('--V',type=float,nargs='+',default=None,help='Explicit V scan values')
-    p.add_argument('--Vmin',type=float,default=-2.)
-    p.add_argument('--Vmax',type=float,default=2.)
-    p.add_argument('--Vstep',type=float,default=.5)
-    p.add_argument('--symmetry',choices=['point','translation','none'],default='point')
-    p.add_argument('--low',type=int,default=5,help='lowest eigenvectors kept per symmetry block')
-    p.add_argument('--depth',type=int,default=60,help='Lanczos Krylov depth for susceptibilities')
-    p.add_argument('--pole-tol',type=float,default=1e-8)
-    p.add_argument('--active-weight-fraction',type=float,default=1e-3,
-                   help='relative spectral weight needed to call a pole active')
-    p.add_argument('--degeneracy-tol',type=float,default=1e-7)
-    p.add_argument('--max-basis',type=int,default=70_000)
-    p.add_argument('--no-extra-loops',action='store_true',help='skip square and hexagon channels')
-    p.add_argument('--pair',action='store_true',help='also compute leading spinless bond-pair susceptibility using Nf±2')
-    p.add_argument('--mu',type=float,default=None,help='chemical potential for pairing source (default Nf±1 midgap)')
-    p.add_argument('--max-adjacent-basis',type=int,default=90_000)
-    p.add_argument('--save-state',action='store_true')
-    p.add_argument('--recompute',action='store_true')
-    p.add_argument('--continue-on-error',action='store_true')
-    p.add_argument('--output',default='results/susceptibility_scan')
-    return p
-
-
-if __name__=='__main__':run(parser().parse_args())

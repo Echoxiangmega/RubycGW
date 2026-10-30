@@ -143,6 +143,8 @@ def test_scan_and_resume():
         assert (Path(tmp)/'gap_active.png').exists()
         assert (Path(tmp)/'ground_degeneracy.png').exists()
         assert (Path(tmp)/'chi_E_matrix_eigenvalues.png').exists()
+        assert (Path(tmp)/'chi_lc_regular.png').exists()
+        assert (Path(tmp)/'lc_ground_Jmax.png').exists()
         assert (Path(tmp)/'charge_mode_identity.png').exists()
         from plot_e_matrix import main as plot_e_main
         import sys
@@ -153,6 +155,9 @@ def test_scan_and_resume():
         finally:
             sys.argv=original
         assert list(Path(tmp).glob('V_*/chi_E_matrix.png'))
+        with np.load(next(Path(tmp).glob('V_*/lc_ground_projected.npz'))) as z:
+            assert z['LC_same_matrix'].shape==(1,1)
+            assert z['LC_opposite_eigenvalues'].shape==(1,)
         with np.load(next(Path(tmp).glob('V_*/co_e_matrix.npz'))) as z:
             assert z['chi_regular'].shape==(4,4)
             assert z['leading_projector'].shape==(4,4)
@@ -170,11 +175,37 @@ def test_n_grid_validation():
         else:raise AssertionError('Noninteger total particle number accepted')
 
 
+def test_projected_current_manifold_against_zero_mode():
+    """The full ground-matrix Frobenius norm equals the ED zero-mode W0."""
+    from scan_susceptibility import projected_current_manifold,lc_triangle_channels
+    g=RubyPBC('ring3',t1=.6,t2=.2)
+    sol=VScanSolver(g,2,symmetry='point',low=4)
+    H,E0,psis,records,incomplete,resid=sol.solve(.7,1e-9)
+    current=projected_current_manifold(g,psis,sol.states)
+    for name,ch in lc_triangle_channels(g).items():
+        resp=one_channel(ch,H,E0,psis,sol.states,sol.occ,g,depth=H.shape[0],
+                         precision=1e-9)
+        np.testing.assert_allclose(current[name]['zero_weight'],resp['zero_mode_weight'],atol=1e-10)
+        eig=np.linalg.eigvalsh(current[name]['matrix'])
+        np.testing.assert_allclose(current[name]['jmax_abs'],max(abs(eig)),atol=1e-10)
+    # Test a nontrivial two-state subspace; its current matrix need not be diagonal.
+    st=sol.states
+    vec=np.random.default_rng(1).normal(size=(len(st),2))+1j*np.random.default_rng(2).normal(size=(len(st),2))
+    vec,_=np.linalg.qr(vec)
+    cur=projected_current_manifold(g,vec,st)
+    for name,ch in lc_triangle_channels(g).items():
+        resp=one_channel(ch,H,E0,vec,st,sol.occ,g,depth=7,precision=1e-9)
+        np.testing.assert_allclose(cur[name]['zero_weight'],resp['zero_mode_weight'],atol=1e-10)
+        assert np.linalg.norm(cur[name]['matrix']-cur[name]['matrix'].conj().T)<1e-12
+
+
 if __name__=='__main__':
-    for test in (test_full_e_response_against_dense_lehmann,
+    for test in (test_projected_current_manifold_against_zero_mode,
+                 test_full_e_response_against_dense_lehmann,
                  test_gap_and_zero_mode_diagnostics,
                  test_against_dense_lehmann,test_degenerate_response_flags,
                  test_pairing_against_sparse_resolvent,test_scan_and_resume,test_n_grid_validation):
         print('Testing',test.__name__,flush=True)
         test()
     print('All susceptibility scan checks passed')
+
