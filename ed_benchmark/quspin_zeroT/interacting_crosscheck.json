@@ -1,0 +1,54 @@
+{
+  "source": "Independent SciPy sparse exact diagonalization, not QuSpin",
+  "note": "Energies in the fixed-Nf=6 sector of 18-site clusters; real t=1,t1=t2=0.5, only intra-triangle V. Recompute with QuSpin and verify symmetry-sector results.",
+  "results": [
+    {
+      "cluster": "3x1",
+      "Ns": 18,
+      "Nf": 6,
+      "V": 0,
+      "lowest_four": [
+        -9.614627004195,
+        -8.614627004195,
+        -8.430965169235,
+        -8.307313502097
+      ]
+    },
+    {
+      "cluster": "3x1",
+      "Ns": 18,
+      "Nf": 6,
+      "V": 1,
+      "lowest_four": [
+        -8.272976846672,
+        -7.67701022889,
+        -7.511546133333,
+        -7.505728976857
+      ]
+    },
+    {
+      "cluster": "ring3",
+      "Ns": 18,
+      "Nf": 6,
+      "V": 0,
+      "lowest_four": [
+        -9.162277660168,
+        -9.162277660168,
+        -9.162277660168,
+        -8.743416490253
+      ]
+    },
+    {
+      "cluster": "ring3",
+      "Ns": 18,
+      "Nf": 6,
+      "V": 1,
+      "lowest_four": [
+        -7.993849322158,
+        -7.993849322158,
+        -7.976829289475,
+        -7.976829289475
+      ]
+    }
+  ]
+}
