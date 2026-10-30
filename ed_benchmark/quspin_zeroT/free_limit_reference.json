@@ -1,0 +1,58 @@
+{
+  "title": "V=0 exact free-fermion reference for checking QuSpin ED",
+  "disclaimer": "These are independent noninteracting band sums, NOT QuSpin interacting ED results.",
+  "parameters": {
+    "spin": "spinless",
+    "hopping_sign": "+",
+    "t": 1,
+    "t1": 0.5,
+    "t2": 0.5,
+    "V": 0,
+    "boundary": "PBC"
+  },
+  "records": [
+    {
+      "cluster": "3x1",
+      "Ns": 18,
+      "Nf": 6,
+      "E0": -9.614627004195,
+      "single_particle_gap": 1
+    },
+    {
+      "cluster": "3x1",
+      "Ns": 18,
+      "Nf": 9,
+      "E0": -11.114627004195,
+      "single_particle_gap": 0
+    },
+    {
+      "cluster": "ring3",
+      "Ns": 18,
+      "Nf": 6,
+      "E0": -9.162277660168,
+      "single_particle_gap": 0
+    },
+    {
+      "cluster": "ring3",
+      "Ns": 18,
+      "Nf": 9,
+      "E0": -11.824555320337,
+      "single_particle_gap": 0
+    },
+    {
+      "cluster": "2x2",
+      "Ns": 24,
+      "Nf": 8,
+      "E0": -13.158002808988,
+      "single_particle_gap": 1
+    },
+    {
+      "cluster": "2x2",
+      "Ns": 24,
+      "Nf": 12,
+      "E0": -15.158002808988,
+      "single_particle_gap": 0
+    }
+  ],
+  "note": "At V=0 with real hoppings, E0(Nf) is the sum of the Nf lowest eigenvalues of the PBC one-body Hamiltonian. Numerical precision ~1e-12 in energy."
+}
