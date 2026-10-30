@@ -6,7 +6,35 @@ import numpy as np
 from geometry import RubyPBC
 from core import FixedHamiltonian
 from scan_susceptibility import (VScanSolver,channel_specs,one_channel,source_action,
-    spectral_chi,charge_real_sources,pairing_response,parser,run)
+    spectral_chi,charge_real_sources,pseudospin_e_charge_modes,pairing_response,parser,run)
+
+
+
+def test_hf_physical_pseudospin_charge_modes():
+    """Six-site HF density patterns, B physical tau_y sign, orthogonal sectors."""
+    omega=np.exp(2j*np.pi/3)
+    for name in ('ring3','3x1','2x2'):
+        g=RubyPBC(name)
+        modes=pseudospin_e_charge_modes(g)
+        names=['CO_E_even_x','CO_E_even_y','CO_E_odd_x','CO_E_odd_y']
+        W=np.array([modes[n] for n in names])
+        np.testing.assert_allclose(W@W.T,np.eye(4),atol=1e-12)
+        scale=np.sqrt(12*g.num_cells)
+        np.testing.assert_allclose(W[0,:6]*scale,[2,-1,-1,2,-1,-1])
+        np.testing.assert_allclose(W[1,:6]*scale,[0,-np.sqrt(3),np.sqrt(3),
+                                                 0,np.sqrt(3),-np.sqrt(3)])
+        np.testing.assert_allclose(W[2,:6]*scale,[2,-1,-1,-2,1,1])
+        np.testing.assert_allclose(W[3,:6]*scale,[0,-np.sqrt(3),np.sqrt(3),
+                                                 0,-np.sqrt(3),np.sqrt(3)])
+        # The local doublet CO along x is a one-rich/two-poor density pattern.
+        nA=np.array([2/3,1/6,1/6])
+        assert abs(2*nA[0]-nA[1]-nA[2]-1.)<1e-12
+        assert abs(np.sqrt(3)*(nA[2]-nA[1]))<1e-12
+        nB=np.array([1/3,1/3-1/(2*np.sqrt(3)),1/3+1/(2*np.sqrt(3))])
+        # For physical B tau_y this yields negative unity, not positive.
+        assert abs(np.sqrt(3)*(nB[1]-nB[2])+1.)<1e-12
+        qa=nA[0]+omega**2*nA[1]+omega*nA[2]
+        np.testing.assert_allclose(qa,(1.+0j)/2,atol=1e-12)
 
 
 def test_against_dense_lehmann():
@@ -83,7 +111,8 @@ def test_scan_and_resume():
         run(a)
         with (Path(tmp)/'susceptibility.csv').open(encoding='utf-8') as f:
             text=f.read()
-        assert 'LC_same_chi' in text and 'CO_leading_chi' in text
+        assert 'LC_same_chi' in text and 'CO_E_even_chi' in text
+        assert 'CO_E_odd_chi' in text and 'CO_E_odd_y_chi' in text
         assert (Path(tmp)/'chi_overview.png').exists()
         run(a)  # reuses cached points; must not change output schema
         with (Path(tmp)/'susceptibility.csv').open(encoding='utf-8') as f:
@@ -100,7 +129,8 @@ def test_n_grid_validation():
 
 
 if __name__=='__main__':
-    for test in (test_against_dense_lehmann,test_degenerate_response_flags,
+    for test in (test_hf_physical_pseudospin_charge_modes,
+                 test_against_dense_lehmann,test_degenerate_response_flags,
                  test_pairing_against_sparse_resolvent,test_scan_and_resume,test_n_grid_validation):
         print('Testing',test.__name__,flush=True)
         test()
