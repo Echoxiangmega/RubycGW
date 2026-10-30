@@ -154,3 +154,29 @@ python plot_e_matrix.py --input results\chi_E_matrix_gaps_n2 --V 3
 ```
 
 Old scan directories from the previous channel schema must not be reused; the scanner explicitly prevents accidental mixing.
+## Degenerate loop-current ground multiplets (fixed Nf, new)
+
+For (t_1=-0.6, t_2=+0.6, n=3), the 18-site ring cluster can have a
+four-dimensional ground space for every V in a scan. If a current operator
+has matrix elements inside that space, the zero-temperature total static
+susceptibility is intentionally reported as NaN with `status=zero_mode`.
+This is **not** failed ED convergence nor a zero current response.
+
+See [LC_DEGENERACY_DIAGNOSTICS.md](LC_DEGENERACY_DIAGNOSTICS.md).
+From the native_ed directory, existing scans can be analyzed immediately:
+
+```powershell
+python postprocess_lc_degeneracy.py --input results\\chi_t-06_t06_n3
+```
+
+This creates `lc_regular_vs_V.png`, `lc_zero_mode_vs_V.png` and
+`lc_degenerate_diagnostics.csv` without rerunning ED. If the original scan
+used `--save-state`, it also reconstructs `lc_Jmax_vs_V.png` from saved
+wavefunctions. Without those wavefunctions, **Jmax cannot be derived from
+`zero_weight` alone**.
+
+New scans additionally save `lc_ground_projected.npz`,
+`chi_lc_regular.png`, `lc_ground_Jmax.png` and per-point
+`LC_same_ground_Jmax_abs` and `LC_opposite_ground_Jmax_abs` in the CSV.
+These are currents optimized inside the exactly degenerate ground-state
+subspace, not by mixing arbitrary excited states.
