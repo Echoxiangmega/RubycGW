@@ -42,8 +42,16 @@ def get_quspin():
     try:
         from quspin.basis import spinless_fermion_basis_general
         from quspin.operators import hamiltonian
-    except ImportError as exc:
-        raise SystemExit('QuSpin is not installed. Install it in a supported Python environment: pip install quspin') from exc
+    except (ImportError, OSError) as exc:
+        # Do not mislabel a missing/broken QuSpin binary dependency as an
+        # uninstalled QuSpin package. Keep the original exception traceback.
+        import sys
+        raise RuntimeError(
+            "QuSpin import failed in Python " + sys.executable + ": "
+            + type(exc).__name__ + ": " + str(exc)
+            + ". Check: python -m pip show quspin; "
+              "python -c \"from quspin.basis import spinless_fermion_basis_general\""
+        ) from exc
     return spinless_fermion_basis_general,hamiltonian
 
 
