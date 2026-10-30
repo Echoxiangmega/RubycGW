@@ -10,6 +10,16 @@ from scan_susceptibility import (VScanSolver,channel_specs,one_channel,source_ac
     E_CHANNEL_NAMES,e_charge_response_matrix,first_active_gap,level_gap_diagnostics)
 
 
+def test_cli_entrypoint_runs():
+    """Regression: an importable module still needs a runnable CLI entrypoint."""
+    import subprocess
+    import sys
+    cmd=[sys.executable,str(Path(__file__).with_name('scan_susceptibility.py')),'--help']
+    result=subprocess.run(cmd,capture_output=True,text=True,timeout=30)
+    assert result.returncode==0,(result.stdout,result.stderr)
+    assert all(option in result.stdout for option in ('--cluster','--n','--depth','--Vmin'))
+
+
 def test_full_e_response_against_dense_lehmann():
     """Check all 16 susceptibility matrix elements, including off-diagonals."""
     from scan_susceptibility import pseudospin_e_charge_modes
@@ -200,7 +210,8 @@ def test_projected_current_manifold_against_zero_mode():
 
 
 if __name__=='__main__':
-    for test in (test_projected_current_manifold_against_zero_mode,
+    for test in (test_cli_entrypoint_runs,
+                 test_projected_current_manifold_against_zero_mode,
                  test_full_e_response_against_dense_lehmann,
                  test_gap_and_zero_mode_diagnostics,
                  test_against_dense_lehmann,test_degenerate_response_flags,
