@@ -130,3 +130,15 @@ python plot_channels.py --input results\ring3_t06_t02
 
 Each figure is a distinct **channel-strength map**, not an automatic
 categorical phase diagram.
+
+## Fixed-filling susceptibility vs V (new)
+
+Use [`scan_susceptibility.py`](scan_susceptibility.py) for a direct **zero-temperature ED scan at fixed `n` or `Nf`**, with CSV + line plots for `CO_AB`, `CO_leading`, physical `LC_same`, `LC_opposite`, square/hexagon currents, and optional `Nf±2` bond pairing susceptibility. The analysis checks exact degeneracies and records undefined singular responses as `NaN` with separate zero-mode weights. For full source definitions, run options and Windows commands, see [`SUSCEPTIBILITY_SCAN.md`](SUSCEPTIBILITY_SCAN.md).
+
+```powershell
+python test_susceptibility.py
+python scan_susceptibility.py --cluster ring3 --n 2 --t1 0.5 --t2 0.5 --Vmin -1 --Vmax 2 --Vstep 0.5 --depth 60 --no-extra-loops --output results\chi_ring3_n2
+python plot_susceptibility.py --input results\chi_ring3_n2
+```
+
+This scan is a separate workflow from [`scan_phase.py`](scan_phase.py), which saves primarily equal-time correlation maxima and optional selected legacy χ; the new scan uses explicit fixed source definitions and saves full Lanczos spectra for each channel.
