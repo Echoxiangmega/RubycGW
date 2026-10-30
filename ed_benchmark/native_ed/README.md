@@ -133,7 +133,7 @@ categorical phase diagram.
 
 ## Fixed-filling susceptibility vs V (new)
 
-Use [`scan_susceptibility.py`](scan_susceptibility.py) for a direct **zero-temperature ED scan at fixed `n` or `Nf`**, with CSV + line plots for `CO_AB`, `CO_leading`, physical `LC_same`, `LC_opposite`, square/hexagon currents, and optional `Nf±2` bond pairing susceptibility. The analysis checks exact degeneracies and records undefined singular responses as `NaN` with separate zero-mode weights. For full source definitions, run options and Windows commands, see [`SUSCEPTIBILITY_SCAN.md`](SUSCEPTIBILITY_SCAN.md).
+Use [`scan_susceptibility.py`](scan_susceptibility.py) for a direct **zero-temperature ED scan at fixed `n` or `Nf`**, with CSV + line plots for HF-compatible physical E-type charge pseudospin channels (`CO_E_even_x/y`, `CO_E_odd_x/y`, and their half-traces), `CO_AB`, `CO_leading`, physical `LC_same`, `LC_opposite`, square/hexagon currents, and optional `Nf±2` bond pairing susceptibility. The analysis checks exact degeneracies and records undefined singular responses as `NaN` with separate zero-mode weights. The pseudospin CO sources use `tauAx=2n0-n1-n2`, `tauAy=sqrt(3)(n2-n1)`, `tauBx=2n3-n4-n5`, `tauBy=sqrt(3)(n4-n5)`, preserving our earlier A/B physical pseudospin convention. For full source definitions, run options and Windows commands, see [`SUSCEPTIBILITY_SCAN.md`](SUSCEPTIBILITY_SCAN.md).
 
 ```powershell
 python test_susceptibility.py
