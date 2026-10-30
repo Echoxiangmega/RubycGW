@@ -103,3 +103,30 @@ python test_native.py
 ```
 
 This tests PBC geometry, ordinary/signed point-group projectors, dimensions, Hermiticity, fermionic signs, noninteracting and interacting energies, signed-rotation eigenstate residuals, equal-time data and the noninteracting Green-function identity. It imports **no QuSpin**.
+
+## Interpreting V–n scans (new)
+
+See [PHASE_DIAGNOSTICS.md](PHASE_DIAGNOSTICS.md). The solver computes order-channel
+correlations, but **does not automatically assign a thermodynamic CO/LC/SC
+phase**. Use `channel_diagnostics.py` to extract momentum-resolved charge
+correlations and physically CCW-normalized same/opposite loop-current modes.
+For example (Windows CMD or PowerShell, single-line commands):
+
+```powershell
+python scan_phase.py --cluster ring3 --t1 0.6 --t2 0.2 --nf 6 7 8 9 --V -2 -1 -0.5 0 0.5 1 2 3 --pair --output results\ring3_t06_t02
+python channel_diagnostics.py --input results\ring3_t06_t02
+```
+
+The updated scanner records `n=Nf/Nc`, `t,t1,t2` in the summary CSV and
+incorporates those hopping values into parameter-directory names, preventing
+silent reuse of the wrong parameter point. Existing scan roots from earlier
+versions should be kept separate from new ones.
+
+Optional channel heatmaps (requires `python -m pip install matplotlib`):
+
+```powershell
+python plot_channels.py --input results\ring3_t06_t02
+```
+
+Each figure is a distinct **channel-strength map**, not an automatic
+categorical phase diagram.
