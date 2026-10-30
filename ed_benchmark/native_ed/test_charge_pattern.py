@@ -78,6 +78,8 @@ def test_HF_E_projection_and_fock_occupation():
                      'charge_summary.json','site_density.csv','triangle_charge.csv','charge_pattern.npz'):
             assert (f/name).exists(),name
         assert (f/'projected_charge_sources.csv').exists()
+        assert (f/'momentum_charge'/'charge_structure.npz').exists()
+        assert (f/'momentum_charge'/'charge_orbital_character.csv').exists()
         with np.load(f/'charge_pattern.npz') as z:
             assert z['charge_covariance_ensemble'].shape==(g.Ns,g.Ns)
             assert np.allclose(z['quantum_var_ensemble'],z['n_ensemble']*(1-z['n_ensemble']))

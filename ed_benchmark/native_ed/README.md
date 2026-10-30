@@ -223,3 +223,34 @@ python plot_charge_pattern.py --input results\chi_ring3_n2 --V 1 2 3 --source CO
 Existing scan folders can be used: saved `ground_states.npz` avoids ED
 reruns, otherwise only the selected V values are re-solved. The script
 never interprets nonzero on-site variance alone as evidence of charge order.
+
+## All-q six-orbital charge structure factor (new)
+
+The new [charge_structure.py](charge_structure.py) and
+[plot_charge_structure.py](plot_charge_structure.py) evaluate the **complete
+6x6 connected charge structure-factor matrix at every allowed PBC momentum**
+(`Gamma,K,K'` for `ring3`; `Gamma` plus M-type momenta for `2x2`).
+They export all eigenvalues/eigenvectors, real-space leading *fluctuation*
+templates, and the fraction of the leading eigenmode in triangle-internal
+HF E-type pseudospin charge vs triangle-total charge channels.
+
+The ground-state degeneracy is treated with the basis-independent equal
+ground-manifold ensemble. If a ground multiplet is available, a pure
+ground-state superposition can additionally be selected using a projected
+finite-q density source; the real density map is always labeled separately
+from the fluctuation template. Strong S(K) alone does **not** imply nonzero
+one-point CO in a finite ED ground state.
+
+See [CHARGE_STRUCTURE_FACTOR.md](CHARGE_STRUCTURE_FACTOR.md) for Fourier
+conventions, formulas, data files and options. CMD/PowerShell:
+
+```powershell
+python test_charge_structure.py
+python plot_charge_structure.py --input results\chi_ring3_n2 --V 1 2 3
+python plot_charge_structure.py --input results\chi_ring3_n2 --V 1 2 3 --cache-only
+```
+
+If `plot_charge_pattern.py` was already used, its saved
+`charge_patterns/V_.../charge_pattern.npz` can be read **without rerunning ED**.
+New `plot_charge_pattern.py` runs automatically export these q-resolved
+results into each `charge_patterns/V_.../momentum_charge` subfolder.

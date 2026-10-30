@@ -345,6 +345,11 @@ def export_one(g,states,psis,E0,V,folder,kind='triangle',check_h=True,restarts=1
                 note='Onsite Var(n_i)=n_i*(1-n_i) does NOT diagnose CO by itself. '
                      'Spatial variance of <n_i> and ground-manifold polarization are separate. '
                      'Multistart nonlinear optimum is numerical, not a proof of global maximality.')
+    # All allowed q: full 6x6 connected charge structure factor and eigenmodes.
+    # This reuses the covariance computed above; there is no second ED solve.
+    from charge_structure import export_structure_one
+    export_structure_one(g,dat['covariance_ensemble'],dat['n_ensemble'],V,
+                         folder/'momentum_charge',projected_density=dat['m'])
     (folder/'charge_summary.json').write_text(json.dumps(meta,indent=2),encoding='utf-8')
     print(f'V={V:g} d={dat["ground_dim"]}: ensemble triangle variance={dat["ensemble_tri_spatial_var"]:.6g} '
           f'best pure={dat["selected_tri_spatial_var"]:.6g}, '
