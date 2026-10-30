@@ -998,3 +998,54 @@ def plot_results(root,rows):
         ax.set_title('Current maximized over exactly degenerate ground states')
         ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
         fig.savefig(root/'lc_ground_Jmax.png',dpi=180)
+        plt.close(fig)
+
+    fig,ax=plt.subplots(figsize=(8.7,5.0));cnt=0
+    for name in ['CO_E_matrix','CO_E_even','CO_E_odd','CO_AB','CO_leading',
+                 'LC_same','LC_opposite','LC_square','LC_hexagon']:
+        key=f'{name}_zero_weight' if name!='CO_E_matrix' else 'CO_E_matrix_zero_eigenmax'
+        if key not in rows[0]:continue
+        z=np.array([r.get(key,np.nan) for r in rows],float)
+        if np.isfinite(z).any() and np.nanmax(z)>1e-10:
+            line(ax,z,name);cnt+=1
+    if cnt:
+        ax.set_xlabel('V / t');ax.set_ylabel('Ground-subspace zero-mode weight')
+        ax.set_title('Zero modes of degenerate ground-state manifold')
+        ax.legend(fontsize=8);ax.grid(alpha=.25);fig.tight_layout()
+        fig.savefig(root/'chi_zero_mode_weight.png',dpi=180)
+    plt.close(fig)
+
+
+def parser():
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--cluster',choices=['ring3','3x1','2x2'],default='ring3')
+    g=p.add_mutually_exclusive_group(required=True)
+    g.add_argument('--n',type=float,default=None,help='particles per six-site primitive cell; must map to integer Nf')
+    g.add_argument('--nf',type=int,default=None,help='exact integer total number of particles')
+    p.add_argument('--t',type=float,default=1.)
+    p.add_argument('--t1',type=float,default=.5)
+    p.add_argument('--t2',type=float,default=.5)
+    p.add_argument('--V',type=float,nargs='+',default=None,help='Explicit V scan values')
+    p.add_argument('--Vmin',type=float,default=-2.)
+    p.add_argument('--Vmax',type=float,default=2.)
+    p.add_argument('--Vstep',type=float,default=.5)
+    p.add_argument('--symmetry',choices=['point','translation','none'],default='point')
+    p.add_argument('--low',type=int,default=5,help='lowest eigenvectors kept per symmetry block')
+    p.add_argument('--depth',type=int,default=60,help='Lanczos Krylov depth for susceptibilities')
+    p.add_argument('--pole-tol',type=float,default=1e-8)
+    p.add_argument('--active-weight-fraction',type=float,default=1e-3,
+                   help='relative spectral weight needed to call a pole active')
+    p.add_argument('--degeneracy-tol',type=float,default=1e-7)
+    p.add_argument('--max-basis',type=int,default=70_000)
+    p.add_argument('--no-extra-loops',action='store_true',help='skip square and hexagon channels')
+    p.add_argument('--pair',action='store_true',help='also compute leading spinless bond-pair susceptibility using Nf±2')
+    p.add_argument('--mu',type=float,default=None,help='chemical potential for pairing source (default Nf±1 midgap)')
+    p.add_argument('--max-adjacent-basis',type=int,default=90_000)
+    p.add_argument('--save-state',action='store_true')
+    p.add_argument('--recompute',action='store_true')
+    p.add_argument('--continue-on-error',action='store_true')
+    p.add_argument('--output',default='results/susceptibility_scan')
+    return p
+
+
+if __name__=='__main__':run(parser().parse_args())
