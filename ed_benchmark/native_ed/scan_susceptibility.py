@@ -211,45 +211,48 @@ def lc_triangle_channels(g):
     }
 
 
-def projected_current_manifold(g,psis,states,channels=None):
-    """Calculate the exact current operators in the degenerate ground space.
+def _summarize_projected_current(psis,actions,ntriangle,name):
+    """Use the already generated O|psi> vectors; never apply O twice."""
+    psis=np.asarray(psis,dtype=complex)
+    d=psis.shape[1]
+    matrix=psis.conj().T@actions
+    herm_error=float(np.linalg.norm(matrix-matrix.conj().T))
+    if herm_error>1e-7:
+        raise AssertionError(f'{name} projected current not Hermitian: {herm_error}')
+    matrix=.5*(matrix+matrix.conj().T)
+    eigen,U=np.linalg.eigh(matrix)
+    mean=float(np.trace(matrix).real/d)
+    centered=matrix-mean*np.eye(d)
+    w0=float(np.vdot(centered,centered).real/d)
+    imax=int(np.argmax(abs(eigen)))
+    return {'matrix':matrix, 'eigenvalues':eigen, 'eigenvectors':U,
+            'jmax_abs':float(abs(eigen[imax])),
+            'jmax_signed':float(eigen[-1]), 'jmin_signed':float(eigen[0]),
+            'jmean':mean, 'zero_weight':w0,
+            'rms_centered':float(np.sqrt(max(0.,w0))),
+            'jmax_per_triangle':float(abs(eigen[imax])/np.sqrt(ntriangle)),
+            'n_triangle':ntriangle}
 
-    M_ab=<psi_a|O|psi_b>; all psi columns must be orthonormal. The largest
-    absolute eigenvalue is the maximum attainable |<O>| within this *exact*
-    ground multiplet. Ground-manifold variance (Tr[(M-mean)^2]/d) must equal
-    the source's zero-mode weight used by one_channel(). A finite W0 alone
-    does NOT determine Jmax (the full matrix is required).
+
+def projected_current_manifold(g,psis,states,channels=None):
+    """Project O into an orthonormal ground-multiplet basis and diagonalize.
+
+    The Frobenius-norm W0 equals the zero-mode weight in the Lehmann
+    susceptibility, but W0 does not determine the maximum eigen-current.
     """
     psis=np.asarray(psis,dtype=complex)
     if psis.ndim!=2 or psis.shape[1]<1:
         raise ValueError('Expected orthonormal ground-state column vectors')
-    d=psis.shape[1]
-    if np.linalg.norm(psis.conj().T@psis-np.eye(d))>1e-7:
+    if np.linalg.norm(psis.conj().T@psis-np.eye(psis.shape[1]))>1e-7:
         raise ValueError('Ground vectors are not orthonormal')
     if channels is None:channels=lc_triangle_channels(g)
-    result={}
+    results={}
     for name,ch in channels.items():
         actions=np.column_stack([source_action(ch,psi,states,g.Ns,None,g)[0]
                                  for psi in psis.T])
-        matrix=psis.conj().T@actions
-        herm_error=float(np.linalg.norm(matrix-matrix.conj().T))
-        if herm_error>1e-7:raise AssertionError(f'{name} projected current not Hermitian: {herm_error}')
-        matrix=.5*(matrix+matrix.conj().T)
-        eigen,U=np.linalg.eigh(matrix)
-        mean=float(np.trace(matrix).real/d)
-        centered=matrix-mean*np.eye(d)
-        w0=float(np.vdot(centered,centered).real/d)
-        imax=int(np.argmax(abs(eigen)))
-        result[name]={
-            'matrix':matrix, 'eigenvalues':eigen,
-            'eigenvectors':U, 'jmax_abs':float(abs(eigen[imax])),
-            'jmax_signed':float(eigen[-1]), 'jmin_signed':float(eigen[0]),
-            'jmean':mean, 'zero_weight':w0,
-            'rms_centered':float(np.sqrt(max(0.,w0))),
-            'jmax_per_triangle':float(abs(eigen[imax])/np.sqrt(len(ch['loops']))),
-            'n_triangle':len(ch['loops'])
-        }
-    return result
+        results[name]=_summarize_projected_current(
+            psis,actions,len(ch['loops']),name)
+    return results
 
 
 def source_action(ch,psi,states,ns,occ,g):
@@ -324,7 +327,7 @@ def spectral_chi(H,source,e0,ground,depth=80,precision=1e-8,return_resolvent=Fal
     return out
 
 
-def one_channel(ch,H,e0,psis,states,occ,g,depth,precision,ground_incomplete=False,capture=False):
+def one_channel(ch,H,e0,psis,states,occ,g,depth,precision,ground_incomplete=False,capture=False,capture_current=False):
     total=0.;z0=0.;conv=0.;danger=False;detail=[];captured=[]
     actions=[source_action(ch,psi,states,g.Ns,occ,g) for psi in psis.T]
     if not actions:return None
@@ -354,6 +357,12 @@ def one_channel(ch,H,e0,psis,states,occ,g,depth,precision,ground_incomplete=Fals
     out={'chi_static':chi,'chi_regular':total,'zero_mode_weight':z0,
          'status':status,'max_krylov_change':conv,'spectra':detail}
     if capture:out['captured']=captured
+    if capture_current:
+        if ch['type']!='current' or len(actions[0])!=1:
+            raise ValueError('Current projection needs one Hermitian source')
+        out['ground_current']=_summarize_projected_current(
+            psis,np.column_stack([a[0] for a in actions]),
+            len(ch['loops']),ch['name'])
     return out
 
 
@@ -598,13 +607,16 @@ def run(args):
                  'residual':residual}
             row.update(level_gap_diagnostics(records,e0,args.degeneracy_tol))
             spectra={}
-            captures={};statuses={}
+            captures={};statuses={};ground_currents={}
             definitions={}
             for ch in channels:
                 name=ch['name']
                 capture=name in E_CHANNEL_NAMES
                 resp=one_channel(ch,H,e0,psis,solver.states,solver.occ,g,args.depth,
-                                 args.pole_tol,incomplete,capture=capture)
+                                 args.pole_tol,incomplete,capture=capture,
+                                 capture_current=name in ('LC_same','LC_opposite'))
+                if 'ground_current' in resp:
+                    ground_currents[name]=resp.pop('ground_current')
                 if capture:
                     captures[name]=resp.pop('captured')
                     statuses[name]=resp['status']
@@ -622,7 +634,6 @@ def run(args):
             # Resolve the current order *inside* the exactly degenerate
             # ground multiplet. This remains meaningful when static chi=NaN.
             # Verify against the previously computed zero-mode spectral weight.
-            ground_currents=projected_current_manifold(g,psis,solver.states)
             for name,current in ground_currents.items():
                 difference=abs(current['zero_weight']-row[f'{name}_zero_weight'])
                 if difference>1e-7*(1+abs(row[f'{name}_zero_weight'])):
@@ -987,14 +998,3 @@ def plot_results(root,rows):
         ax.set_title('Current maximized over exactly degenerate ground states')
         ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
         fig.savefig(root/'lc_ground_Jmax.png',dpi=180)
-        plt.close(fig)
-
-    fig,ax=plt.subplots(figsize=(8.7,5.0));cnt=0
-    for name in ['CO_E_matrix','CO_E_even','CO_E_odd','CO_AB','CO_leading',
-                 'LC_same','LC_opposite','LC_square','LC_hexagon']:
-        key=f'{name}_zero_weight' if name!='CO_E_matrix' else 'CO_E_matrix_zero_eigenmax'
-        if key not in rows[0]:continue
-        z=np.array([r.get(key,np.nan) for r in rows],float)
-        if np.isfinite(z).any() and np.nanmax(z)>1e-10:
-            line(ax,z,name);cnt+=1
-    if cnt:
