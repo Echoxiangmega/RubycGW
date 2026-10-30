@@ -163,3 +163,23 @@ Run `python test_susceptibility.py`: tests dense exact Lehmann sums for small se
 The expensive full fixed-`Nf` resolvent and projector implementation targets **18-site** `ring3` and `3x1` clusters first. For 24-site half-filling, D=2,704,156, and the current projectors/resolvents are not memory-optimized. For the 18-site clusters `n` is quantized in steps `1/3` (because `Nf=3n` must be integer); for 2×2 it is quantized in steps `1/4`. This script is zero-T fixed-N ED, not finite-temperature or grand-canonical interpolation.
 
 The CO/LC responses can identify a *leading instability tendency* and are especially useful for comparison against HF/GW computed with the same source, sign, normalization, k-grid, and fixed-N finite torus. They do not automatically certify a thermodynamic broken-symmetry phase, and large χ can be induced by low gaps or pre-existing degeneracy. Finite-size cross-checks remain necessary.
+## Compact plot output
+
+The default set now emphasizes `ground_energy.png`, `chi_charge.png`
+(`CO_leading` and leading eigen-response of the 4x4 HF E matrix),
+`chi_loop_current.png` (same/opposite LC), `chi_overview.png`,
+`gap_levels.png`, `gap_active.png`, `ground_degeneracy.png`,
+`chi_zero_mode_weight.png`, `chi_lc_regular.png` and
+`lc_ground_Jmax.png` when data exist. The individual E_x/E_y and
+even/odd response lines and all four E-matrix eigenvalue plots remain
+available through `--detailed-plots` on either
+`scan_susceptibility.py` or `plot_susceptibility.py`. No numerical
+observables or matrix elements are skipped in compact mode.
+
+```powershell
+python plot_susceptibility.py --input results\chi_ring3_n2
+python plot_susceptibility.py --input results\chi_ring3_n2 --detailed-plots
+```
+
+Old detailed PNGs are not automatically deleted when compact plots are
+regenerated; this deliberately avoids destructive changes to user data.

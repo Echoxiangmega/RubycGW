@@ -276,3 +276,27 @@ The first command reads existing scan files only; the `--refine` variant
 adds ED diagonalizations **only at bracket midpoints**, reusing the symmetry
 basis and not recomputing Green functions or susceptibilities. See
 [SYMMETRY_INTERVALS.md](SYMMETRY_INTERVALS.md) for output paths and limits.
+
+## Compact fixed-filling V-scan plots and ground-state energy
+
+By default `scan_susceptibility.py` now makes a **compact set of figures**:
+`ground_energy.png` (total and per-cell E0), main CO response
+(`CO_leading` and `CO_E_matrix`), physical LC_same/opposite, low gaps,
+ground-state degeneracy and zero-mode diagnostics. The full four-dimensional
+E-type CO matrix, each individual component, eigenvalues, eigenvectors,
+spectra and all metadata are still **computed and saved**. To draw the
+additional comparison graphs, pass `--detailed-plots` when scanning or
+when plotting existing results:
+
+```powershell
+python plot_susceptibility.py --input results\chi_ring3_n2
+python plot_susceptibility.py --input results\chi_ring3_n2 --detailed-plots
+python analyze_symmetry_intervals.py --input results\chi_ring3_n2
+```
+
+The symmetry-interval report also saves `ground_energy.png`,
+`ground_energy_slope.png` and `energy_slopes.csv`. The slope is a
+within-symmetry *finite-difference secant*. Crossings are excluded from
+these slopes. By Hellmann-Feynman, the exact derivative of E0 is the sum
+of triangle-bond density correlations in a differentiable, nondegenerate
+ground-state branch; the plotted secants only approximate it.

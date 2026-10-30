@@ -54,3 +54,15 @@ From five **actual, previously saved** ED points (`V=1,2,2.5,3,3.5`):
 - The strong `S(K)` and charge susceptibility at higher `V` can coexist with a unique `Gamma` ground state and uniform mean site density. Symmetry alone cannot assign the thermodynamic region to CO vs LC.
 
 To turn these finite-torus symmetry regimes into *candidate physical phase* intervals, combine with identical-Hamiltonian CO and LC operators, low-energy matrix elements, finite-size scaling, and small source fields. Avoid comparing raw CO and LC susceptibilities of differently normalized operators as if they were a phase-classification score.
+## E0(V) and energy-slope figures
+
+The report now writes `ground_energy.png` (total E0 and E0 per primitive
+cell), `ground_energy_slope.png` (only secant slopes within the same
+ground-state symmetry segment), and `energy_slopes.csv`. No extra ED
+computation is needed when analyzing an existing scan. A finite-size
+different-irrep level crossing changes the lowest-energy branch, but an
+observable discontinuity in its *first derivative* additionally requires
+the slopes of the two branches to differ. The E0 curve can look smooth
+at the scale of its extensive background, so compare the sector-resolved
+levels and the intra-interval slopes. A finite-torus level crossing does
+not by itself certify a thermodynamic LC/CO phase transition.

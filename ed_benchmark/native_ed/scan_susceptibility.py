@@ -793,7 +793,7 @@ def run(args):
     (root/'failures.json').write_text(json.dumps(failed,indent=2),encoding='utf-8')
     if rows_by_v:
         attach_mode_identity(root,rows_by_v,g,nf)
-        plot_results(root,[rows_by_v[v] for v in sorted(rows_by_v)])
+        plot_results(root,[rows_by_v[v] for v in sorted(rows_by_v)],detailed=args.detailed_plots)
     print(f'Wrote {len(rows_by_v)} V points to {root}',flush=True)
 
 
@@ -835,7 +835,7 @@ def attach_mode_identity(root,rows_by_v,g,nf):
         previous=(q,vv)
 
 
-def plot_results(root,rows):
+def plot_results(root,rows,detailed=False):
     """Render susceptibility and gap figures with degeneracy-aware line styles.
 
     Solid segments: both endpoints have unique ground state.
@@ -879,25 +879,45 @@ def plot_results(root,rows):
         if mask.any():ax.scatter(xx[mask],regular[mask],marker='x',color=c,s=45,
                                   label=name+' regular (flagged)')
 
-    groups=[('charge',['CO_E_even','CO_E_odd','CO_AB','CO_leading']),
-            ('charge_components',['CO_E_even_x','CO_E_even_y','CO_E_odd_x','CO_E_odd_y']),
-            ('loop_current',['LC_same','LC_opposite','LC_square','LC_hexagon'])]
+    groups=[('charge',['CO_leading','CO_E_matrix']),
+            ('loop_current',['LC_same','LC_opposite'])]
+    if detailed:
+        groups=[('charge',['CO_E_even','CO_E_odd','CO_AB','CO_leading','CO_E_matrix']),
+                ('charge_components',['CO_E_even_x','CO_E_even_y','CO_E_odd_x','CO_E_odd_y']),
+                ('loop_current',['LC_same','LC_opposite','LC_square','LC_hexagon'])]
     if 'SC_pair_chi' in rows[0]:groups.append(('pairing',['SC_pair']))
     for group,names in groups:
         fig,ax=plt.subplots(figsize=(8.7,5.0))
         for name in names:draw(ax,name)
-        if group=='charge':draw(ax,'CO_E_matrix')
+        if group=='charge' and 'CO_E_matrix' not in names:draw(ax,'CO_E_matrix')
         ax.set_xlabel('V / t');ax.set_ylabel(r'Static susceptibility $\chi_O(0)$')
         ax.set_title(f'{group}: n={float(rows[0]["n"]):.6g} per primitive cell')
         ax.legend(fontsize=8);ax.grid(alpha=.25)
         fig.tight_layout();fig.savefig(root/f'chi_{group}.png',dpi=180);plt.close(fig)
 
     fig,ax=plt.subplots(figsize=(8.7,5.0))
-    for name in ['CO_E_matrix','CO_E_even','CO_E_odd','LC_same','LC_opposite']:draw(ax,name)
+    for name in ['CO_leading','CO_E_matrix','LC_same','LC_opposite']:draw(ax,name)
     ax.set_xlabel('V / t');ax.set_ylabel(r'Static $\chi_O(0)$')
     ax.set_title(f'Zero-T ED responses, n={float(rows[0]["n"]):.6g}')
     ax.legend(fontsize=8);ax.grid(alpha=.25);fig.tight_layout()
     fig.savefig(root/'chi_overview.png',dpi=180);plt.close(fig)
+
+    # Always show total and per-cell ground-state energy. The symmetric
+    # absolute trend can hide a cusp; see analyze_symmetry_intervals.py for
+    # sector-resolved energies and within-region secant derivatives.
+    en=np.array([float(r.get('E0',np.nan)) for r in rows])
+    if np.isfinite(en).any():
+        fig,axes=plt.subplots(1,2,figsize=(12,4.7))
+        nc={'ring3':3,'3x1':3,'2x2':4}.get(str(rows[0].get('cluster','')),None)
+        if nc is None:
+            nf=float(rows[0].get('Nf',np.nan)); n=float(rows[0]['n'])
+            nc=int(round(nf/n)) if np.isfinite(nf) and n>0 else 1
+        for ax,scale,ylabel in zip(axes,(1.,float(nc)),('Total E0 / t','E0 / (Nc t)')):
+            line(ax,en/scale,'ED ground energy')
+            ax.set_xlabel('V / t');ax.set_ylabel(ylabel);ax.grid(alpha=.25)
+        axes[0].set_title('Finite-cluster ground-state energy')
+        axes[1].set_title('Ground energy per primitive cell')
+        fig.tight_layout();fig.savefig(root/'ground_energy.png',dpi=180);plt.close(fig)
 
     # Selected low-energy levels, counting exact degeneracies as E1-E0 = 0.
     fig,ax=plt.subplots(figsize=(8.7,5.0))
@@ -927,40 +947,41 @@ def plot_results(root,rows):
     ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
     fig.savefig(root/'ground_degeneracy.png',dpi=180);plt.close(fig)
 
-    fig,ax=plt.subplots(figsize=(8.7,5.0))
-    draw(ax,'CO_E_matrix')
-    ax.set_xlabel('V / t');ax.set_ylabel(r'$\lambda_{\max}[\chi_E(0)]$')
-    ax.set_title('Largest static eigen-response of 4x4 E charge matrix')
-    ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
-    fig.savefig(root/'chi_E_matrix_leading.png',dpi=180);plt.close(fig)
+    if detailed:
+        fig,ax=plt.subplots(figsize=(8.7,5.0))
+        draw(ax,'CO_E_matrix')
+        ax.set_xlabel('V / t');ax.set_ylabel(r'$\lambda_{\max}[\chi_E(0)]$')
+        ax.set_title('Largest static eigen-response of 4x4 E charge matrix')
+        ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
+        fig.savefig(root/'chi_E_matrix_leading.png',dpi=180);plt.close(fig)
 
-    fig,ax=plt.subplots(figsize=(8.7,5.0))
-    for k in range(4):
-        key=f'CO_E_matrix_eig{k}_static'
-        if key in rows[0]:line(ax,[r.get(key,np.nan) for r in rows],f'E eigenvalue {k+1}')
-    ax.set_xlabel('V / t');ax.set_ylabel(r'Static E susceptibility eigenvalues')
-    ax.set_title('All four eigenvalues of the HF E charge response matrix')
-    ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
-    fig.savefig(root/'chi_E_matrix_eigenvalues.png',dpi=180);plt.close(fig)
+        fig,ax=plt.subplots(figsize=(8.7,5.0))
+        for k in range(4):
+            key=f'CO_E_matrix_eig{k}_static'
+            if key in rows[0]:line(ax,[r.get(key,np.nan) for r in rows],f'E eigenvalue {k+1}')
+        ax.set_xlabel('V / t');ax.set_ylabel(r'Static E susceptibility eigenvalues')
+        ax.set_title('All four eigenvalues of the HF E charge response matrix')
+        ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
+        fig.savefig(root/'chi_E_matrix_eigenvalues.png',dpi=180);plt.close(fig)
 
-    fig,ax=plt.subplots(figsize=(8.7,5.0))
-    for name,col in [('Even component','CO_E_matrix_even_fraction'),
-                     ('Odd component','CO_E_matrix_odd_fraction')]:
-        if col in rows[0]:line(ax,[r.get(col,np.nan) for r in rows],name)
-    ax.set_ylim(-.04,1.04);ax.set_xlabel('V / t')
-    ax.set_ylabel('Weight in leading E eigenspace')
-    ax.set_title('HF pseudospin pattern of leading E response')
-    ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
-    fig.savefig(root/'chi_E_matrix_character.png',dpi=180);plt.close(fig)
+        fig,ax=plt.subplots(figsize=(8.7,5.0))
+        for name,col in [('Even component','CO_E_matrix_even_fraction'),
+                         ('Odd component','CO_E_matrix_odd_fraction')]:
+            if col in rows[0]:line(ax,[r.get(col,np.nan) for r in rows],name)
+        ax.set_ylim(-.04,1.04);ax.set_xlabel('V / t')
+        ax.set_ylabel('Weight in leading E eigenspace')
+        ax.set_title('HF pseudospin pattern of leading E response')
+        ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
+        fig.savefig(root/'chi_E_matrix_character.png',dpi=180);plt.close(fig)
 
-    fig,ax=plt.subplots(figsize=(8.7,5.0))
-    for label,col in [('HF E-subspace overlap','CO_leading_E_fraction'),
-                      ('Adaptive mode overlap to previous V','CO_leading_overlap_prev')]:
-        if col in rows[0]:line(ax,[r.get(col,np.nan) for r in rows],label)
-    ax.set_ylim(-.04,1.04);ax.set_xlabel('V / t')
-    ax.set_ylabel('Squared normalized overlap');ax.set_title('Charge-mode identity')
-    ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
-    fig.savefig(root/'charge_mode_identity.png',dpi=180);plt.close(fig)
+        fig,ax=plt.subplots(figsize=(8.7,5.0))
+        for label,col in [('HF E-subspace overlap','CO_leading_E_fraction'),
+                          ('Adaptive mode overlap to previous V','CO_leading_overlap_prev')]:
+            if col in rows[0]:line(ax,[r.get(col,np.nan) for r in rows],label)
+        ax.set_ylim(-.04,1.04);ax.set_xlabel('V / t')
+        ax.set_ylabel('Squared normalized overlap');ax.set_title('Charge-mode identity')
+        ax.grid(alpha=.25);ax.legend(fontsize=8);fig.tight_layout()
+        fig.savefig(root/'charge_mode_identity.png',dpi=180);plt.close(fig)
 
     fig,ax=plt.subplots(figsize=(8.7,5.0))
     for label,col in [('q1','CO_leading_q1'),('q2','CO_leading_q2')]:
@@ -1038,6 +1059,7 @@ def parser():
     p.add_argument('--degeneracy-tol',type=float,default=1e-7)
     p.add_argument('--max-basis',type=int,default=70_000)
     p.add_argument('--no-extra-loops',action='store_true',help='skip square and hexagon channels')
+    p.add_argument('--detailed-plots',action='store_true',help='also output detailed E-charge and additional LC channel figures')
     p.add_argument('--pair',action='store_true',help='also compute leading spinless bond-pair susceptibility using Nf±2')
     p.add_argument('--mu',type=float,default=None,help='chemical potential for pairing source (default Nf±1 midgap)')
     p.add_argument('--max-adjacent-basis',type=int,default=90_000)

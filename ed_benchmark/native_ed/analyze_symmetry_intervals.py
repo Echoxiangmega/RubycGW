@@ -218,11 +218,31 @@ def prepare_reports(root,meta,tol,points,segments,changes,refined=None):
             if np.isfinite(row['refined_lower']):f.write(f'Refined bracket [{row["refined_lower"]:.8g}, {row["refined_upper"]:.8g}]. ')
             f.write('\n')
         f.write('\nSource: existing sectors.json / responses.json. All energies in t units.\n')
-    plot_results(out,points,interval_rows,changes)
+    write_csv(out/'energy_slopes.csv',energy_slope_records(points))
+    nc=4 if meta.get('cluster')=='2x2' else 3 if meta.get('cluster') in ('ring3','3x1') else 1
+    plot_results(out,points,interval_rows,changes,num_cells=nc)
     return out,interval_rows,change_rows
 
 
-def plot_results(out,points,intervals,changes):
+def energy_slope_records(points):
+    """Secant dE0/dV computed only within the same ground symmetry interval.
+
+    Never interpolate the derivative across an observed level crossing.
+    """
+    out=[]
+    for left,right in zip(points[:-1],points[1:]):
+        same=left['signature']==right['signature']
+        dv=right['V']-left['V']
+        out.append({'V_mid':(left['V']+right['V'])/2,
+                    'V_left':left['V'],'V_right':right['V'],
+                    'E0_left':left['E0'],'E0_right':right['E0'],
+                    'same_ground_signature':bool(same),
+                    'slope_dE0_dV':((right['E0']-left['E0'])/dv if same else float('nan')),
+                    'ground_symmetry':left['symmetry'] if same else 'CROSSING BRACKET'})
+    return out
+
+
+def plot_results(out,points,intervals,changes,num_cells=1):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -264,6 +284,33 @@ def plot_results(out,points,intervals,changes):
     for c in changes:ax.axvspan(c['V_left'],c['V_right'],color='grey',alpha=.13)
     ax.set_xlabel('V/t');ax.set_ylabel('Energy / t');ax.set_title('Finite-size excitation gap and symmetry change brackets')
     ax.grid(alpha=.25);ax.legend();fig.tight_layout();fig.savefig(out/'excitation_gaps.png',dpi=180);plt.close(fig)
+
+    # The large extensive E0(V) trend can conceal a cusp. Show both E0
+    # and per-primitive-cell energy without changing raw numerical data.
+    en=np.asarray([p['E0'] for p in points],float)
+    fig,axes=plt.subplots(1,2,figsize=(12,4.7))
+    for ax,scale,ylabel in zip(axes,(1.,float(num_cells)),('Total E0 / t','E0 / (Nc t)')):
+        ax.plot(xs,en/scale,'-o',ms=4,color='#226e9e')
+        for c in changes:ax.axvspan(c['V_left'],c['V_right'],color='grey',alpha=.16)
+        ax.set_xlabel('V / t');ax.set_ylabel(ylabel);ax.grid(alpha=.25)
+    axes[0].set_title('Finite-cluster ground-state energy')
+    axes[1].set_title('Ground-state energy per primitive cell')
+    fig.tight_layout();fig.savefig(out/'ground_energy.png',dpi=180);plt.close(fig)
+
+    # Between-sample slopes are not exact Hellmann-Feynman expectation
+    # values. Skip segments spanning a symmetry switch.
+    fig,ax=plt.subplots(figsize=(9,4.7))
+    for row in energy_slope_records(points):
+        if not row['same_ground_signature']:continue
+        ax.hlines(row['slope_dE0_dV'],row['V_left'],row['V_right'],
+                  colors='#226e9e',linewidth=2.2)
+        ax.plot(row['V_mid'],row['slope_dE0_dV'],'o',color='#226e9e',ms=4)
+    for c in changes:ax.axvspan(c['V_left'],c['V_right'],color='grey',alpha=.16)
+    ax.set_xlabel('V / t');ax.set_ylabel('Within-interval secant Delta E0 / Delta V')
+    ax.set_title('Energy slope (do not fit across level crossings)')
+    ax.grid(alpha=.25);fig.tight_layout()
+    fig.savefig(out/'ground_energy_slope.png',dpi=180);plt.close(fig)
+
 
 
 def refine_brackets(meta,changes,delta_v,max_steps):

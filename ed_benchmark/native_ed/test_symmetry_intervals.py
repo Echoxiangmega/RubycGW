@@ -6,7 +6,20 @@ from pathlib import Path
 import numpy as np
 from analyze_symmetry_intervals import (read_scan, make_segments, estimate_intersection,
                                         extract, canonical_label, multiplet_summary,
-                                        prepare_reports, sector_minimum)
+                                        prepare_reports, sector_minimum, energy_slope_records)
+
+
+def test_energy_slope_respects_symmetry_brackets():
+    """Only differentiate between samples of the same ground representation."""
+    a={'V':1.0,'E0':-6.,'signature':('A',),'symmetry':'A'}
+    b={'V':2.0,'E0':-4.,'signature':('A',),'symmetry':'A'}
+    c={'V':2.5,'E0':-3.3,'signature':('B',),'symmetry':'B'}
+    d={'V':3.0,'E0':-2.7,'signature':('B',),'symmetry':'B'}
+    r=energy_slope_records([a,b,c,d])
+    assert abs(r[0]['slope_dE0_dV']-2.)<1e-12
+    assert not r[1]['same_ground_signature']
+    assert np.isnan(r[1]['slope_dE0_dV'])
+    assert abs(r[2]['slope_dE0_dV']-1.2)<1e-12
 
 
 def test_sectors_not_just_ground_dim():
@@ -64,7 +77,8 @@ def test_cache_and_report():
                 out,intervals,changes=prepare_reports(root,meta,tol,pts,seg,chg)
                 for fn in ('symmetry_levels.png','symmetry_regions.png',
                            'excitation_gaps.png','symmetry_points.csv','intervals.md',
-                           'intervals.csv','sector_levels.csv','crossing_brackets.csv'):
+                           'intervals.csv','sector_levels.csv','crossing_brackets.csv',
+                           'ground_energy.png','ground_energy_slope.png','energy_slopes.csv'):
                     assert (out/fn).exists(),fn
                 assert intervals[0]['ground_dim']==2
                 assert changes[0]['V_lower']==2.0
@@ -73,4 +87,5 @@ def test_cache_and_report():
 if __name__=='__main__':
     test_sectors_not_just_ground_dim()
     test_cache_and_report()
+    test_energy_slope_respects_symmetry_brackets()
     print('All fixed-filling symmetry interval tests passed')

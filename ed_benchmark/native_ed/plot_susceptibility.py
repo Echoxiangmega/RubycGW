@@ -9,6 +9,7 @@ from scan_susceptibility import plot_results
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--input',required=True,help='Root containing susceptibility.csv')
+    p.add_argument('--detailed-plots',action='store_true',help='also draw internal E pseudospin component/eigenvalue figures')
     a=p.parse_args()
     root=Path(a.input)
     with (root/'susceptibility.csv').open(encoding='utf-8',newline='') as f:
@@ -21,7 +22,7 @@ def main():
                 r[key]=(value=='True')
             elif key in ('V','n') or key.endswith('_chi') or key.endswith('_chi_regular') or key.endswith('_zero_weight'):
                 r[key]=float(value)
-    plot_results(root,rows)
+    plot_results(root,rows,detailed=a.detailed_plots)
     print('Wrote susceptibility figures to',root)
 
 if __name__=='__main__':main()

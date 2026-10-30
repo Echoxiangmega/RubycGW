@@ -10,6 +10,30 @@ from scan_susceptibility import (VScanSolver,channel_specs,one_channel,source_ac
     E_CHANNEL_NAMES,e_charge_response_matrix,first_active_gap,level_gap_diagnostics)
 
 
+def test_compact_plots_keep_energy_and_main_channels():
+    from scan_susceptibility import plot_results
+    with tempfile.TemporaryDirectory() as tmp:
+        rows=[
+            {'V':1.,'n':2.,'Nf':6,'E0':-5.,'ground_dim':1,
+             'CO_leading_chi':2.,'CO_leading_status':'ok',
+             'CO_E_matrix_chi':1.,'CO_E_matrix_status':'ok',
+             'LC_same_chi':.2,'LC_same_status':'ok',
+             'LC_opposite_chi':.3,'LC_opposite_status':'ok',
+             'gap_above_manifold':.1},
+            {'V':2.,'n':2.,'Nf':6,'E0':-4.,'ground_dim':1,
+             'CO_leading_chi':4.,'CO_leading_status':'ok',
+             'CO_E_matrix_chi':1.5,'CO_E_matrix_status':'ok',
+             'LC_same_chi':.3,'LC_same_status':'ok',
+             'LC_opposite_chi':.5,'LC_opposite_status':'ok',
+             'gap_above_manifold':.05}
+        ]
+        plot_results(Path(tmp),rows,detailed=False)
+        assert (Path(tmp)/'ground_energy.png').exists()
+        assert (Path(tmp)/'chi_charge.png').exists()
+        assert not (Path(tmp)/'chi_charge_components.png').exists()
+        assert not (Path(tmp)/'chi_E_matrix_eigenvalues.png').exists()
+
+
 def test_cli_entrypoint_runs():
     """Regression: an importable module still needs a runnable CLI entrypoint."""
     import subprocess
@@ -141,7 +165,7 @@ def test_pairing_against_sparse_resolvent():
 def test_scan_and_resume():
     with tempfile.TemporaryDirectory() as tmp:
         a=parser().parse_args(['--cluster','ring3','--nf','2','--V','0','0.75',
-             '--t1','0.6','--t2','0.2','--depth','20','--no-extra-loops',
+             '--t1','0.6','--t2','0.2','--depth','20','--no-extra-loops','--detailed-plots',
              '--output',tmp])
         run(a)
         with (Path(tmp)/'susceptibility.csv').open(encoding='utf-8') as f:
@@ -149,6 +173,7 @@ def test_scan_and_resume():
         assert 'LC_same_chi' in text and 'CO_leading_chi' in text
         assert 'CO_E_matrix_chi' in text and 'gap_E1' in text
         assert (Path(tmp)/'chi_overview.png').exists()
+        assert (Path(tmp)/'ground_energy.png').exists()
         assert (Path(tmp)/'gap_levels.png').exists()
         assert (Path(tmp)/'gap_active.png').exists()
         assert (Path(tmp)/'ground_degeneracy.png').exists()
@@ -210,7 +235,8 @@ def test_projected_current_manifold_against_zero_mode():
 
 
 if __name__=='__main__':
-    for test in (test_cli_entrypoint_runs,
+    for test in (test_compact_plots_keep_energy_and_main_channels,
+                 test_cli_entrypoint_runs,
                  test_projected_current_manifold_against_zero_mode,
                  test_full_e_response_against_dense_lehmann,
                  test_gap_and_zero_mode_diagnostics,
