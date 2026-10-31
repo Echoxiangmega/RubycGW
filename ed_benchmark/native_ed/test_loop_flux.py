@@ -6,6 +6,7 @@ Run: python test_loop_flux.py
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+import json
 
 import numpy as np
 
@@ -14,6 +15,7 @@ from plot_current_pattern import plaquette_data, selected_site_positions
 from plot_loop_flux import (
     channel_selection_ambiguous,
     draw_map,
+    fock_flux_for_loop,
     rows_for_loops,
     summarize_shape,
 )
@@ -60,6 +62,46 @@ class TestLoopFlux(unittest.TestCase):
         self.assertTrue(channel_selection_ambiguous(dat([0.1, 0.1])))
         self.assertFalse(channel_selection_ambiguous(dat([-0.1, 0.1])))
 
+
+    def test_effective_fock_flux(self):
+        g = RubyPBC("2x2", t1=0.5, t2=0.5)
+        coords = selected_site_positions(g)[0]
+        rho = np.ones(len(g.edges), dtype=complex) * 0.20
+        # Complex nearest-neighbour contraction only on one triangle edge.
+        one_t = next(k for k, e in enumerate(g.edges) if e.kind == "t")
+        rho[one_t] = 0.20 + 0.15j
+        loops = plaquette_data(g, rho, np.zeros(len(rho)), coords)
+        dat = {"loop_data": loops, "rho_edges": rho}
+
+        zero = rows_for_loops(dat, g=g, V=0.0, flux_mode="fock")
+        self.assertTrue(all(r["valid_phase"] for r in zero))
+        self.assertTrue(all(abs(r["phi_rad"]) < 1e-12 for r in zero))
+
+        finite = rows_for_loops(dat, g=g, V=1.0, flux_mode="fock")
+        self.assertTrue(any(abs(r["phi_rad"]) > 0.01
+                            for r in finite if r["length"] == 3))
+        self.assertTrue(all(abs(r["phi_rad"]) < 1e-12
+                            for r in finite if r["length"] == 6))
+        self.assertTrue(all(isinstance(r["valid_phase"], bool) for r in finite))
+        # Hermitian conjugation reverses each oriented loop phase.
+        dat_reversed = {"loop_data": loops, "rho_edges": np.conjugate(rho)}
+        for lp in loops:
+            phase, _ = fock_flux_for_loop(g, dat, list(lp["sites"]), 1.0)
+            reversed_phase, _ = fock_flux_for_loop(
+                g, dat_reversed, list(lp["sites"]), 1.0
+            )
+            self.assertAlmostEqual(phase, -reversed_phase, places=12)
+
+    def test_ambiguity_serializes_to_json(self):
+        dat = {
+            "selected_channel": "LC_same",
+            "projection": {"LC_same": {"eigenvalues": np.array([0., 0.])}},
+        }
+        flagged = channel_selection_ambiguous(dat)
+        self.assertIs(type(flagged), bool)
+        self.assertEqual(json.loads(json.dumps({"nonunique": flagged})),
+                         {"nonunique": True})
+
     def test_plot_writes_png(self):
         g = RubyPBC("2x2", t1=0.5, t2=0.5)
         coords = selected_site_positions(g)[0]
@@ -70,7 +112,7 @@ class TestLoopFlux(unittest.TestCase):
         with TemporaryDirectory() as temp:
             for mode in ("abs", "signed"):
                 dest = Path(temp) / f"{mode}.png"
-                draw_map(g, rows, dat, dest, mode, ambiguous=True)
+                draw_map(g, rows, dat, dest, mode, ambiguous=True, flux_mode="correlation")
                 self.assertGreater(dest.stat().st_size, 1024)
 
 
