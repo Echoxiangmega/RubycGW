@@ -644,8 +644,15 @@ def run(args):
     meta.write_text(json.dumps(ident,indent=2),encoding='utf-8')
     print(f'Cluster {g.name}, Ns={g.Ns}, Nf={nf}, n={nf/g.num_cells:.8f}, '
           f't1={args.t1}, t2={args.t2}, symmetry={args.symmetry}',flush=True)
+    t_setup=time.monotonic()
     solver=VScanSolver(g,nf,args.symmetry,args.low,args.max_basis,
                        time_reversal_pairs=not args.no_tr_pairing)
+    if args.profile_timing:
+        print(
+            f'  setup: {time.monotonic()-t_setup:.2f}s, '
+            f'symmetry blocks={len(solver.blocks)}, full dimension={solver.dim}',
+            flush=True
+        )
     # An extended V grid must preserve previously completed V points.
     # Only accept files belonging to exactly the same physical scan identity.
     rows_by_v={}
@@ -667,10 +674,13 @@ def run(args):
                 print(f'Reuse V={V:g}',flush=True)
                 continue
             folder.mkdir(parents=True,exist_ok=True)
+            t_block=time.monotonic()
             H,e0,psis,records,incomplete,residual=solver.solve(V,args.degeneracy_tol)
+            eig_seconds=time.monotonic()-t_block
             print(
                 f'  ED symmetry blocks: eigensolved={solver.last_eigensolved}, '
-                f'time-reversal reused={solver.last_tr_reused}',
+                f'time-reversal reused={solver.last_tr_reused}'
+                + (f', eigensolve={eig_seconds:.2f}s' if args.profile_timing else ''),
                 flush=True
             )
             channels,lead=channel_specs(g,solver.occ,psis,include_extra=not args.no_extra_loops)
@@ -681,8 +691,10 @@ def run(args):
             spectra={}
             captures={};statuses={};ground_currents={}
             definitions={}
+            timings={}
             for ch in channels:
                 name=ch['name']
+                t_channel=time.monotonic()
                 capture=name in E_CHANNEL_NAMES
                 resp=one_channel(ch,H,e0,psis,solver.states,solver.occ,g,args.depth,
                                  args.pole_tol,incomplete,capture=capture,
@@ -703,6 +715,17 @@ def run(args):
                 row[f'{name}_active_gap']=gap
                 row[f'{name}_active_weight']=weight
                 definitions[name]={k:v for k,v in ch.items() if k not in ('loops','weights','weight_vectors','orbital_vector')}
+                timings[name]=time.monotonic()-t_channel
+                if args.profile_timing:
+                    print(f'    response {name}: {timings[name]:.2f}s',flush=True)
+            row['ED_eigensolve_s']=eig_seconds
+            row['response_all_channels_s']=sum(timings.values())
+            if args.profile_timing:
+                print(
+                    f'  timing totals: eigensolve={eig_seconds:.2f}s, '
+                    f'channel responses={sum(timings.values()):.2f}s',
+                    flush=True
+                )
             # Resolve the current order *inside* the exactly degenerate
             # ground multiplet. This remains meaningful when static chi=NaN.
             # Verify against the previously computed zero-mode spectral weight.
@@ -1128,6 +1151,9 @@ def parser():
                         '(useful as a cross-check; otherwise reuse their exact spectra)')
     p.add_argument('--low',type=int,default=5,help='lowest eigenvectors kept per symmetry block')
     p.add_argument('--depth',type=int,default=60,help='Lanczos Krylov depth for susceptibilities')
+    p.add_argument('--profile-timing',action='store_true',
+                   help='Print setup, symmetry-block diagonalization and per-channel '
+                        'susceptibility timings for bottleneck diagnosis')
     p.add_argument('--pole-tol',type=float,default=1e-8)
     p.add_argument('--active-weight-fraction',type=float,default=1e-3,
                    help='relative spectral weight needed to call a pole active')
