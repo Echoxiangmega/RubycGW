@@ -20,8 +20,41 @@ from scipy.sparse.linalg import eigsh
 
 from core import FixedHamiltonian, interaction_diagonal, make_states, lowest
 from geometry import RubyPBC
-from symmetry import symmetry_projectors
+from symmetry import symmetry_projectors, generators_trans
 from observables import op_sum, current_terms, apply_ops
+
+
+def _symmetry_label_key(lab):
+    """Immutable key for one symmetry-resolved ED block."""
+    return (
+        tuple(int(q) for q in lab["K"]),
+        None if lab["rotation"] is None else tuple(lab["rotation"]),
+        lab["mirror"],
+        bool(lab["signed_rotation"]),
+    )
+
+
+def _time_reversed_block_key(lab, translation_orders, nf):
+    """Label reached under complex conjugation of a real spinless Hamiltonian.
+
+    Ordinary rotation: rq -> -rq (mod n).
+    Gauge-signed rotation: eigenphase is exp[-2pi*i*(rq+(nf%2)/2)/n];
+    conjugation maps rq -> -rq-(nf%2) (mod n).
+    The mirror eigenvalue is real and does not change.
+    """
+    k = tuple(
+        (-int(q)) % int(order)
+        for q, order in zip(lab["K"], translation_orders)
+    )
+    rotation = lab["rotation"]
+    if rotation is None:
+        rkey = None
+    else:
+        name, rq = rotation
+        n = int(name[1:])
+        offset = int(nf) % 2 if lab["signed_rotation"] else 0
+        rkey = (name, (-int(rq) - offset) % n)
+    return (k, rkey, lab["mirror"], bool(lab["signed_rotation"]))
 
 
 def safe_json(x):
@@ -45,8 +78,11 @@ def compact_label(lab):
 
 class VScanSolver:
     """Cache geometry, full H0 and all symmetry projectors once per filling."""
-    def __init__(self,g,nf,symmetry='point',low=5,max_basis=70_000):
+    def __init__(self,g,nf,symmetry='point',low=5,max_basis=70_000,
+                 time_reversal_pairs=True):
         self.g,self.nf,self.low=g,nf,low
+        self.time_reversal_pairs = bool(time_reversal_pairs)
+        self.translation_orders = tuple(int(gen[2]) for gen in generators_trans(g)) if symmetry != 'none' else ()
         self.H0=FixedHamiltonian(g,nf,0.).operator
         self.states=make_states(g.Ns,nf)
         if len(self.states)>max_basis:
@@ -75,12 +111,42 @@ class VScanSolver:
 
     def solve(self,V,deg_tol):
         winners=[];records=[]
+        solved = {}  # block key -> (Q, energies, eigenvectors)
+        self.last_tr_reused = 0
+        self.last_eigensolved = 0
         for lab,Q,h0,u in self.blocks:
-            H=h0+diags(V*u,format='csr')
-            energies,vectors=lowest(H,min(self.low,H.shape[0]))
-            records.append({'labels':compact_label(lab),'dim':H.shape[0],
+            key = _symmetry_label_key(lab)
+            mate = _time_reversed_block_key(
+                lab, self.translation_orders, self.nf
+            )
+            energies = vectors = None
+            # H is real in the physical occupation basis. Therefore
+            # conjugating an eigenvector maps it into the -K / conjugate
+            # rotation sector at exactly the same energy.  We only reuse
+            # the spectrum if the target projector contains those vectors;
+            # otherwise perform the original independent eigensolve.
+            if self.time_reversal_pairs and mate != key and mate in solved:
+                Qprev, prev_energies, prev_vectors = solved[mate]
+                if Q.shape[1] == Qprev.shape[1]:
+                    physical = np.conj(Qprev @ prev_vectors)
+                    candidate = np.asarray(Q.conj().T @ physical)
+                    restored = Q @ candidate
+                    err = np.linalg.norm(restored - physical) / max(
+                        np.linalg.norm(physical), 1e-30
+                    )
+                    if err < 1e-8:
+                        energies = prev_energies.copy()
+                        vectors = candidate
+                        self.last_tr_reused += 1
+            if energies is None:
+                H=h0+diags(V*u,format='csr')
+                energies,vectors=lowest(H,min(self.low,H.shape[0]))
+                self.last_eigensolved += 1
+            solved[key]=(Q,energies,vectors)
+            records.append({'labels':compact_label(lab),'dim':h0.shape[0],
                             'energies':energies.tolist()})
-            for i,e in enumerate(energies):winners.append((float(e),lab,Q,vectors[:,i]))
+            for i,e in enumerate(energies):
+                winners.append((float(e),lab,Q,vectors[:,i]))
         winners.sort(key=lambda x:x[0])
         E0=winners[0][0]
         near=[x for x in winners if x[0]-E0<=deg_tol]
@@ -578,7 +644,8 @@ def run(args):
     meta.write_text(json.dumps(ident,indent=2),encoding='utf-8')
     print(f'Cluster {g.name}, Ns={g.Ns}, Nf={nf}, n={nf/g.num_cells:.8f}, '
           f't1={args.t1}, t2={args.t2}, symmetry={args.symmetry}',flush=True)
-    solver=VScanSolver(g,nf,args.symmetry,args.low,args.max_basis)
+    solver=VScanSolver(g,nf,args.symmetry,args.low,args.max_basis,
+                       time_reversal_pairs=not args.no_tr_pairing)
     # An extended V grid must preserve previously completed V points.
     # Only accept files belonging to exactly the same physical scan identity.
     rows_by_v={}
@@ -601,6 +668,11 @@ def run(args):
                 continue
             folder.mkdir(parents=True,exist_ok=True)
             H,e0,psis,records,incomplete,residual=solver.solve(V,args.degeneracy_tol)
+            print(
+                f'  ED symmetry blocks: eigensolved={solver.last_eigensolved}, '
+                f'time-reversal reused={solver.last_tr_reused}',
+                flush=True
+            )
             channels,lead=channel_specs(g,solver.occ,psis,include_extra=not args.no_extra_loops)
             row={'V':V,'n':nf/g.num_cells,'Nf':nf,'E0':e0,
                  'ground_dim':psis.shape[1],'ground_incomplete':incomplete,
@@ -1051,6 +1123,9 @@ def parser():
     p.add_argument('--Vmax',type=float,default=2.)
     p.add_argument('--Vstep',type=float,default=.5)
     p.add_argument('--symmetry',choices=['point','translation','none'],default='point')
+    p.add_argument('--no-tr-pairing',action='store_true',
+                   help='Independently diagonalize time-reversed symmetry sectors '
+                        '(useful as a cross-check; otherwise reuse their exact spectra)')
     p.add_argument('--low',type=int,default=5,help='lowest eigenvectors kept per symmetry block')
     p.add_argument('--depth',type=int,default=60,help='Lanczos Krylov depth for susceptibilities')
     p.add_argument('--pole-tol',type=float,default=1e-8)
