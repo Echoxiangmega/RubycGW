@@ -21,7 +21,7 @@ one-fermion E doublet is exactly sigma_x,y,z:
 
   B: tau_x = 2 n3 - n4 - n5
      tau_y = sqrt(3) (n4 - n5)
-     tau_z = +sqrt(3) I_B^CCW / t
+     tau_z = -sqrt(3) I_B^CCW / t
 
 The opposite signs in tau_z (and the B tau_y convention) account for the
 opposite geometric handedness of the two triangles. I_A/B^CCW is the physical
@@ -195,10 +195,12 @@ def pseudospin_actions(g, states, psi, xy_cache=None):
     for p, loop in enumerate(loops):
         out[:, 3 * p + 0] = amp[p, 0] * psi
         out[:, 3 * p + 1] = amp[p, 1] * psi
-        # Physical-CCW I has opposite sign relative to local E chirality on A,
-        # and the same sign on B.
-        frame = -1.0 if int(sub[p]) == 0 else +1.0
-        out[:, 3 * p + 2] = frame * zscale * one_triangle_action(
+        # In the physical A/B pseudospin frame used by rubycgw.pseudospin,
+        # tau_z is -sqrt(3) times the physical-CCW loop current divided by t
+        # on BOTH triangle species.  The opposite algebraic handedness of B
+        # is already contained in the fact that triangle_index() orients every
+        # geometrical loop physically CCW.
+        out[:, 3 * p + 2] = -zscale * one_triangle_action(
             g, states, psi, loop
         )
     return out, (loops, cells, sub, amp)
@@ -429,7 +431,7 @@ def main(argv=None):
     p.add_argument("--V", nargs="+", type=float, help="Selected completed V values")
     p.add_argument("--Vmin", type=float, default=None)
     p.add_argument("--Vmax", type=float, default=None)
-    p.add_argument("--levels", type=int, default=8,
+    p.add_argument("--levels", type=int, default=4,
                    help="Number of ordered excited levels to include")
     p.add_argument("--fit-Vmin", type=float, default=None,
                    help="Vmin for V*gap = c0+c1/V plateau fits; default selected midpoint")
@@ -447,6 +449,13 @@ def main(argv=None):
         raise ValueError("--levels must be positive")
     root = Path(a.input)
     info = _scan_info(root)
+    stored_low = int(info.get("low", 0))
+    if stored_low and a.levels + 1 > stored_low:
+        raise ValueError(
+            f"--levels {a.levels} needs at least {a.levels + 1} saved eigenvalues "
+            f"per symmetry block, but this scan used low={stored_low}. "
+            "Use a smaller --levels or rerun the ED scan with larger --low."
+        )
     g = RubyPBC(info["cluster"], t=info.get("t", 1.0),
                 t1=info["t1"], t2=info["t2"])
     if not np.isclose(float(g.t["t1"]), -float(g.t["t2"]), atol=1e-10, rtol=1e-10):
