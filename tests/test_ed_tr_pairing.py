@@ -14,7 +14,10 @@ from scan_susceptibility import VScanSolver, _symmetry_label_key, _time_reversed
 from symmetry import generators_trans, sector_labels
 
 
-@pytest.mark.parametrize("cluster,nf", [("ring3", 3), ("2x2", 3)])
+@pytest.mark.parametrize("cluster,nf", [
+    ("ring3", 2), ("ring3", 3),
+    ("2x2", 2), ("2x2", 3),
+])
 def test_tr_pairing_matches_original_symmetry_sector_spectrum(cluster, nf):
     g=RubyPBC(cluster,t=0.4,t1=0.2,t2=-0.2)
     old=VScanSolver(g,nf,symmetry="point",low=3,max_basis=6000,
@@ -34,7 +37,6 @@ def test_tr_pairing_matches_original_symmetry_sector_spectrum(cluster, nf):
         np.testing.assert_allclose(np.sort(np.linalg.eigvalsh(psis1.conj().T@psis1)),
                                    np.ones(psis1.shape[1]),atol=1e-8)
         assert res1<2e-6
-    # Odd-fermion signed C6 sectors are complex, giving useful TR pairs.
     assert fast.last_tr_reused>0
 
 
