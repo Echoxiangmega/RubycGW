@@ -266,9 +266,17 @@ def pseudospin_correlations(g, states, psis):
     out["S_AF_avg"] = out["S_AF_total"] / 3.0
     out["S_AF_total_conn"] = sum(out[f"S_AF_{a}_conn"] for a in names)
     out["S_AF_avg_conn"] = out["S_AF_total_conn"] / 3.0
+    out["S_uniform_total"] = sum(out[f"S_uniform_{a}"] for a in names)
+    out["S_uniform_avg"] = out["S_uniform_total"] / 3.0
+    out["S_uniform_total_conn"] = sum(out[f"S_uniform_{a}_conn"] for a in names)
+    out["S_uniform_avg_conn"] = out["S_uniform_total_conn"] / 3.0
     out["m2_AF_total"] = out["S_AF_total"] / nt
     out["m2_AF_avg"] = out["S_AF_avg"] / nt
     out["m2_AF_z"] = out["S_AF_z"] / nt
+    comps = np.array([out[f"S_AF_{a}"] for a in names], dtype=float)
+    out["S_AF_component_relative_spread"] = float(
+        (np.max(comps) - np.min(comps)) / (abs(np.mean(comps)) + 1e-30)
+    )
 
     # Average microscopic local Pauli-proxy moment. In the ideal E doublet,
     # sum_a <tau_a^2> = 3.
@@ -333,9 +341,11 @@ def _plot_spectrum(rows, out):
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(7.2, 4.8))
-    x = 1.0 / V
+    positive = V > 0.0
+    x = 1.0 / V[positive]
     for key in keys:
-        ax.plot(x, [r["V_" + key] for r in rows], "o-", ms=3.5,
+        yy = np.asarray([r["V_" + key] for r in rows], dtype=float)[positive]
+        ax.plot(x, yy, "o-", ms=3.5,
                 label=key.replace("gap_E", "level "))
     ax.set_xlabel(r"$1/V$")
     ax.set_ylabel(r"$V(E_n-E_0)$")
@@ -348,7 +358,7 @@ def _plot_spectrum(rows, out):
 
 
 def _plateau_diagnostics(rows, fit_vmin):
-    use = [r for r in rows if r["V"] >= fit_vmin - 1e-12]
+    use = [r for r in rows if r["V"] > 0.0 and r["V"] >= fit_vmin - 1e-12]
     if len(use) < 2:
         return []
     x = np.array([1.0 / r["V"] for r in use], float)
@@ -394,6 +404,18 @@ def _plot_pseudospin(rows, out):
     ax.legend()
     fig.tight_layout()
     fig.savefig(out / "pseudospin_staggered_vs_V.png", dpi=190)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(7.3, 4.9))
+    ax.plot(V, [r["S_AF_avg"] for r in rows], "-o", label=r"$S_{AF}^{avg}$")
+    ax.plot(V, [r["S_uniform_avg"] for r in rows], "-o", label=r"$S_{uniform}^{avg}$")
+    ax.set_xlabel("V")
+    ax.set_ylabel("structure factor")
+    ax.set_title("Staggered versus uniform pseudospin correlations")
+    ax.grid(alpha=.25)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out / "pseudospin_AF_vs_uniform.png", dpi=190)
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(7.3, 4.9))
