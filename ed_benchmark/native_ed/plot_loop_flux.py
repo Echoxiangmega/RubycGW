@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Visualize correlation-loop phases in Ruby ED scan ground states.
+r"""Visualize effective-hopping and correlation phases in Ruby ED ground states.
 
-Each contractible triangle, square and hexagon is shown on the SAME
-real-space lattice map. Phi_p = arg(product_<ij in CCW p> <c_i^dag c_j>).
-This is a gauge-invariant correlation phase, NOT a physical magnetic flux.
+Every elementary contractible triangle, square and hexagon is overlaid on ONE
+real-space map. Default Phi is a phase of interaction-generated Fock hopping
+relative to real bare hopping; --flux-mode correlation restores the original
+one-body correlation-loop phase. Neither measures an actual magnetic field.
 
 Examples (from ed_benchmark/native_ed):
   python plot_loop_flux.py --input results\my_2x2_scan --V 1 1.45 2 --channel same
@@ -58,32 +59,82 @@ def channel_selection_ambiguous(dat, tol=1e-9) -> bool:
     ))
     if eig.size == 0:
         return True
-    return abs(eig[-1]) <= tol or (
+    return bool(abs(eig[-1]) <= tol or (
         eig.size > 1 and abs(eig[-1] - eig[-2]) <= tol
-    )
+    ))
 
 
-def rows_for_loops(dat, min_product=1e-12):
-    """Keep all contractible elementary loops, even with undefined phases."""
+
+def fock_flux_for_loop(g, dat, sites, V):
+    """Return interaction-induced Fock/Peierls phase on a CCW cycle.
+
+    Hamiltonian convention: H_t = sum_ij t_ij c_i^dag c_j + h.c.,
+    H_V = V sum_(triangle edges) n_i n_j.
+    Coefficient for particle motion i->j in the Fock Hamiltonian:
+      h_(j,i)^F = t_ij - V_ij <c_i^dag c_j>.
+    Relative Peierls link is h_(j,i)^F / t_ij; the bare hopping signs
+    are removed. Inter-triangle edges have V_ij=0 in THIS ED model.
+    This is an effective mean-field diagnostic, not a field in exact ED.
+    """
+    rho = np.asarray(dat["rho_edges"], dtype=complex)
+    ix = {(e.i, e.j): i for i, e in enumerate(g.edges)}
+    product = 1.0 + 0.0j
+    for i, j in zip(sites, sites[1:] + sites[:1]):
+        edge, direction = g._directed_edge(i, j)
+        k = ix[(edge.i, edge.j)]
+        t = float(g.t[edge.kind])
+        if abs(t) < 1e-14:
+            return float("nan"), 0.0
+        interaction = float(V) if edge.kind == "t" else 0.0
+        relative_hopping = (t - interaction * rho[k]) / t
+        product *= relative_hopping if direction == 1 else relative_hopping.conjugate()
+    strength = float(abs(product))
+    return (float(np.angle(product)) if strength > 0 else float("nan")), strength
+
+
+def rows_for_loops(dat, min_product=1e-12, g=None, V=None,
+                   flux_mode="correlation"):
+    """Enumerate all loops and choose either correlation or Fock-link phase."""
+    if flux_mode not in ("fock", "correlation"):
+        raise ValueError("flux_mode must be 'fock' or 'correlation'")
+    if flux_mode == "fock" and (g is None or V is None):
+        raise ValueError("fock mode requires the Ruby geometry and interaction V")
     rows = []
     for i, lp in enumerate(dat["loop_data"]):
         length = int(lp["length"])
         if length not in LOOP_TYPES:
             continue
-        strength = float(lp["rho_product_abs"])
-        phi = float(lp["rho_flux"])
-        valid = bool(np.isfinite(phi) and strength > min_product)
+        rho_strength = float(lp["rho_product_abs"])
+        rho_phi = float(lp["rho_flux"])
+        if g is not None and V is not None and "rho_edges" in dat:
+            fock_phi, fock_strength = fock_flux_for_loop(
+                g, dat, list(lp["sites"]), V
+            )
+        else:
+            fock_phi, fock_strength = float("nan"), float("nan")
+        if flux_mode == "fock":
+            phi, strength = fock_phi, fock_strength
+        else:
+            phi, strength = rho_phi, rho_strength
+        valid = bool(np.isfinite(phi) and np.isfinite(strength)
+                     and strength > min_product)
         rows.append({
             "loop_id": i,
             "length": length,
             "shape": LOOP_TYPES[length],
             "type": str(lp["type"]),
             "sites": " ".join(map(str, lp["sites"])),
+            "flux_mode": flux_mode,
             "phi_rad": phi if valid else float("nan"),
             "abs_phi_rad": abs(phi) if valid else float("nan"),
             "phi_over_pi": phi / np.pi if valid else float("nan"),
+            "sin_phi": float(np.sin(phi)) if valid else float("nan"),
+            "correlation_phi_rad": rho_phi,
+            "fock_phi_rad": fock_phi,
             "I_ccw": float(lp["I_ccw"]),
-            "rho_product_abs": strength,
+            "rho_product_abs": rho_strength,
+            "fock_ratio_product_abs": fock_strength,
+            "flux_product_abs": strength,
             "bare_flux_rad": float(lp["bare_flux"]),
             "valid_phase": valid,
             "polygon": np.asarray(lp["real_coordinates"], dtype=float),
@@ -91,7 +142,7 @@ def rows_for_loops(dat, min_product=1e-12):
     return rows
 
 
-def draw_map(g, rows, dat, filename, mode, ambiguous):
+def draw_map(g, rows, dat, filename, mode, ambiguous, flux_mode):
     """Overlay triangles, squares and hexagons on one common lattice plot."""
     if mode not in ("abs", "signed"):
         raise ValueError("mode must be 'abs' or 'signed'")
@@ -146,15 +197,17 @@ def draw_map(g, rows, dat, filename, mode, ambiguous):
         r"$|\Phi_p|$ (rad)" if mode == "abs" else r"$\Phi_p$ (rad, CCW)"
     )
     suffix = " (selection nonunique)" if ambiguous else ""
+    description = ('Fock effective Peierls phase' if flux_mode == 'fock'
+                   else 'one-body correlation phase')
     ax.set_title(
-        f"{g.name}: triangle / square / hexagon loop phases\n"
+        f"{g.name}: triangle / square / hexagon | {description}\n"
         f"{dat['selected_channel']}={dat['J_selected']:+.6g}{suffix}",
         fontsize=12,
     )
     fig.text(
         0.5, 0.015,
-        r"$\Phi_p=\arg\prod_{(ij)\in p}\langle c_i^\dagger c_j\rangle$"
-        "  |  T = triangle, S = square, H = hexagon; n/a = weak product",
+        'Fock: arg product[(t-V_ij rho_ij)/t]; correlation: arg product[rho_ij]'
+        ' | T = triangle, S = square, H = hexagon; n/a = weak product',
         ha="center", fontsize=9,
     )
     fig.savefig(filename, dpi=220, bbox_inches="tight")
@@ -174,7 +227,7 @@ def summarize_shape(rows, length):
     }
 
 
-def export_one(g, states, psis, e0, V, output, channel, check_h, min_product):
+def export_one(g, states, psis, e0, V, output, channel, check_h, min_product, flux_mode):
     output.mkdir(parents=True, exist_ok=True)
     dat = optimize_state(
         g, states, psis, channel=channel, E0=e0, V=V, check_h=check_h
@@ -186,27 +239,29 @@ def export_one(g, states, psis, e0, V, output, channel, check_h, min_product):
             "a unique ground state; local Phi values may depend on the "
             "chosen degenerate-state basis."
         )
-    rows = rows_for_loops(dat, min_product)
+    rows = rows_for_loops(dat, min_product, g=g, V=V, flux_mode=flux_mode)
     if not rows:
         raise RuntimeError(f"No elementary contractible loops found at V={V:g}")
 
     fields = [
-        "loop_id", "length", "shape", "type", "sites", "phi_rad",
-        "abs_phi_rad", "phi_over_pi", "I_ccw", "rho_product_abs",
-        "bare_flux_rad", "valid_phase",
+        "loop_id", "length", "shape", "type", "sites", "flux_mode", "phi_rad",
+        "abs_phi_rad", "phi_over_pi", "sin_phi", "I_ccw", "rho_product_abs",
+        "correlation_phi_rad", "fock_phi_rad", "fock_ratio_product_abs",
+        "flux_product_abs", "bare_flux_rad", "valid_phase",
     ]
     with (output / "loop_flux.csv").open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         for row in rows:
             writer.writerow({k: row[k] for k in fields})
-    draw_map(g, rows, dat, output / "loop_flux_abs.png", "abs", ambiguous)
-    draw_map(g, rows, dat, output / "loop_flux_signed.png", "signed", ambiguous)
+    draw_map(g, rows, dat, output / "loop_flux_abs.png", "abs", ambiguous, flux_mode)
+    draw_map(g, rows, dat, output / "loop_flux_signed.png", "signed", ambiguous, flux_mode)
 
     summary = {
         "V": float(V), "cluster": g.name, "nf": int(states[0]).bit_count(),
         "ground_dim": int(psis.shape[1]),
         "channel": dat["selected_channel"],
+        "flux_mode": flux_mode,
         "channel_J": float(dat["J_selected"]),
         "selection_nonunique": ambiguous,
         "min_loop_product": min_product,
@@ -215,9 +270,10 @@ def export_one(g, states, psis, e0, V, output, channel, check_h, min_product):
             for length in LOOP_TYPES
         },
         "note": (
-            "Phi is the CCW phase of the one-body correlation product, "
-            "not a physical magnetic field or electromagnetic flux. "
-            "A pi phase alone does not imply time-reversal breaking."
+            "fock: interaction-induced Fock hopping Wilson phase relative to the real "
+            "bare hopping, not a physical magnetic field. correlation: phase "
+            "of the one-body density-matrix loop. Neither is an exact ED "
+            "external magnetic flux. Phi=pi alone does not break TR."
         ),
     }
     (output / "loop_flux_summary.json").write_text(
@@ -252,6 +308,8 @@ def main(argv=None):
     p.add_argument("--input", required=True)
     p.add_argument("--V", type=float, nargs="+", default=None)
     p.add_argument("--channel", choices=("same", "opposite"), default="same")
+    p.add_argument("--flux-mode", choices=("fock", "correlation"), default="fock",
+                   help="Default Fock effective Peierls flux; original correlation phase with correlation")
     p.add_argument("--output", default=None)
     p.add_argument("--force-resolve", action="store_true")
     p.add_argument("--no-check-H", action="store_true")
@@ -274,7 +332,7 @@ def main(argv=None):
             p.error("input must have scan_metadata.json or responses.json")
         values = sorted(set(args.V)) if args.V else find_scan_values(root)
         scan_root = root
-    dest = Path(args.output) if args.output else scan_root / f"loop_flux_{args.channel}"
+    dest = Path(args.output) if args.output else scan_root / f"loop_flux_{args.flux_mode}_{args.channel}"
     dest.mkdir(parents=True, exist_ok=True)
 
     summaries, cache = [], None
@@ -294,7 +352,7 @@ def main(argv=None):
         sub = dest / f"V_{val:+.9f}"
         summary = export_one(
             g, states, psis, e0, val, sub, args.channel,
-            not args.no_check_H, args.min_loop_product,
+            not args.no_check_H, args.min_loop_product, args.flux_mode,
         )
         summary["state_source"] = source
         summaries.append(summary)
@@ -306,7 +364,7 @@ def main(argv=None):
             flush=True,
         )
 
-    fields = ["V", "channel", "channel_J", "ground_dim",
+    fields = ["V", "channel", "flux_mode", "channel_J", "ground_dim",
               "selection_nonunique", "state_source"]
     for name in LOOP_TYPES.values():
         fields.extend([
