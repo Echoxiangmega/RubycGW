@@ -332,3 +332,46 @@ The off-site-only Fourier diagnostic can be negative and is not a
 positive-definite structure factor. See
 [LC_STRUCTURE_BENCHMARK.md](LC_STRUCTURE_BENCHMARK.md) for normalization,
 file layouts and caveats on finite-size order.
+
+## ED loop-phase maps: triangles, squares, and hexagons together
+
+`plot_loop_flux.py` reads the existing native ED scan and overlays **all elementary
+triangle, square and hexagon loops on the same Ruby-lattice map**.
+It writes separate signed and magnitude versions of this combined map.
+
+From `ed_benchmark/native_ed` (Windows PowerShell or CMD):
+
+```powershell
+python plot_loop_flux.py --input results\YOUR_2x2_SCAN --V 1 1.4 1.5 2 --channel same
+python plot_loop_flux.py --input results\YOUR_2x2_SCAN --channel opposite
+python plot_loop_flux.py --input results\YOUR_2x2_SCAN\V_+1.500000000 --channel same
+python test_loop_flux.py
+```
+
+When `--V` is omitted for a scan root, every point in `V_*/responses.json`
+is processed. A saved `ground_states.npz` is reused; if it is absent, the
+corresponding ED point is recomputed (which can take a long time).
+Use `--V` to limit the points. Optional `--output`, `--force-resolve`,
+`--no-check-H`, `--low`, `--max-basis` and `--min-loop-product` are supported.
+
+Output: `SCAN/loop_flux_same/` or `SCAN/loop_flux_opposite/`, with:
+
+- `V_+.../loop_flux_abs.png` and `loop_flux_signed.png`: both contain ALL
+  three plaquette shapes, with phase labels in radians and fixed color scales;
+- `V_+.../loop_flux.csv`: CCW phase, absolute phase, phase/pi, site indices,
+  current circulation, correlation product magnitude and bare hopping phase;
+- `V_+.../loop_flux_summary.json`: loop counts and channel-selection warning;
+- `overview.csv`, `overview.json`, and `loop_flux_overview.png`: per-shape
+  maximum and mean absolute loop phase versus V, all on one overview plot.
+
+**Definition:** `Phi_p = arg product_(CCW i->j in p) <c_i^dag c_j>`.
+This is the gauge-invariant **one-body correlation-loop phase**, not the
+actual electromagnetic magnetic flux. A phase of pi need not break time
+reversal symmetry (the bond expectations can all be real). Analyze currents
+or current correlations alongside the loop phases. Very weak correlation
+products give an undefined phase and are labeled `n/a`.
+
+A degenerate-ground-manifold state selected by maximal `LC_same` or
+`LC_opposite` current is not necessarily unique. In particular, a zero or
+degenerate maximal eigenvalue leaves the phase pattern basis-dependent;
+the script warns instead of interpreting it as a unique ordered state.
