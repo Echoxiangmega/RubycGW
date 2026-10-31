@@ -335,43 +335,63 @@ file layouts and caveats on finite-size order.
 
 ## ED loop-phase maps: triangles, squares, and hexagons together
 
-`plot_loop_flux.py` reads the existing native ED scan and overlays **all elementary
-triangle, square and hexagon loops on the same Ruby-lattice map**.
-It writes separate signed and magnitude versions of this combined map.
+`plot_loop_flux.py` reads existing native ED scans and draws **all elementary
+triangle, square and hexagon loops on the same real-space map**. It exports
+signed and absolute phase maps, per-loop CSV data and a V-scan overview.
 
-From `ed_benchmark/native_ed` (Windows PowerShell or CMD):
+From `ed_benchmark/native_ed` (PowerShell or CMD):
 
 ```powershell
 python plot_loop_flux.py --input results\YOUR_2x2_SCAN --V 1 1.4 1.5 2 --channel same
 python plot_loop_flux.py --input results\YOUR_2x2_SCAN --channel opposite
-python plot_loop_flux.py --input results\YOUR_2x2_SCAN\V_+1.500000000 --channel same
+python plot_loop_flux.py --input results\YOUR_2x2_SCAN --V 1 2 --channel same --flux-mode correlation
 python test_loop_flux.py
 ```
 
-When `--V` is omitted for a scan root, every point in `V_*/responses.json`
-is processed. A saved `ground_states.npz` is reused; if it is absent, the
-corresponding ED point is recomputed (which can take a long time).
-Use `--V` to limit the points. Optional `--output`, `--force-resolve`,
-`--no-check-H`, `--low`, `--max-basis` and `--min-loop-product` are supported.
+The **default** `--flux-mode fock` builds an effective complex hopping
+from the one-body density matrix of the selected exact ED state, using
 
-Output: `SCAN/loop_flux_same/` or `SCAN/loop_flux_opposite/`, with:
+```text
+  H_kin = sum_ij t_ij c_i^dag c_j + h.c.
+  H_V   = V sum_(intra-triangle ij) n_i n_j
+  t_eff(j <- i) = t_ij - V_ij <c_i^dag c_j>
+  Phi_Fock(p) = arg product_(CCW i -> j in p) [t_eff(j <- i) / t_ij]
+```
 
-- `V_+.../loop_flux_abs.png` and `loop_flux_signed.png`: both contain ALL
-  three plaquette shapes, with phase labels in radians and fixed color scales;
-- `V_+.../loop_flux.csv`: CCW phase, absolute phase, phase/pi, site indices,
-  current circulation, correlation product magnitude and bare hopping phase;
-- `V_+.../loop_flux_summary.json`: loop counts and channel-selection warning;
-- `overview.csv`, `overview.json`, and `loop_flux_overview.png`: per-shape
-  maximum and mean absolute loop phase versus V, all on one overview plot.
+The division by the bare real hopping removes the reference sign/phase.
+**This is a Fock effective Peierls phase**, not actual electromagnetic
+magnetic flux: the exact ED Hamiltonian used in this scan has real hopping
+and contains no externally imposed Peierls flux. Only the t-type
+(intra-triangle) bonds carry V in this model, so the Fock phase of an
+elementary hexagon containing no t-type edge is identically zero.
+One cannot expect the +6phi hexagon, -2phi square, zero triangle pattern
+of Guan et al., Phys. Rev. B 108, 085121 (2023), from this Hamiltonian:
+that article *puts Peierls phases into the bare hexagon hopping bonds*.
 
-**Definition:** `Phi_p = arg product_(CCW i->j in p) <c_i^dag c_j>`.
-This is the gauge-invariant **one-body correlation-loop phase**, not the
-actual electromagnetic magnetic flux. A phase of pi need not break time
-reversal symmetry (the bond expectations can all be real). Analyze currents
-or current correlations alongside the loop phases. Very weak correlation
-products give an undefined phase and are labeled `n/a`.
+For the original density-matrix loop phase instead, choose
+`--flux-mode correlation`, which evaluates
+`Phi_corr(p) = arg product_(CCW i->j in p) <c_i^dag c_j>`.
+This can differ from the Fock phase and is not an inserted Peierls flux.
+Both modes are gauge invariant for the stated conventions.
+A phase of pi can respect time-reversal symmetry; the CSV also contains
+`sin_phi` and signed current for interpretation.
 
-A degenerate-ground-manifold state selected by maximal `LC_same` or
-`LC_opposite` current is not necessarily unique. In particular, a zero or
-degenerate maximal eigenvalue leaves the phase pattern basis-dependent;
-the script warns instead of interpreting it as a unique ordered state.
+Without `--V`, all saved `V_*/responses.json` points are processed.
+Saved `ground_states.npz` is reused; otherwise the requested V is re-solved.
+Use `--V` to avoid costly full-scan recomputation.
+
+The default output is `SCAN/loop_flux_fock_same/` (or the corresponding
+flux mode and current channel), containing for each V:
+
+- `loop_flux_abs.png` and `loop_flux_signed.png`, with all three shapes together;
+- `loop_flux.csv`, with both Fock and correlation phases, loop current,
+  bare hopping phase and validity flags;
+- `loop_flux_summary.json`, with per-shape statistics and selection warning.
+
+At the scan level, `overview.csv`, `overview.json`, and
+`loop_flux_overview.png` give the maximum/mean |Phi| of each shape versus V.
+Phases with products smaller than `--min-loop-product` (default 1e-12)
+are marked `n/a`, since their angle is not reliable.
+
+If the maximal projected `LC_same` or `LC_opposite` eigenvalue is zero or
+degenerate, the selected state is not unique; this is reported explicitly.
