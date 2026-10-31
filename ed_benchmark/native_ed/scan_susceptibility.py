@@ -881,7 +881,7 @@ def run(args):
             if rows_by_v:
                 attach_mode_identity(root,rows_by_v,g,nf)
                 all_rows=[rows_by_v[v] for v in sorted(rows_by_v)]
-                fieldnames=list(all_rows[0]);out=root/'susceptibility.csv'
+                fieldnames=list(dict.fromkeys(k for r in all_rows for k in r));out=root/'susceptibility.csv'
                 with out.open('w',encoding='utf-8',newline='') as fp:
                     w=csv.DictWriter(fp,fieldnames=fieldnames)
                     w.writeheader();w.writerows(all_rows)
