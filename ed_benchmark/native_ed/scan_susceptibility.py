@@ -346,21 +346,31 @@ def spectral_chi(H,source,e0,ground,depth=80,precision=1e-8,return_resolvent=Fal
              'weights':np.empty(0),'convergence':0.,'unresolved':False}
         if return_resolvent:out['resolvent_vector']=np.zeros_like(source,dtype=complex)
         return out
-    prev=np.zeros_like(f);q=f/norm;beta=0.;Q=[];aa=[];bb=[]
-    # Reorthogonalization is essential near exact degeneracy.
-    for j in range(min(depth,H.shape[0]-ground.shape[1])):
+    prev=np.zeros_like(f);q=f/norm;beta=0.;aa=[];bb=[]
+    nsteps=min(int(depth),H.shape[0]-ground.shape[1])
+    if nsteps<1:
+        raise ValueError('Lanczos requires at least one excited-state dimension')
+    # Preallocate once in column-major order.  This avoids O(depth^2) Python
+    # calls to np.vdot and repeated scattered memory scans when D is large.
+    # Full two-pass orthogonalization is retained: no loss of numerical rigor.
+    Q=np.empty((len(f),nsteps),dtype=np.complex128,order='F')
+    ground_adj=ground.conj().T
+    for j in range(nsteps):
         v=H@q-beta*prev
         a=float(np.vdot(q,v).real)
         v-=a*q
-        Q.append(q.copy())
-        # Against the complete ground manifold and all previous Krylov vectors.
-        v-=ground@(ground.conj().T@v)
-        for old in Q:v-=old*np.vdot(old,v)
-        # Two-pass reorth for stable low poles.
-        for old in Q:v-=old*np.vdot(old,v)
+        Q[:,j]=q
+        # Remove ground-subspace contamination before Lanczos reorth.
+        v-=ground@(ground_adj@v)
+        Qactive=Q[:,:j+1]
+        for _ in range(2):
+            # Q^dagger v = conj(Q^T conj(v)); conjugating the small vector
+            # is much cheaper than materializing conj(Q) at every step.
+            coeff=np.conj(Qactive.T@np.conj(v))
+            v-=Qactive@coeff
         b=float(np.linalg.norm(v))
         aa.append(a)
-        if b<1e-12 or j==depth-1:break
+        if b<1e-12 or j==nsteps-1:break
         bb.append(b)
         prev,q=q,v/b
         beta=b
@@ -389,7 +399,7 @@ def spectral_chi(H,source,e0,ground,depth=80,precision=1e-8,return_resolvent=Fal
         inv_coeff=np.zeros_like(poles)
         inv_coeff[positive]=1./poles[positive]
         krylov_coeff=norm*(U@(inv_coeff*U[0,:]))
-        out['resolvent_vector']=np.column_stack(Q)@krylov_coeff
+        out['resolvent_vector']=Q[:,:len(aa)]@krylov_coeff
     return out
 
 
