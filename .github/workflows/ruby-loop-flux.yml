@@ -1,0 +1,25 @@
+name: Ruby ED loop flux tests
+on:
+  push:
+    paths:
+      - "ed_benchmark/native_ed/plot_loop_flux.py"
+      - "ed_benchmark/native_ed/test_loop_flux.py"
+      - ".github/workflows/ruby-loop-flux.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install "numpy>=1.26,<3" "scipy>=1.11,<2" "matplotlib>=3.8"
+      - name: Verify Python syntax
+        run: python -m compileall -q ed_benchmark/native_ed/plot_loop_flux.py ed_benchmark/native_ed/test_loop_flux.py
+      - name: Test all plaquette shapes and Fock phases
+        working-directory: ed_benchmark/native_ed
+        run: python test_loop_flux.py
