@@ -28,6 +28,16 @@ from math import comb
 from pathlib import Path
 from time import perf_counter
 import traceback
+import sys
+
+# Support direct execution: "python research/benchmark_three_tori.py".
+# In that mode Python puts "research/" on sys.path, not its parent.  Keep
+# the repository root discoverable before importing the sibling rubycgw
+# package, including on Windows PowerShell without an editable install.
+if __package__ in (None, ""):
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
 
 import matplotlib
 matplotlib.use("Agg")
