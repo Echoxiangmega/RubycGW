@@ -89,6 +89,67 @@ NOT interchangeable ground-state energies. Any numerical comparison
 of a finite-T energy estimate against ED E0 is marked
 mixed-temperature, not a controlled ground-state energy relative error.
 
+
+## Three different GW interaction-channel approximations
+
+The command-line default is now
+
+    --gw-channels density pseudospin bj
+
+These options select the GW **bosonic interaction representation**, not
+the external pseudospin response observable. All three still report the
+SAME physical external channels from --channels.
+
+* density: original site-density matrix, with V on exactly six
+  intra-triangle bonds per primitive cell. This is the historical
+  production lattice-GW/cGW/post-GW reference.
+* pseudospin: the selected E-doublet projector on each elementary
+  triangle with physical x,y,z Pauli components and g_E=-V/3. The
+  Hartree-Fock static map remains the exact original density V map.
+  Only dynamic GW screening/correlation is projected to E components.
+  This is NOT an exact full-orbital Fierz decomposition; discrepancies
+  with ED contain both diagram and E-channel truncation errors.
+* bj: for each physical interacting bond define B_ij=c_i^dag c_j+
+  c_j^dag c_i and J_ij=i(c_i^dag c_j-c_j^dag c_i). The symmetric
+  Fierz representation uses g_B=g_J=-V/2, retaining the full
+  B/J bosonic cross-channel response. Both B and J weights are 0.5.
+  The static Hartree-Fock map is the same physical original V.
+
+Each scheme solves its own self-consistent GW background. Within one
+scheme, the *same* converged GW G/W feeds the cGW static external
+susceptibilities and dynamic full-channel covariant post-GW W update.
+A cGW calculation of a few physical O(Q) susceptibilities is not itself
+enough for post-GW: the latter needs the full internal channel response
+at every bosonic transfer (unless --post-mmax explicitly truncates).
+No second ordinary GW fixed-point calculation is done for cGW or post.
+
+Output labels are GW[density], cGW[density], post-GW[density],
+GW[pseudospin], etc. Cumulative time is reported per scheme:
+
+    T_GW(mode)  = GW solve time
+    T_cGW(mode) = T_GW(mode) + cGW static response time
+    T_post(mode)= T_GW(mode) + cGW static time (if requested)
+                               + full dynamic post update time
+
+This cumulative value is independent for the three schemes; do not sum
+one variant's GW into the next variant's total. A common initial ED
+reference is computed only once. The primitive-cell ED+GW embedding
+continues to use the *density* GW lattice background, and is not
+implicitly converted to the alternative E/BJ bosonic Hamiltonian.
+
+## Finite-temperature ED symmetry scope
+
+The current finite-T ED implementation uses fixed particle-number
+sectors, sparse Lanczos/Krylov propagation, stochastic trace states, and
+the primitive translation of Green-function columns to reduce the
+number of source operators. It **does not** block-diagonalize the
+many-body ED Hamiltonian by total momentum or point-group irrep.
+The available ED18 translation operator is used for diagnostics
+(ground-state momentum), not a symmetry-adapted sector solver.
+Full many-body momentum/point-group block methods are a separate
+potential acceleration and would require consistent one-body operator
+selection rules in Green and susceptibility computations.
+
 ## Outputs
 
 - comparison.csv: method, observable, value, ED reference, relative
