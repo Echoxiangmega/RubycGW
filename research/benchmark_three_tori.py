@@ -64,6 +64,7 @@ from rubycgw.three_torus_benchmark import (
     SkewEDSectorAdapter, gw_energy_from_state, embedded_gm_energy,
 )
 from rubycgw.fierz_channel_gw import solve_channel_gw_same_torus
+from rubycgw.fierz_channel_continuation import solve_channel_gw_v_ramp
 from rubycgw.three_torus_interaction_channels import (
     build_torus_interaction_channel,
     solve_interaction_channel_response,
@@ -108,6 +109,16 @@ def parse_args():
     p.add_argument("--gw-max-iter",type=int,default=150)
     p.add_argument("--gw-tol",type=float,default=1e-7)
     p.add_argument("--gw-mixing",type=float,default=.22)
+    p.add_argument("--gw-mixing-method",choices=["pulay","linear"],default="pulay")
+    p.add_argument("--gw-pulay-history",type=int,default=6)
+    p.add_argument("--gw-ramp-steps",type=int,default=0,
+                   help="0: direct solve; N>=1: start at V=0 and warm-start N steps to requested V")
+    p.add_argument("--gw-ramp-min-step",type=float,default=.02,
+                   help="abort ramp if a failed V step must be halved below this value")
+    p.add_argument("--gw-ramp-max-stages",type=int,default=100,
+                   help="hard limit on all continuation attempts, including retried stages")
+    p.add_argument("--skip-failed-gw-channel",action="store_true",
+                   help="skip failed GW mode instead of aborting; never evaluate cGW/post from an unconverged G")
     p.add_argument("--vertex-max-iter",type=int,default=120)
     p.add_argument("--vertex-tol",type=float,default=2e-7)
     p.add_argument("--vertex-restart",type=int,default=12)
@@ -138,6 +149,10 @@ def parse_args():
     p.add_argument("--ed-max-dim",type=int,default=3000000,
                    help="abort ED before sector allocations exceed this Hilbert dimension")
     p.add_argument("--ed-eigs",type=int,default=4)
+    p.add_argument("--refresh-ed-cache",action="store_true",
+                   help="recompute ED E0, chi and G even when a matching ED checkpoint exists")
+    p.add_argument("--no-ed-cache",action="store_true",
+                   help="disable saving/loading out/ed_reference.npz across failed GW retries")
     p.add_argument("--seed",type=int,default=20261111)
     p.add_argument("--allow-unconverged",action="store_true")
     p.add_argument("--verbose",action="store_true")
@@ -313,6 +328,36 @@ def main():
               cgw_green="identical to ordinary self-consistent GW",
               energy_scope="ED exact E0; GW finite-T Galitskii-Migdal estimate",
               timings={},diagnostics={},errors={})
+    # Keep completed ED work when a later strong-coupling GW stage fails.
+    # The signature excludes GW mixing/ramp settings so numerical retries
+    # reuse exactly the same ED reference, but includes all ED controls.
+    cache_signature=json.dumps({
+        "geometry":geom.name,"V":float(a.V),"filling":float(a.filling),
+        "N":N,"K":list(map(float,K)),"Q":list(map(float,Q)),
+        "T":float(a.T),"nw":int(a.nw),"nomega":int(a.nomega),
+        "t":float(a.t),"t1":float(a.t1),"t2":float(a.t2),
+        "channels":list(channels),"ed_symmetry":a.ed_symmetry,
+        "ed_green_symmetry":a.ed_green_symmetry,
+        "ed_samples":a.ed_samples,"ed_tau_points":a.ed_tau_points,
+        "ed_eigs":a.ed_eigs,"ed_sector_padding":a.ed_sector_padding,
+        "ed_thermal_eigs":a.ed_thermal_eigs,
+        "ed_krylov_steps":a.ed_krylov_steps,"ed_seed":a.seed,
+    },sort_keys=True)
+    ed_cache_path=out/"ed_reference.npz"
+    ed_cache_data=None
+    if ("ed" in methods and not a.no_ed_cache and not a.refresh_ed_cache
+            and ed_cache_path.is_file()):
+        try:
+            with np.load(ed_cache_path,allow_pickle=False) as saved:
+                if str(saved["signature"].item()) == cache_signature:
+                    ed_cache_data={
+                        key: np.asarray(saved[key]).copy() for key in saved.files
+                    }
+                    print(f"[benchmark] matching ED cache: {ed_cache_path}",flush=True)
+                else:
+                    print("[benchmark] ED cache signature differs; recomputing ED",flush=True)
+        except (OSError,KeyError,ValueError) as exc:
+            print(f"[benchmark] invalid ED cache ({exc}); recomputing ED",flush=True)
     rows=[]; curves={}; arrays={}; green_by_method={}; chi_by_method={}
     times={}; energy={}; ed_scalar=None; ed_full=None; ed_chi={}
     method_mu={}; total_times={}; channel_states={}
@@ -341,7 +386,7 @@ def main():
             if not a.allow_unconverged:
                 raise
             return None
-    if "ed" in methods:
+    if "ed" in methods and ed_cache_data is None:
         def stage_ed():
             if a.ed_symmetry=="momentum":
                 ed=MomentumTorusED(geom,params,n_particles=N)
@@ -441,9 +486,65 @@ def main():
                 energy["ED_mu"]=float(gr.mu)
                 row("ED","G_reference_initialized",0.,runtime=times["ED_Green"],
                     notes="finite-T sector-truncated thermal Lanczos ED")
+                if not a.no_ed_cache:
+                    # Atomic write: incomplete GW runs must not corrupt ED cache.
+                    temp=ed_cache_path.with_name(ed_cache_path.name+".tmp")
+                    with open(temp,"wb") as handle:
+                        np.savez_compressed(
+                            handle,
+                            signature=np.asarray(cache_signature),
+                            e0=np.asarray(energy["ED"]),
+                            mu=np.asarray(energy["ED_mu"]),
+                            chi_matrix=np.asarray(arrays["ED_chi_matrix"]),
+                            corr_tau=np.asarray(arrays["ED_connected_tau"]),
+                            giw_K=np.asarray(ed_scalar),
+                            diagnostics_ed=np.asarray(json.dumps(
+                                json_safe(info["diagnostics"]["ED"]))),
+                            diagnostics_ed_green=np.asarray(json.dumps(
+                                json_safe(info["diagnostics"]["ED_Green"]))),
+                            time_ed=np.asarray(times["ED"]),
+                            time_ed_green=np.asarray(times["ED_Green"]),
+                        )
+                    temp.replace(ed_cache_path)
+                    print(f"[benchmark] saved ED reference: {ed_cache_path}",flush=True)
+    if "ed" in methods and ed_cache_data is not None:
+        energy["ED"]=float(ed_cache_data["e0"].item())
+        energy["ED_mu"]=float(ed_cache_data["mu"].item())
+        ed_scalar=np.asarray(ed_cache_data["giw_K"],dtype=complex)
+        if ed_scalar.shape!=(grid.nf,6,6):
+            raise ValueError("ED cache Green shape is inconsistent with Matsubara grid")
+        ed_full=None
+        times["ED"]=0.0
+        times["ED_Green"]=0.0
+        info["diagnostics"]["ED"]=json.loads(
+            str(ed_cache_data["diagnostics_ed"].item())
+        )
+        info["diagnostics"]["ED_Green"]=json.loads(
+            str(ed_cache_data["diagnostics_ed_green"].item())
+        )
+        info["diagnostics"]["ED"]["cache_hit"]=True
+        info["diagnostics"]["ED"]["original_runtime_seconds"]=float(
+            ed_cache_data["time_ed"].item()
+        )
+        info["diagnostics"]["ED_Green"]["original_runtime_seconds"]=float(
+            ed_cache_data["time_ed_green"].item()
+        )
+        arrays["ED_chi_matrix"]=ed_cache_data["chi_matrix"]
+        arrays["ED_connected_tau"]=ed_cache_data["corr_tau"]
+        green_by_method["ED"]=ed_scalar
+        for i,ch in enumerate(channels):
+            ed_chi[ch]=float(np.real(arrays["ED_chi_matrix"][i,i]))
+        row("ED","ground_state_E0",energy["ED"],status="cached",
+            notes="fixed-N ED ground state loaded from matching checkpoint")
+        for ch in channels:
+            row("ED",f"chi[{ch}](Q)",ed_chi[ch],status="cached",
+                notes="canonical ED thermal susceptibility loaded from matching checkpoint")
+        row("ED","G_reference_initialized",0.,status="cached",
+            notes="finite-T thermal Lanczos ED loaded from matching checkpoint")
     opts_gw=GWOptions(
         target_filling=total,max_iter=a.gw_max_iter,tol=a.gw_tol,
-        mixing=a.gw_mixing,mixing_method="pulay",
+        mixing=a.gw_mixing,mixing_method=a.gw_mixing_method,
+        pulay_history=a.gw_pulay_history,
         verbose=a.verbose,momentum_backend="fft",
         mu_tol=1e-10,mu_max_iter=100
     )
@@ -466,11 +567,52 @@ def main():
             label_gw=f"GW[{mode}]"
             label_cgw=f"cGW[{mode}]"
             label_post=f"post-GW[{mode}]"
-            scheme=run(label_gw,lambda definition=definition:
-                solve_channel_gw_same_torus(
-                    geom.h0,definition,grid,opts=opts_gw
+            if a.gw_ramp_steps > 0:
+                ramp=run(label_gw,lambda mode=mode:
+                    solve_channel_gw_v_ramp(
+                        geom.h0,
+                        definition.interaction_pairs,grid,a.V,mode,opts_gw,
+                        initial_steps=a.gw_ramp_steps,
+                        min_step=a.gw_ramp_min_step,
+                        max_stages=a.gw_ramp_max_stages,
+                    )
                 )
-            )
+                if ramp is None:
+                    continue
+                info["diagnostics"][f"{label_gw}_ramp"]=ramp.diagnostics()
+                scheme=ramp.state
+                if not ramp.reached_target:
+                    failure=dict(
+                        method=label_gw,target_V=float(a.V),
+                        last_converged_V=ramp.last_converged_V,
+                        ramp=ramp.diagnostics(),
+                        recommendation=(
+                            "Inspect screening_smin and residual across V. "
+                            "If the response is singular, test symmetry-broken "
+                            "finite-Q solutions; do not treat the last lower-V "
+                            "converged G as the requested target."
+                        ),
+                    )
+                    failure_path=out/f"gw_failure_{mode}.json"
+                    failure_path.write_text(
+                        json.dumps(json_safe(failure),indent=2),encoding="utf-8"
+                    )
+                    if a.skip_failed_gw_channel:
+                        row(label_gw,"fixed_point",None,status="unconverged",
+                            notes=f"continuation failed; last converged V={ramp.last_converged_V}; {failure_path}")
+                        print(f"[benchmark] skipping {label_gw}: ramp did not reach V={a.V:g}",flush=True)
+                        continue
+                    raise RuntimeError(
+                        f"{label_gw}: continuation did not reach V={a.V:g}; "
+                        f"last converged V={ramp.last_converged_V}, "
+                        f"failure details saved to {failure_path}"
+                    )
+            else:
+                scheme=run(label_gw,lambda definition=definition:
+                    solve_channel_gw_same_torus(
+                        geom.h0,definition,grid,opts=opts_gw
+                    )
+                )
             if scheme is None:
                 continue
             channel_states[mode]=scheme
@@ -483,7 +625,30 @@ def main():
                 screening_smin=scheme.min_screening_singular_value
             )
             if not scheme.converged and not a.allow_unconverged:
-                raise RuntimeError(f"{label_gw} did not converge: {scheme.final_error:.3e}")
+                failure=dict(method=label_gw,target_V=float(a.V),
+                             residual=float(scheme.final_error),
+                             iterations=int(scheme.iterations),
+                             screening_smin=float(scheme.min_screening_singular_value),
+                             mixing=float(a.gw_mixing),
+                             mixing_method=a.gw_mixing_method,
+                             max_iter=int(a.gw_max_iter),
+                             tolerance=float(a.gw_tol))
+                failure_path=out/f"gw_failure_{mode}.json"
+                failure_path.write_text(
+                    json.dumps(json_safe(failure),indent=2),encoding="utf-8"
+                )
+                if a.skip_failed_gw_channel:
+                    row(label_gw,"fixed_point",None,status="unconverged",
+                        notes=f"residual={scheme.final_error:.3e}, smin={scheme.min_screening_singular_value:.3e}; {failure_path}")
+                    print(f"[benchmark] skipping nonconverged {label_gw}",flush=True)
+                    continue
+                raise RuntimeError(
+                    f"{label_gw} did not converge: residual={scheme.final_error:.3e}, "
+                    f"smin={scheme.min_screening_singular_value:.3e}, "
+                    f"iterations={scheme.iterations}; "
+                    f"details saved to {failure_path}. "
+                    "Use --gw-ramp-steps 10 for warm-start continuation."
+                )
             green_by_method[label_gw]=project_k_green(scheme.G,geom,K)
             method_mu[label_gw]=float(scheme.mu)
             arrays[f"Giw_full_{mode}"]=np.asarray(scheme.G)

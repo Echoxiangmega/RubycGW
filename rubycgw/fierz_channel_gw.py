@@ -344,8 +344,16 @@ def solve_channel_gw_same_torus(
     definition: ChannelDefinition,
     grid: MatsubaraGrid,
     opts: GWOptions = GWOptions(),
+    *,
+    initial: ChannelGWResult | None = None,
 ) -> ChannelGWResult:
-    """Self-consistent GW in one chosen Fierz channel on the folded finite torus."""
+    """Self-consistent GW for one Fierz channel, with optional V-ramp warm start.
+
+    A converged solution at a nearby V is a valid initial self-energy, even
+    though its W and interaction vertices must be rebuilt at the new V. Only
+    Sigma_static, Sigma_c and mu are reused; no previous screening is reused.
+    The current fixed-point equation and strict residual are unchanged.
+    """
     _require_same_torus(grid)
     method = _check_mixing_method(opts.mixing_method)
     h0 = np.asarray(h0, dtype=complex)
@@ -355,9 +363,26 @@ def solve_channel_gw_same_torus(
     if definition.vertices.shape[1:] != (norb, norb):
         raise ValueError("channel vertex/orbital shape mismatch")
 
-    sigma_static = np.zeros((norb, norb), dtype=complex)
-    sigma_c = np.zeros((grid.nf, 1, 1, norb, norb), dtype=complex)
-    mu = float(opts.mu)
+    if initial is None:
+        sigma_static = np.zeros((norb, norb), dtype=complex)
+        sigma_c = np.zeros((grid.nf, 1, 1, norb, norb), dtype=complex)
+        mu = float(opts.mu)
+    else:
+        if str(initial.mode) != str(definition.mode):
+            raise ValueError(
+                f"warm start mode {initial.mode} differs from {definition.mode}"
+            )
+        sigma_static = np.asarray(initial.Sigma_static, dtype=complex).copy()
+        sigma_c = np.asarray(initial.Sigma_c, dtype=complex).copy()
+        if sigma_static.shape != (norb, norb) or sigma_c.shape != (
+            grid.nf, 1, 1, norb, norb
+        ):
+            raise ValueError("warm start self-energy shape does not match grid")
+        if (not np.all(np.isfinite(sigma_static)) or
+                not np.all(np.isfinite(sigma_c)) or
+                not np.isfinite(float(initial.mu))):
+            raise ValueError("warm start self-energy or chemical potential is nonfinite")
+        mu = float(initial.mu)
     if opts.target_filling is None:
         G = dyson_from_sigma_matrix(h0, grid, mu, sigma_static, sigma_c)
         tail_cache = _build_tail_cache(h0, sigma_static)
