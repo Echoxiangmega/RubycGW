@@ -113,3 +113,20 @@ def test_nonuniform_input_disables_translation_reduction():
     )
     assert not res.translation_reduced
     assert res.source_vertices_solved==len(d.labels)
+
+
+def test_period_two_torus_translation_reduction():
+    # Index-four 2x2 torus must reduce one orbital-density source per cell
+    # and preserve both independent period-two translations.
+    geom,grid,d,bg,opts=_background(geometry="2x2",V=0.,nw=2)
+    reduced,_=compute_covariant_channel_susceptibility(
+        bg,d,geom.h0,grid,vertex_opts=opts,m_max=0,
+        geometry=geom,optimize_translation=True,recycle_krylov=False,
+    )
+    assert reduced.translation_reduced
+    assert reduced.source_vertices_solved==6
+    iz=int(np.flatnonzero(grid.m_values==0)[0])
+    np.testing.assert_allclose(
+        reduced.chi_completed[iz],reduced.chi_completed[iz].conj().T,
+        atol=5e-9,
+    )
