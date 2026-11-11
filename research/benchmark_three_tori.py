@@ -100,7 +100,7 @@ def parse_args():
                    default=["ed","gw","cgw","postgw","cluster"])
     p.add_argument("--gw-channels",nargs="+",choices=["density","pseudospin","bj"],
                    default=["density","pseudospin","bj"],
-                   help="interaction-screening GW variants: original density, projected E pseudospin, half B plus half J")
+                   help="interaction-screening GW variants: original density, exact A1+E pseudospin, half B plus half J")
     p.add_argument("--channels",nargs="+",
                    default=["x_even","y_even","z_same","z_opposite"])
     p.add_argument("--plot-orbital",type=str,default="trace",
@@ -156,7 +156,8 @@ def parse_args():
     p.add_argument("--no-ed-cache",action="store_true",
                    help="disable saving/loading out/ed_reference.npz across failed GW retries")
     p.add_argument("--seed",type=int,default=20261111)
-    p.add_argument("--allow-unconverged",action="store_true")
+    p.add_argument("--allow-unconverged",action="store_true",
+                   help="deprecated: unconverged results are never used as a reference")
     p.add_argument("--verbose",action="store_true")
     p.add_argument("--out",type=Path,default=Path("results/three_torus_benchmark"))
     return p.parse_args()
@@ -395,7 +396,11 @@ def main():
             times[label]=float(perf_counter()-start)
             info["errors"][label]=f"{type(exc).__name__}: {exc}"
             print(f"[benchmark] {label} FAILED: {exc}",flush=True)
-            mark_method(label,"failed",f"{type(exc).__name__}: {exc}")
+            nonconv=("converge" in str(exc).lower() or
+                     "residual" in str(exc).lower() or
+                     "singular" in str(exc).lower())
+            mark_method(label,"unconverged" if nonconv else "failed",
+                        f"{type(exc).__name__}: {exc}")
             if a.strict_method_failures:
                 raise
             return None
@@ -696,7 +701,7 @@ def main():
             scheme_chi=run(label_cgw,lambda scheme=scheme,definition=definition:
                 solve_interaction_channel_response(
                     scheme,definition,geom,grid,Q,channels,vertex_opts,
-                    strict=not a.allow_unconverged
+                    strict=True
                 )
             ) if "cgw" in methods else None
             if "cgw" in methods and scheme_chi is None:
@@ -722,7 +727,7 @@ def main():
                         ref=ed_chi.get(ch),
                         status="ok" if valid[ch] else "unconverged",
                         notes="same physical source; static tail-completed covariant channel vertex")
-            if "cgw" not in methods:
+            if "cgw" not in methods or scheme_chi is None:
                 from rubycgw.three_torus_benchmark import hermitian_source_components
                 from rubycgw.production_cgw_sox import static_gg_tail_completed
                 b={}
@@ -734,13 +739,14 @@ def main():
                         for src in hermitian_source_components(geom,ch,Q)
                     ))
                     row(label_gw,f"chi_GG[{ch}](Q)",b[ch],ref=ed_chi.get(ch),
-                        notes="bare bubble; no cGW vertex requested")
+                        notes=("bare bubble; cGW vertex unavailable" if scheme_chi is None and "cgw" in methods
+                               else "bare bubble; no cGW vertex requested"))
                 chi_by_method[f"GG[{mode}]"]=b
             if "postgw" in methods:
                 post=run(label_post,lambda scheme=scheme,definition=definition:
                     one_shot_post_interaction_channel(
                         scheme,definition,geom.h0,grid,total,vertex_opts,
-                        m_max=a.post_mmax,allow_unconverged=a.allow_unconverged,
+                        m_max=a.post_mmax,allow_unconverged=False,
                         geometry=geom,
                         optimize_translation=not a.post_no_translation,
                         recycle_krylov=not a.post_no_recycle,
