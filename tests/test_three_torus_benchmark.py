@@ -301,3 +301,24 @@ def test_cli_momentum_green_nplus_nminus_sector_resolvents(tmp_path):
     assert G["Giw_K_ED"].shape==(8,6,6)
     assert np.all(np.isfinite(G["Giw_K_ED"]))
     assert (out/"green_tau.png").exists()
+
+
+def test_benchmark_script_imports_when_launched_directly_from_unrelated_cwd(tmp_path):
+    """Regression for Windows 'python research/benchmark_three_tori.py'.
+
+    Running as a file rather than a module must discover the sibling rubycgw
+    package without relying on the current working directory being on sys.path.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+    script = Path(__file__).resolve().parents[1] / "research" / "benchmark_three_tori.py"
+    run = subprocess.run(
+        [sys.executable, "-I", str(script), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert run.returncode == 0, run.stdout + "\n" + run.stderr
+    assert "--geometry" in run.stdout
