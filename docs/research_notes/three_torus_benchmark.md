@@ -63,7 +63,9 @@ This is a stochastic approximation, not a full 18/24-site finite-T
 spectral trace.
 
 ED Green: truncated-sector grand-canonical thermal Lanczos, with
---ed-sector-padding, --ed-thermal-eigs and --ed-krylov-steps.
+--ed-sector-padding, --ed-thermal-eigs and --ed-krylov-steps. Use
+--ed-green-symmetry momentum for true N+/-1 translation-block Krylov,
+or the default legacy mode for the former full-sector algorithm.
 Inspect thermal_kept_weight, sector_edge_weight, translation_residual,
 and Krylov diagnostics in summary.json before trusting ED as a reference.
 The 2x2 case can be costly and is protected by --ed-max-dim.
@@ -103,12 +105,21 @@ SAME physical external channels from --channels.
 * density: original site-density matrix, with V on exactly six
   intra-triangle bonds per primitive cell. This is the historical
   production lattice-GW/cGW/post-GW reference.
-* pseudospin: the selected E-doublet projector on each elementary
-  triangle with physical x,y,z Pauli components and g_E=-V/3. The
-  Hartree-Fock static map remains the exact original density V map.
-  Only dynamic GW screening/correlation is projected to E components.
-  This is NOT an exact full-orbital Fierz decomposition; discrepancies
-  with ED contain both diagram and E-channel truncation errors.
+* pseudospin: the **exact** A1+E unitary triangle rewriting. The
+  E-doublet Pauli components x,y,z have g_E=-V/3, while n_A1 and
+  n_E=n_++n_- remain as auxiliary density channels with
+  g_(A1,E)=g_(E,A1)=V. The full operator identity is
+
+      V sum_{i<j} n_i*n_j = -(V/6)(sigma_x^2+sigma_y^2+sigma_z^2)
+                              + V*n_A1*n_E + (V/2)*n_E.
+
+  The last term is the single-particle normal-ordering shift of the
+  operator-square representation. The code retains the physically exact
+  original-V first-order Hartree-Fock map and does not add this shift
+  a second time. All A1/E residual bosonic screening channels are
+  included; this is no longer the earlier E-only truncation.
+  Exact bare-channel equivalence does NOT guarantee Fierz-invariant
+  approximate GW screening at higher order.
 * bj: for each physical interacting bond define B_ij=c_i^dag c_j+
   c_j^dag c_i and J_ij=i(c_i^dag c_j-c_j^dag c_i). The symmetric
   Fierz representation uses g_B=g_J=-V/2, retaining the full
@@ -139,16 +150,26 @@ implicitly converted to the alternative E/BJ bosonic Hamiltonian.
 
 ## Finite-temperature ED symmetry scope
 
-The current finite-T ED implementation uses fixed particle-number
-sectors, sparse Lanczos/Krylov propagation, stochastic trace states, and
-the primitive translation of Green-function columns to reduce the
-number of source operators. It **does not** block-diagonalize the
-many-body ED Hamiltonian by total momentum or point-group irrep.
-The available ED18 translation operator is used for diagnostics
-(ground-state momentum), not a symmetry-adapted sector solver.
-Full many-body momentum/point-group block methods are a separate
-potential acceleration and would require consistent one-body operator
-selection rules in Green and susceptibility computations.
+The default --ed-symmetry momentum now exactly block-diagonalizes
+the fixed-N ED Hamiltonian by primitive many-body translation momentum
+on 3x1, 2x2, and skew hex18 PBC. Its finite-temperature canonical
+stochastic trace is evaluated separately within each momentum sector;
+the pseudospin operator O(Q) connects sectors K to K-Q, with proper
+fermionic translation signs and full normalization. The solver
+constructs small sparse H_K matrices, not a projected full-Hilbert
+Hamiltonian matvec each iteration. --ed-symmetry legacy restores the
+older unblocked canonical thermal Krylov solver.
+
+The finite-temperature ED Green is also available with a dedicated
+--ed-green-symmetry momentum option: it uses selected low-lying N,K
+states, and particle addition/removal resolvents in the corresponding
+N+/-1 momentum sectors. This path returns only the user-selected
+G(K,iw) 6x6 matrix; --ed-green-symmetry legacy (currently the
+default while further low-T benchmarking continues) retains the
+former full-sector thermal Lanczos implementation. Both Green
+variants still truncate low thermal states and Lanczos depth and
+require convergence checks. Neither uses point-group irreducible
+representations yet.
 
 ## Outputs
 
