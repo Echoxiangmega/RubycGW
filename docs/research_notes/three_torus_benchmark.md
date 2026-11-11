@@ -225,6 +225,69 @@ translation_reduced status, number of solved source vertices,
 Krylov fallbacks, transfer_wall_seconds and phase_seconds split into
 covariant, screening, self-energy and Dyson stages.
 
+
+## Large-V GW convergence and ED checkpointing
+
+The original benchmark directly started each Fierz GW solver from zero
+self-energy at the requested V (150 Pulay iterations and mixing 0.22 by
+default). At V=5 a nonzero final residual such as 1.708e-3 **does not**
+satisfy the default tolerance 1e-7. Do not run cGW/post-GW or compare
+its energy as a converged solution by adding --allow-unconverged.
+
+Use a damped direct GW diagnostic without repeating ED:
+
+    python research/benchmark_three_tori.py --geometry hex18 --V 5 \
+      --filling 2 --K 0.333333333333 0.333333333333 \
+      --Q 0.333333333333 0.333333333333 --T 0.125 \
+      --methods gw --gw-channels density --gw-mixing 0.05 \
+      --gw-max-iter 600 --verbose --out results/hex18_gw_debug
+
+To systematically approach strong coupling, set --gw-ramp-steps 10.
+This starts from a converged V=0 state, advances through intermediate
+interactions, uses the previous solution's static/dynamic self-energy
+and chemical potential as a warm start, but always rebuilds P and W
+at the *new* V. A failed ramp step retries with half the mixing and
+then bisects the step. --gw-ramp-min-step 0.02 and
+--gw-ramp-max-stages 100 limit this process. You can also select
+--gw-mixing-method linear for more conservative damping.
+
+    python research/benchmark_three_tori.py --geometry hex18 --V 5 \
+      --filling 2 --K 0.333333333333 0.333333333333 \
+      --Q 0.333333333333 0.333333333333 --T 0.125 \
+      --gw-channels density --gw-ramp-steps 12 \
+      --gw-ramp-min-step 0.01 --gw-max-iter 400 \
+      --gw-mixing 0.08 --verbose --post-mmax 0 \
+      --skip-cluster-chi --out results/hex18_V5
+
+A ramp **does not guarantee convergence** beyond a screening
+instability or within an artificially constrained translation-symmetric
+phase. Every attempt records V, actual residual, mixing, time, and
+minimum singular value of I-gP. If the target is not reached, the
+program stops and writes gw_failure_<mode>.json with the *last
+converged* lower V. It does not silently use that lower-V G as the
+requested target. With --skip-failed-gw-channel it safely proceeds
+to other interaction decompositions, leaving the failed mode
+explicitly absent from cGW/post-GW.
+
+To avoid losing ED work after a GW failure, the script writes
+out/ed_reference.npz **immediately after successful ED E0, canonical
+thermal susceptibility and selected-K Green calculations**, before
+starting GW. A rerun to the same --out path with identical ED
+parameters automatically reloads this checkpoint. GW mixing, ramp
+parameters, cGW settings and which GW channels are requested are not
+part of the ED cache signature; changing geometry, V, filling,
+temperature, orbital momenta, ED truncation or RNG seed invalidates it.
+--refresh-ed-cache forces a recalculation, and --no-ed-cache disables
+it. This does not cache GW continuation states across *processes*:
+only within one ramp run are intermediate GW results reused.
+
+The fixed-point symmetry assumption still matters: a symmetric
+continuation from V=0 can reach an unstable symmetric branch or fail
+at an interaction-driven finite-Q transition. If the screening
+smin becomes small, compare symmetry-broken supercell solutions or
+use targeted finite-Q source fields; changing damping alone is not a
+physical remedy.
+
 ## Outputs
 
 - comparison.csv: method, observable, value, ED reference, relative
