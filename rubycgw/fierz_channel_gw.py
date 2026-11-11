@@ -110,9 +110,12 @@ def build_channel_definition(
         "bj": "bj",
         "b+j": "bj",
         "symmetric": "bj",
+        "pseudospin": "pseudospin",
+        "e": "pseudospin",
+        "e_only": "pseudospin",
     }
     if mode_key not in aliases:
-        raise ValueError("mode must be one of density, B, J, BJ")
+        raise ValueError("mode must be one of density, pseudospin, B, J, BJ")
     mode_key = aliases[mode_key]
     pairs = tuple((int(i), int(j)) for i, j in interaction_pairs)
     nsite = int(nsite)
@@ -128,6 +131,33 @@ def build_channel_definition(
             g[j, i] += V
         labels = tuple(f"n{i}" for i in range(nsite))
         return ChannelDefinition("density", K, g, labels, pairs)
+
+    if mode_key == "pseudospin":
+        # E-doublet projected triangle Pauli form factors (six per cell).
+        # This is a selected-channel approximation to the dynamical GW
+        # screening, not an exact operator identity for full six-band V.
+        # Keep the physical density-density Hartree-Fock map exactly below.
+        if nsite % 6:
+            raise ValueError("E pseudospin channel requires complete six-site Ruby cells")
+        from .pseudospin import primitive_triangle_pseudospin_vertices
+        physical = primitive_triangle_pseudospin_vertices()
+        K_list = []
+        labels = []
+        Pe = np.eye(3, dtype=complex) - np.ones((3, 3), dtype=complex) / 3.0
+        for c in range(nsite // 6):
+            for kind, indices in (("A", slice(0, 3)), ("B", slice(3, 6))):
+                for comp in ("x", "y", "z"):
+                    local = physical[f"{kind}{comp}"][indices, indices]
+                    form = Pe @ local @ Pe
+                    mat = np.zeros((nsite, nsite), dtype=complex)
+                    sl = slice(6*c + indices.start, 6*c + indices.stop)
+                    mat[sl, sl] = 0.5 * (form + form.conj().T)
+                    K_list.append(mat)
+                    labels.append(f"E{c}_{kind}_{comp}")
+        # Selected low-energy E pseudospin scheme used in earlier Ruby tests.
+        # Do not present it as an exact full-Hilbert-space Fierz identity.
+        g = np.eye(len(K_list), dtype=complex) * (-V / 3.0)
+        return ChannelDefinition("pseudospin", np.asarray(K_list), g, tuple(labels), pairs)
 
     vertices = []
     labels = []
@@ -153,22 +183,51 @@ def build_channel_definition(
     return ChannelDefinition(mode_key, K, g, tuple(labels), pairs)
 
 
+def channel_static_parts(
+    rho: np.ndarray,
+    definition: ChannelDefinition,
+    *,
+    symmetrize: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Static first-order tadpole/exchange, exact for all three benchmark modes.
+
+    Density and BJ are algebraically exact Fierz representations; the E-only
+    pseudospin selection is applied exclusively to the *dynamic* W-g part.
+    Its static H/F contribution is reconstructed from the six physical
+    triangle-V bonds, avoiding an unphysical O(V) offset.
+    For finite transfer derivatives, use symmetrize=False.
+    """
+    rho = np.asarray(rho, dtype=complex)
+    if definition.mode == "pseudospin":
+        n = rho.shape[0]
+        tad = np.zeros_like(rho)
+        exchange = np.zeros_like(rho)
+        V = -3.0 * float(np.real(definition.coupling[0, 0]))
+        for i, j in definition.interaction_pairs:
+            tad[i, i] += V * rho[j, j]
+            tad[j, j] += V * rho[i, i]
+            exchange[i, j] -= V * rho[i, j]
+            exchange[j, i] -= V * rho[j, i]
+    else:
+        K = np.asarray(definition.vertices, dtype=complex)
+        g = np.asarray(definition.coupling, dtype=complex)
+        obs = np.einsum("aij,ji->a", K, rho, optimize=True)
+        tad = np.einsum("aij,ab,b->ij", K, g, obs, optimize=True)
+        exchange = -np.einsum(
+            "ba,aik,kl,blj->ij", g, K, rho, K, optimize=True
+        )
+    if symmetrize:
+        tad = 0.5 * (tad + tad.conj().T)
+        exchange = 0.5 * (exchange + exchange.conj().T)
+    return tad + exchange, tad, exchange
+
+
 def channel_static_self_energy(
     rho: np.ndarray,
     definition: ChannelDefinition,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Exact first-order tadpole+exchange for the chosen bilinear representation."""
-    rho = np.asarray(rho, dtype=complex)
-    K = np.asarray(definition.vertices, dtype=complex)
-    g = np.asarray(definition.coupling, dtype=complex)
-    obs = np.einsum("aij,ji->a", K, rho, optimize=True)
-    tad = np.einsum("aij,ab,b->ij", K, g, obs, optimize=True)
-    exchange = -np.einsum(
-        "ba,aik,kl,blj->ij", g, K, rho, K, optimize=True
-    )
-    tad = 0.5 * (tad + tad.conj().T)
-    exchange = 0.5 * (exchange + exchange.conj().T)
-    return tad + exchange, tad, exchange
+    """Return the exact physical static HF map for the selected channel."""
+    return channel_static_parts(rho, definition, symmetrize=True)
 
 
 def _pair_polarization(
@@ -395,17 +454,7 @@ def channel_vertex_kernel_parts(
     g = np.asarray(definition.coupling, dtype=complex)
 
     drho = float(grid.T) * np.sum(X0, axis=0)
-    dobs = np.einsum("aij,ji->a", K, drho, optimize=True)
-    d_tad = np.einsum("aij,ab,b->ij", K, g, dobs, optimize=True)
-    d_ex = -np.einsum(
-        "ba,aik,kl,blj->ij", g, K, drho, K, optimize=True
-    )
-    d_static = d_tad + d_ex
-    # The background map explicitly Hermitian-symmetrizes its static
-    # tadpole/exchange matrices. Differentiate that numerical map itself, rather
-    # than its unsymmetrized algebraic precursor, so the analytic cGW kernel is
-    # exactly the tangent of the fixed-point equations used above.
-    d_static = 0.5 * (d_static + d_static.conj().T)
+    d_static, _, _ = channel_static_parts(drho, definition, symmetrize=True)
     gamma_static = np.broadcast_to(
         d_static[None, None, None], np.asarray(Gamma).shape
     ).copy()
@@ -518,6 +567,7 @@ __all__ = [
     "ChannelVertexResult",
     "build_channel_definition",
     "channel_static_self_energy",
+    "channel_static_parts",
     "compute_channel_polarization",
     "compute_channel_screened_interaction",
     "compute_channel_correlation_self_energy",
