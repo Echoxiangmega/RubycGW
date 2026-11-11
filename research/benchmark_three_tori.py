@@ -462,8 +462,9 @@ def main():
             info["diagnostics"][label_gw]=dict(
                 converged=scheme.converged,residual=scheme.final_error,
                 mu=scheme.mu,n_bosonic_channels=len(definition.labels),
-                selected_E_only=(mode=="pseudospin"),
-                exact_Fierz_identity=(mode!="pseudospin"),
+                exact_triangle_A1E=(mode=="pseudospin"),
+                residual_A1E_density_retained=(mode=="pseudospin"),
+                exact_Fierz_identity=True,
                 screening_smin=scheme.min_screening_singular_value
             )
             if not scheme.converged and not a.allow_unconverged:
