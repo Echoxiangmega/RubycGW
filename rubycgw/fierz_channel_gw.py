@@ -133,31 +133,49 @@ def build_channel_definition(
         return ChannelDefinition("density", K, g, labels, pairs)
 
     if mode_key == "pseudospin":
-        # E-doublet projected triangle Pauli form factors (six per cell).
-        # This is a selected-channel approximation to the dynamical GW
-        # screening, not an exact operator identity for full six-band V.
-        # Keep the physical density-density Hartree-Fock map exactly below.
+        # Exact three-orbital identity (no E-only truncation):
+        #   V*(n0*n1+n1*n2+n2*n0)
+        #     = -(V/6)*(Sx**2+Sy**2+Sz**2)
+        #       + V*n_A1*n_E + (V/2)*n_E.
+        # Here d_A1, d_+, d_- are the unitary triangle Fourier orbitals,
+        # S are Pauli bilinears in the E doublet, and n_E=n_++n_-.
+        # Thus g_S=-V/3, g_A1,E=g_E,A1=V in 1/2 O^T g O.
+        # The linear shift +(V/2)n_E belongs to the operator-square
+        # identity. In the GW numerical skeleton the exact original-V
+        # Hartree-Fock map is retained explicitly (see channel_static_parts)
+        # and consequently this shift must NOT be added to h0 again.
+        # The complete (Sx,Sy,Sz,n_A1,n_E) bosonic set is retained:
+        # this is an exact bare interaction rewriting, not E-only projection.
         if nsite % 6:
-            raise ValueError("E pseudospin channel requires complete six-site Ruby cells")
-        from .pseudospin import primitive_triangle_pseudospin_vertices
-        physical = primitive_triangle_pseudospin_vertices()
-        K_list = []
+            raise ValueError("exact triangle pseudospin requires complete six-site Ruby cells")
+        omega = np.exp(2j*np.pi/3.0)
+        a1 = np.ones(3, dtype=complex) / np.sqrt(3.0)
+        eplus = np.array([1.0, omega, omega**2]) / np.sqrt(3.0)
+        eminus = np.array([1.0, omega**2, omega]) / np.sqrt(3.0)
+        cross = np.outer(eplus, eminus.conj())
+        sx = cross + cross.conj().T
+        sy = -1j*(cross-cross.conj().T)
+        sz = np.outer(eplus, eplus.conj()) - np.outer(eminus, eminus.conj())
+        na = np.outer(a1, a1.conj())
+        ne = np.eye(3, dtype=complex)-na
+        vertices = []
         labels = []
-        Pe = np.eye(3, dtype=complex) - np.ones((3, 3), dtype=complex) / 3.0
-        for c in range(nsite // 6):
-            for kind, indices in (("A", slice(0, 3)), ("B", slice(3, 6))):
-                for comp in ("x", "y", "z"):
-                    local = physical[f"{kind}{comp}"][indices, indices]
-                    form = Pe @ local @ Pe
-                    mat = np.zeros((nsite, nsite), dtype=complex)
-                    sl = slice(6*c + indices.start, 6*c + indices.stop)
-                    mat[sl, sl] = 0.5 * (form + form.conj().T)
-                    K_list.append(mat)
-                    labels.append(f"E{c}_{kind}_{comp}")
-        # Selected low-energy E pseudospin scheme used in earlier Ruby tests.
-        # Do not present it as an exact full-Hilbert-space Fierz identity.
-        g = np.eye(len(K_list), dtype=complex) * (-V / 3.0)
-        return ChannelDefinition("pseudospin", np.asarray(K_list), g, tuple(labels), pairs)
+        g = np.zeros((5*(nsite//3),5*(nsite//3)), dtype=complex)
+        for tri in range(nsite//3):
+            cell, kind = divmod(tri, 2)
+            sign = 1.0 if kind == 0 else -1.0
+            local = (sx, sign*sy, sign*sz, na, ne)
+            names = ("x","y","z","n_A1","n_E")
+            sl = slice(3*tri,3*(tri+1))
+            for mu,(mat,name) in enumerate(zip(local,names)):
+                full = np.zeros((nsite,nsite),dtype=complex)
+                full[sl,sl]=0.5*(mat+mat.conj().T)
+                vertices.append(full)
+                labels.append(f"E{cell}_{'A' if kind==0 else 'B'}_{name}")
+            a=5*tri
+            g[a:a+3,a:a+3]=(-V/3.0)*np.eye(3)
+            g[a+3,a+4]=g[a+4,a+3]=V
+        return ChannelDefinition("pseudospin",np.asarray(vertices),g,tuple(labels),pairs)
 
     vertices = []
     labels = []
