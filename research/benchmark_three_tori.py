@@ -111,7 +111,12 @@ def parse_args():
     p.add_argument("--vertex-max-iter",type=int,default=120)
     p.add_argument("--vertex-tol",type=float,default=2e-7)
     p.add_argument("--vertex-restart",type=int,default=12)
-    p.add_argument("--post-mmax",type=int,default=None)
+    p.add_argument("--post-mmax",type=int,default=None,
+                   help="only explicitly solve bosonic |m|<=M; 0 keeps GW W at all nonzero frequencies")
+    p.add_argument("--post-no-translation",action="store_true",
+                   help="disable translationally reduced source solve (reference/diagnostic)")
+    p.add_argument("--post-no-recycle",action="store_true",
+                   help="disable real-linear Krylov recycling; use legacy GMRES per source")
     p.add_argument("--nbath",type=int,default=6)
     p.add_argument("--cluster-max-iter",type=int,default=50)
     p.add_argument("--cluster-tol",type=float,default=3e-5)
@@ -527,6 +532,9 @@ def main():
                     one_shot_post_interaction_channel(
                         scheme,definition,geom.h0,grid,total,vertex_opts,
                         m_max=a.post_mmax,allow_unconverged=a.allow_unconverged,
+                        geometry=geom,
+                        optimize_translation=not a.post_no_translation,
+                        recycle_krylov=not a.post_no_recycle,
                         mu_tol=opts_gw.mu_tol,mu_max_iter=opts_gw.mu_max_iter
                     ))
                 if post is not None:
@@ -536,7 +544,13 @@ def main():
                     info["diagnostics"][label_post]=dict(
                         mu=post.mu,window_mmax=a.post_mmax,
                         fallback_fraction=post.fallback_fraction,
-                        screening_identity_error=post.screening_identity_error
+                        screening_identity_error=post.screening_identity_error,
+                        translation_reduced=bool(post.translation_reduced),
+                        source_vertices_solved=int(post.source_vertices_solved),
+                        recycled_fallbacks=int(post.recycled_fallbacks),
+                        post_solver="recycled" if not a.post_no_recycle else "gmres",
+                        phase_seconds=post.phase_seconds,
+                        transfer_wall_seconds=post.transfer_wall_seconds,
                     )
                     row(label_post,"chi",None,status="not_requested",
                         notes="post-GW compared in G only")

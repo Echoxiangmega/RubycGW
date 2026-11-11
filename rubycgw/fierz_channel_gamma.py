@@ -20,6 +20,8 @@ Sigma_c = -K G K (W_Gamma-g).  It is not a full Hedin GWGamma closure.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import ceil
+from time import perf_counter
 
 import numpy as np
 
@@ -40,7 +42,7 @@ from .hedin_gamma_fast import (
     _mixed_feedback,
     _dyson_fixed_filling,
 )
-from .response_tail import build_tail_reference, reference_tail_remainder
+from .response_tail import build_tail_reference, reference_tail_remainder, TailReference
 from .supercell_cgw import SupercellVertexOptions, _gmres_matrix_free
 from .supercell_gw_split import one_body_density_matrix_tail
 from .transfer_cgw import (
@@ -72,6 +74,51 @@ class CovariantChannelResult:
     transfer_max_error: np.ndarray
     solved_explicitly: np.ndarray
     m_max: int | None
+    translation_reduced: bool = False
+    source_vertices_solved: int = 0
+    recycled_fallbacks: int = 0
+    transfer_wall_seconds: np.ndarray | None = None
+
+
+@dataclass
+class ChannelTransferWorkspace:
+    """Frequency-specific expensive data shared by all source vertices.
+
+    The screened-interaction lookup outside the stored frequency box and
+    the reference-tail eigensystem depend on the external frequency and the
+    fixed GW state, *not* on which bare channel operator is differentiated.
+    """
+    m_ext: int
+    w_lookup: dict[int, np.ndarray]
+    w_correlation: np.ndarray
+    tail_reference: TailReference
+
+
+def build_channel_transfer_workspace(
+    background: ChannelGWResult,
+    definition: ChannelDefinition,
+    h0: np.ndarray,
+    grid: MatsubaraGrid,
+    m_ext: int,
+) -> ChannelTransferWorkspace:
+    """Precompute transfer screening and H/F reference once per bosonic m."""
+    W = np.asarray(background.W, dtype=complex)
+    static = np.asarray(h0, dtype=complex) + np.asarray(
+        background.Sigma_static, dtype=complex
+    )[None, None]
+    norb = int(background.G.shape[-1])
+    ref = build_tail_reference(
+        static, float(background.mu), np.zeros((norb, norb), dtype=complex),
+        grid,
+    )
+    return ChannelTransferWorkspace(
+        m_ext=int(m_ext),
+        w_lookup=_build_channel_w_lookup(
+            background.G, W, definition, int(m_ext), grid
+        ),
+        w_correlation=W - np.asarray(definition.coupling)[None, :, :],
+        tail_reference=ref,
+    )
 
 
 @dataclass
@@ -159,16 +206,19 @@ def _completed_drho_from_x(
     grid: MatsubaraGrid,
     *,
     edge_points: int,
+    tail_reference: TailReference | None = None,
 ) -> np.ndarray:
     """Tail-completed ``T sum_n X_n`` for the folded torus."""
     raw = float(grid.T) * np.sum(np.asarray(X, dtype=complex)[:, 0, 0], axis=0)
     norb = int(X.shape[-1])
-    ref = build_tail_reference(
-        np.asarray(h_static_ref, dtype=complex),
-        float(mu),
-        np.zeros((norb, norb), dtype=complex),
-        grid,
-    )
+    ref = tail_reference
+    if ref is None:
+        ref = build_tail_reference(
+            np.asarray(h_static_ref, dtype=complex),
+            float(mu),
+            np.zeros((norb, norb), dtype=complex),
+            grid,
+        )
     S = estimate_transfer_static_vertex(Gamma, int(m_ext), grid, edge_points=edge_points)
     corr = reference_tail_remainder(ref, S, grid, q_index=(0, 0), m_ext=int(m_ext))
     return raw + np.asarray(corr[0, 0], dtype=complex)
@@ -185,11 +235,13 @@ def _static_vertex_from_x(
     opts: SupercellVertexOptions,
     *,
     edge_points: int,
+    tail_reference: TailReference | None = None,
 ) -> np.ndarray:
     if not opts.include_hartree and not opts.include_fock:
         return np.zeros_like(Gamma)
     drho = _completed_drho_from_x(
-        X, Gamma, h_static_ref, mu, m_ext, grid, edge_points=edge_points
+        X, Gamma, h_static_ref, mu, m_ext, grid,
+        edge_points=edge_points, tail_reference=tail_reference,
     )
     _, d_tad, d_ex = channel_static_parts(drho, definition, symmetrize=False)
     d_static = np.zeros_like(d_tad)
@@ -214,12 +266,20 @@ def _dynamic_vertex_parts(
     m_ext: int,
     grid: MatsubaraGrid,
     opts: SupercellVertexOptions,
+    w_lookup: dict[int, np.ndarray] | None = None,
+    w_correlation: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     G0 = np.asarray(G, dtype=complex)[:, 0, 0]
     X0 = np.asarray(X, dtype=complex)[:, 0, 0]
     g = np.asarray(definition.coupling, dtype=complex)
-    Wc = np.asarray(W, dtype=complex) - g[None, ...]
-    lookup = _build_channel_w_lookup(G, W, definition, m_ext, grid)
+    Wc = (
+        np.asarray(W, dtype=complex) - g[None, ...]
+        if w_correlation is None else w_correlation
+    )
+    lookup = (
+        _build_channel_w_lookup(G, W, definition, m_ext, grid)
+        if w_lookup is None else w_lookup
+    )
     K = np.asarray(definition.vertices, dtype=complex)
 
     gmt0 = np.zeros_like(G0)
@@ -271,6 +331,8 @@ def solve_channel_vertex_transfer(
     opts: SupercellVertexOptions = SupercellVertexOptions(),
     initial_gamma: np.ndarray | None = None,
     tail_edge_points: int = 2,
+    workspace: ChannelTransferWorkspace | None = None,
+    recycle_space: dict | None = None,
 ) -> ChannelTransferVertexResult:
     """Solve the finite-Matsubara-transfer covariant channel vertex at q=0."""
     _require_same_torus(grid)
@@ -292,6 +354,8 @@ def solve_channel_vertex_transfer(
     else:
         gamma0 = _mask_transfer(np.asarray(initial_gamma, dtype=complex), m_ext, grid)
     h_static_ref = h0 + np.asarray(background.Sigma_static, dtype=complex)[None, None]
+    if workspace is not None and workspace.m_ext != m_ext:
+        raise ValueError("transfer workspace belongs to a different bosonic frequency")
 
     def parts(field):
         field = _mask_transfer(np.asarray(field, dtype=complex), m_ext, grid)
@@ -306,9 +370,12 @@ def solve_channel_vertex_transfer(
             grid,
             opts,
             edge_points=int(tail_edge_points),
+            tail_reference=None if workspace is None else workspace.tail_reference,
         )
         gm, ga1, ga2 = _dynamic_vertex_parts(
-            G, W, definition, X, m_ext, grid, opts
+            G, W, definition, X, m_ext, grid, opts,
+            w_lookup=None if workspace is None else workspace.w_lookup,
+            w_correlation=None if workspace is None else workspace.w_correlation,
         )
         return gs, gm, ga1, ga2
 
@@ -322,15 +389,74 @@ def solve_channel_vertex_transfer(
 
     if str(opts.solver).strip().lower() != "gmres":
         raise ValueError("finite-transfer Fierz channel vertex currently requires solver='gmres'")
-    Gamma, conv, nit, err = _gmres_matrix_free(
-        apply_A,
-        rhs,
-        gamma0,
-        float(opts.tol),
-        int(opts.max_iter),
-        int(opts.gmres_restart),
-        bool(opts.verbose),
-    )
+    if recycle_space is None:
+        Gamma, conv, nit, err = _gmres_matrix_free(
+            apply_A, rhs, gamma0, float(opts.tol), int(opts.max_iter),
+            int(opts.gmres_restart), bool(opts.verbose),
+        )
+    else:
+        # GCROT(m,k) reuses a *bounded* Krylov subspace across right-hand
+        # sources of this same transfer.  The m=0 static HF map contains
+        # a Hermitian projection and is real-linear rather than complex-
+        # linear; realifying the operator is necessary for correctness.
+        from scipy.sparse.linalg import LinearOperator, gcrotmk
+
+        n = rhs.size
+        shape = rhs.shape
+
+        def flatten_real(x):
+            x = np.asarray(x, dtype=complex).ravel()
+            return np.concatenate((x.real, x.imag))
+
+        def unflatten_real(x):
+            x = np.asarray(x, dtype=float)
+            return (x[:n] + 1j * x[n:]).reshape(shape)
+
+        if "A" not in recycle_space:
+            def matvec_real(x):
+                y = apply_A(unflatten_real(x))
+                return flatten_real(y)
+            recycle_space["A"] = LinearOperator(
+                (2*n, 2*n), matvec=matvec_real, dtype=float
+            )
+            recycle_space["CU"] = []
+        counter = [0]
+        def progress(_):
+            counter[0] += 1
+        restart = max(2, int(opts.gmres_restart))
+        max_cycles = max(2, ceil(int(opts.max_iter) / restart))
+        bvec = flatten_real(rhs)
+        x0vec = flatten_real(gamma0)
+        reltol = min(
+            1e-6, float(opts.tol) / max(float(np.linalg.norm(bvec)), 1e-30)
+        )
+        try:
+            out, info = gcrotmk(
+                recycle_space["A"], bvec, x0=x0vec, rtol=reltol,
+                atol=0.0, m=restart, k=min(4, restart),
+                CU=recycle_space["CU"], maxiter=max_cycles,
+                callback=progress,
+            )
+            Gamma = unflatten_real(out)
+            conv = int(info) == 0
+            err = float(np.max(np.abs(rhs - apply_A(Gamma))))
+            nit = int(counter[0])
+            # A reliable fallback is vital near screening singularities;
+            # do not change the production physical residual criterion.
+            if not conv or not np.isfinite(err) or err >= float(opts.tol):
+                recycle_space["fallbacks"] = recycle_space.get("fallbacks", 0) + 1
+                Gamma, conv, nit_legacy, err = _gmres_matrix_free(
+                    apply_A, rhs, Gamma, float(opts.tol),
+                    int(opts.max_iter), int(opts.gmres_restart),
+                    bool(opts.verbose),
+                )
+                nit += int(nit_legacy)
+        except (ValueError, np.linalg.LinAlgError, FloatingPointError):
+            recycle_space["fallbacks"] = recycle_space.get("fallbacks", 0) + 1
+            Gamma, conv, nit, err = _gmres_matrix_free(
+                apply_A, rhs, gamma0, float(opts.tol), int(opts.max_iter),
+                int(opts.gmres_restart), bool(opts.verbose),
+            )
     Gamma = _mask_transfer(Gamma, m_ext, grid)
     gs, gm, ga1, ga2 = parts(Gamma)
     residual = rhs + gs + gm + ga1 + ga2 - Gamma
@@ -349,6 +475,80 @@ def solve_channel_vertex_transfer(
     )
 
 
+def _translation_response_map(background, definition, geometry, tol=1e-8):
+    """Check exact primitive translation symmetry and return sector subtraction.
+
+    If a charge/current-ordered GW state has lost this symmetry, return None
+    and solve all sources rather than silently imposing a symmetric response.
+    The first-cell channel block must be repeated in the same within-cell
+    order throughout the bosonic vertices.
+    """
+    if geometry is None:
+        return None
+    ncell = int(geometry.ncell)
+    nsite = int(geometry.nsites)
+    nch = len(definition.labels)
+    if ncell < 2 or nsite != ncell*6 or nch % ncell:
+        return None
+    p = nch//ncell
+    cells = np.asarray(geometry.cells, dtype=int)
+    if len(cells) != ncell:
+        return None
+
+    if geometry.name == "hex18":
+        from .supercell import primitive_cell_to_supercell
+        def cid(R):
+            return int(primitive_cell_to_supercell(R)[0])
+    else:
+        L1, L2 = (3, 1) if geometry.name == "3x1" else (2, 2)
+        if geometry.name not in ("3x1", "2x2"):
+            return None
+        cmap = {tuple(map(int, R)): i for i, R in enumerate(cells)}
+        def cid(R):
+            return int(cmap[(int(R[0]) % L1, int(R[1]) % L2)])
+
+    G = np.asarray(background.G, dtype=complex)[:, 0, 0]
+    W = np.asarray(background.W, dtype=complex)
+    vertices = np.asarray(definition.vertices, dtype=complex)
+    g = np.asarray(definition.coupling, dtype=complex)
+    scaleG = max(float(np.max(np.abs(G))), 1.0)
+    scaleW = max(float(np.max(np.abs(W))), 1.0)
+
+    for cs in range(1, ncell):
+        permc = np.asarray([cid(R + cells[cs]) for R in cells], dtype=int)
+        perm = np.asarray([6*permc[c]+a for c in range(ncell) for a in range(6)])
+        perm_ch = np.asarray([p*permc[c]+a for c in range(ncell) for a in range(p)])
+        if np.max(np.abs(G[:, perm, :][:, :, perm] - G)) > tol*scaleG:
+            return None
+        if np.max(np.abs(W[:, perm_ch, :][:, :, perm_ch] - W)) > tol*scaleW:
+            return None
+        if np.max(np.abs(g[np.ix_(perm_ch, perm_ch)] - g)) > tol:
+            return None
+        for a in range(p):
+            if np.max(np.abs(vertices[p*cs+a][np.ix_(perm, perm)]
+                             - vertices[a])) > tol:
+                return None
+    return (p, cid, cells)
+
+
+def _expand_translation_columns(columns, geometry, translation):
+    """Reconstruct all channel-source columns from one reference-cell block."""
+    p, cid, cells = translation
+    nc = int(geometry.ncell)
+    cols = np.asarray(columns, dtype=complex)
+    if cols.shape != (p*nc, p):
+        raise ValueError("reduced response shape mismatch")
+    full = np.empty((p*nc, p*nc), dtype=complex)
+    for source_cell in range(nc):
+        for response_cell in range(nc):
+            relative = cid(cells[response_cell] - cells[source_cell])
+            full[
+                p*response_cell:p*(response_cell+1),
+                p*source_cell:p*(source_cell+1)
+            ] = cols[p*relative:p*(relative+1), :]
+    return full
+
+
 def compute_covariant_channel_susceptibility(
     background: ChannelGWResult,
     definition: ChannelDefinition,
@@ -360,8 +560,18 @@ def compute_covariant_channel_susceptibility(
     allow_unconverged: bool = False,
     initial_gamma_cache: dict[tuple[int, int], np.ndarray] | None = None,
     tail_edge_points: int = 2,
+    geometry=None,
+    optimize_translation: bool = False,
+    recycle_krylov: bool = False,
 ) -> tuple[CovariantChannelResult, dict[tuple[int, int], np.ndarray]]:
-    """Return the full reducible covariant response matrix in n/B/J space."""
+    """Return the full dynamic covariant n/B/J response.
+
+    If the GW solution preserves primitive translation and geometry is
+    supplied, solve only the first-cell sources and reconstruct all other
+    columns by lattice translations. Otherwise retain the exact all-source
+    legacy route. Optional bounded GCROT Krylov recycling shares subspace
+    between different first-cell sources at each fixed bosonic frequency.
+    """
     _require_same_torus(grid)
     K = np.asarray(definition.vertices, dtype=complex)
     nch = len(definition.labels)
@@ -372,8 +582,16 @@ def compute_covariant_channel_susceptibility(
     max_error = np.full(grid.nb, np.nan)
     explicit = np.zeros(grid.nb, dtype=bool)
     cache = {} if initial_gamma_cache is None else dict(initial_gamma_cache)
-    adjacent: list[np.ndarray | None] = [None] * nch
+    translation = (
+        _translation_response_map(background, definition, geometry)
+        if optimize_translation else None
+    )
+    nsource = nch if translation is None else translation[0]
+    adjacent: list[np.ndarray | None] = [None] * nsource
     h_static_ref = np.asarray(h0, dtype=complex) + np.asarray(background.Sigma_static)[None, None]
+    solved_count = 0
+    recycled_fallbacks = 0
+    transfer_wall_seconds = np.zeros(grid.nb, dtype=float)
 
     m_to_i = {int(m): i for i, m in enumerate(grid.m_values)}
     for im, m_raw in enumerate(grid.m_values):
@@ -382,10 +600,17 @@ def compute_covariant_channel_susceptibility(
             continue
         if m_max is not None and abs(m) > int(m_max):
             continue
+        tm_start = perf_counter()
         gammas = []
         errs = []
         oks = []
-        for b in range(nch):
+        # Static-tail eigensystems and out-of-box W screening must not be
+        # rebuilt during every GMRES matvec or for every bare source.
+        workspace = build_channel_transfer_workspace(
+            background, definition, h0, grid, m
+        )
+        recycled = {} if recycle_krylov else None
+        for b in range(nsource):
             key = (m, b)
             seed = cache.get(key)
             if seed is None or np.asarray(seed).shape != background.G.shape:
@@ -400,7 +625,10 @@ def compute_covariant_channel_susceptibility(
                 opts=vertex_opts,
                 initial_gamma=seed,
                 tail_edge_points=tail_edge_points,
+                workspace=workspace,
+                recycle_space=recycled,
             )
+            solved_count += 1
             cache[key] = vr.Gamma
             adjacent[b] = vr.Gamma
             gammas.append(vr.Gamma)
@@ -423,12 +651,26 @@ def compute_covariant_channel_susceptibility(
             background.mu,
             edge_points=int(tail_edge_points),
         )
-        raw[im] = resp["raw"]
-        completed[im] = resp["completed"]
-        tail[im] = resp["tail_correction"]
+        if translation is None:
+            raw[im] = resp["raw"]
+            completed[im] = resp["completed"]
+            tail[im] = resp["tail_correction"]
+        else:
+            raw[im] = _expand_translation_columns(
+                resp["raw"], geometry, translation
+            )
+            completed[im] = _expand_translation_columns(
+                resp["completed"], geometry, translation
+            )
+            tail[im] = _expand_translation_columns(
+                resp["tail_correction"], geometry, translation
+            )
+        if recycled is not None:
+            recycled_fallbacks += int(recycled.get("fallbacks", 0))
         converged[im] = bool(all(oks))
         max_error[im] = float(max(errs)) if errs else 0.0
         explicit[im] = True
+        transfer_wall_seconds[im] = float(perf_counter() - tm_start)
         if -m in m_to_i and m != 0:
             jm = m_to_i[-m]
             raw[jm] = raw[im].conj().T
@@ -446,6 +688,10 @@ def compute_covariant_channel_susceptibility(
             transfer_max_error=max_error,
             solved_explicitly=explicit,
             m_max=None if m_max is None else int(m_max),
+            translation_reduced=translation is not None,
+            source_vertices_solved=int(solved_count),
+            recycled_fallbacks=int(recycled_fallbacks),
+            transfer_wall_seconds=transfer_wall_seconds,
         ),
         cache,
     )

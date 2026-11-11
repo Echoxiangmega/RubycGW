@@ -120,6 +120,9 @@ def one_shot_post_interaction_channel(
     vertex_opts: SupercellVertexOptions, *,
     m_max: int | None = None,
     allow_unconverged: bool = False,
+    geometry=None,
+    optimize_translation: bool = True,
+    recycle_krylov: bool = True,
     mu_tol: float = 1.e-10,
     mu_max_iter: int = 100,
 ):
@@ -131,26 +134,41 @@ def one_shot_post_interaction_channel(
     fallback fraction explicitly recorded. This is not identical to the
     fixed-density-only post construction for BJ/E modes.
     """
+    tstart = perf_counter()
     response, cache = compute_covariant_channel_susceptibility(
         background, definition, h0, grid, vertex_opts=vertex_opts,
-        m_max=m_max, allow_unconverged=allow_unconverged
+        m_max=m_max, allow_unconverged=allow_unconverged,
+        geometry=geometry, optimize_translation=optimize_translation,
+        recycle_krylov=recycle_krylov,
     )
+    tcov = perf_counter()
     Wpost,Ppost,fallback,identity_error=build_channel_gamma_screening(
         definition,response.chi_completed,
         background_W=background.W if m_max is not None else None
     )
+    tw = perf_counter()
     sigma_c_post=compute_channel_correlation_self_energy(
         background.G,Wpost,definition,grid
     )
+    tsigma = perf_counter()
     mu,G,_,_= _solve_mu_matrix_fast(
         h0,background.Sigma_static,sigma_c_post,grid,
         float(target_particles),float(background.mu),float(mu_tol),
         int(mu_max_iter)
     )
+    tdyson = perf_counter()
     return SimpleNamespace(
         G=np.asarray(G),W=np.asarray(Wpost),Sigma_static=background.Sigma_static,
         Sigma_c=np.asarray(sigma_c_post),mu=float(mu),
         fallback_fraction=float(np.mean(fallback)),
         screening_identity_error=float(identity_error),
         response=response,background=background,
+        translation_reduced=bool(response.translation_reduced),
+        source_vertices_solved=int(response.source_vertices_solved),
+        recycled_fallbacks=int(response.recycled_fallbacks),
+        transfer_wall_seconds=np.asarray(response.transfer_wall_seconds),
+        phase_seconds=dict(
+            covariant=float(tcov-tstart),screening=float(tw-tcov),
+            sigma=float(tsigma-tw),dyson=float(tdyson-tsigma)
+        ),
     )
