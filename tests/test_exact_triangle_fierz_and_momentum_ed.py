@@ -161,3 +161,35 @@ def test_exact_momentum_block_thermal_trace_matches_full_ED():
         ans.susceptibility_matrix[0,0].real,
         simpson(C,x=ans.tau_grid),atol=3e-9
     )
+
+
+def test_momentum_green_single_vacuum_source_is_exact_noninteracting_resolvent():
+    from rubycgw.momentum_ed_green import (
+        _manybody_transition_vectors,_cross_resolvent
+    )
+    from rubycgw.model import build_h0
+    params=RubyParameters(ti=1,t1=-.5,t2=.5,V=0)
+    geom=build_torus_geometry("3x1",params)
+    vacuum=MomentumTorusED(geom,params,n_particles=0)
+    particle=MomentumTorusED(geom,params,n_particles=1)
+    K=np.asarray((1/3,0.))
+    init=vacuum.k_index((0.,0.))
+    final=particle.k_index(K)
+    assert vacuum.blocks[init].dimension==1
+    Vadd=_manybody_transition_vectors(
+        vacuum,particle,init,final,np.array([1.]),K,creation=True
+    )
+    Ham=particle.hamiltonian(0,final)
+    w=(2*np.arange(-4,4)+1)*np.pi*.2
+    mu=.05
+    G=np.zeros((len(w),6,6),dtype=complex)
+    for b in range(6):
+        values,_=_cross_resolvent(
+            Ham,Vadd[:,b],Vadd,1j*w+mu,max_steps=8,tol=1e-12
+        )
+        G[:,:,b]=values
+    Hbare=build_h0(np.array([K]),params)[0]
+    reference=np.asarray([
+        np.linalg.inv((1j*wi+mu)*np.eye(6)-Hbare) for wi in w
+    ])
+    np.testing.assert_allclose(G,reference,atol=3e-10,rtol=0)
