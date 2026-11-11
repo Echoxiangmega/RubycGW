@@ -29,6 +29,7 @@ from .fierz_channel_gw import (
     _channel_sigma_from_boson,
     _pair_polarization,
     channel_static_self_energy,
+    channel_static_parts,
     compute_channel_correlation_self_energy,
 )
 from .grids import MatsubaraGrid, frequency_shift_slices
@@ -190,11 +191,7 @@ def _static_vertex_from_x(
     drho = _completed_drho_from_x(
         X, Gamma, h_static_ref, mu, m_ext, grid, edge_points=edge_points
     )
-    K = np.asarray(definition.vertices, dtype=complex)
-    g = np.asarray(definition.coupling, dtype=complex)
-    dobs = np.einsum("aij,ji->a", K, drho, optimize=True)
-    d_tad = np.einsum("aij,ab,b->ij", K, g, dobs, optimize=True)
-    d_ex = -np.einsum("ba,aik,kl,blj->ij", g, K, drho, K, optimize=True)
+    _, d_tad, d_ex = channel_static_parts(drho, definition, symmetrize=False)
     d_static = np.zeros_like(d_tad)
     if opts.include_hartree:
         d_static += d_tad
