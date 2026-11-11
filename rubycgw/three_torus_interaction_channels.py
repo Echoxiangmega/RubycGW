@@ -1,12 +1,14 @@
-"""Matched finite-torus density, E-pseudospin and symmetric B/J GW variants.
+"""Matched finite-torus exact density, A1+E pseudospin and B/J Fierz variants.
 
 These are different *interaction decoupling schemes* applied to the same
 physical spinless Ruby Hamiltonian, not merely three observable form factors.
 
 - density: physical site n_i screening, exact density HS representation.
-- pseudospin: selected projected triangle E-doublet (x,y,z), coupling -V/3.
-  Physical V-only Hartree/Fock is retained exactly; dynamic GW is selected
-  E-sector only and is explicitly NOT an exact full-Hilbert Fierz identity.
+- pseudospin: EXACT A1+E triangle identity, E-doublet (x,y,z) with
+  g_E=-V/3 plus residual density coupling g_(n_A1,n_E)=V.
+  The operator-square identity also contains +(V/2)n_E. The numerical
+  static map is calibrated to the exact physical original-V Hartree-Fock
+  expression to avoid counting that normal-ordering shift twice.
 - bj: every intra-triangle bond has real B and imaginary J vertices,
   with both bosonic couplings g_B=g_J=-V/2 (symmetric exact Fierz choice).
 
