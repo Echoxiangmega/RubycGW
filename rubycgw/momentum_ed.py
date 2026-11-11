@@ -102,6 +102,7 @@ class MomentumTorusED:
             )
         self.basis=np.asarray(self.solver.basis,dtype=np.uint64)
         self.full_dimension=int(self.solver.dimension)
+        self.dimension=self.full_dimension
         self.k_values=tuple(tuple(map(float,x)) for x in geom.allowed_momenta())
         self.perms=[_orbital_permutation(geom,g) for g in geom.cells]
         self.blocks=self._build_blocks()
