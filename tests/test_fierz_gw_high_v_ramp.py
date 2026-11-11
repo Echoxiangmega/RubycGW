@@ -84,7 +84,15 @@ def test_ed_cache_survives_failed_gw_and_is_reused(tmp_path):
     # Deliberately force failure after ED by permitting only one GW iteration
     # while demanding an unattainably tight residual at nonzero V.
     failed=_cli(out,steps=2,iterations=1,tol="1e-14")
-    assert failed.returncode!=0,failed.stdout+"\n"+failed.stderr
+    assert failed.returncode==0,failed.stdout+"\n"+failed.stderr
+    assert (out/"comparison.csv").exists()
+    failed_summary=json.loads((out/"summary.json").read_text())
+    assert failed_summary["method_status"]["GW[density]"]["status"]=="unconverged"
+    assert failed_summary["method_status"]["GW[density]"]["status"]!="converged"
+    with (out/"comparison.csv").open(encoding="utf-8") as f:
+        rows=f.read()
+    assert "unconverged" in rows
+    assert "GW[density]" in rows
     assert (out/"ed_reference.npz").exists()
     assert (out/"gw_failure_density.json").exists()
     details=json.loads((out/"gw_failure_density.json").read_text())
@@ -99,3 +107,55 @@ def test_ed_cache_survives_failed_gw_and_is_reused(tmp_path):
     assert "GW[density]" in summary["timings"]
     assert summary["diagnostics"]["GW[density]_ramp"]["reached_target"]
     assert (out/"green_tau.png").exists()
+
+
+def test_default_direct_run_marks_failed_methods_and_continues(tmp_path):
+    """Force a nonconverged direct GW solve, check all Fierz modes and outputs.
+
+    GW continuation must be *opt in*. A failed density GW must not stop
+    attempts at pseudospin/BJ; dependent cGW/post and cluster are skipped.
+    No invalid GW energy or Green data may be published.
+    """
+    script=Path(__file__).resolve().parents[1]/"research"/"benchmark_three_tori.py"
+    out=tmp_path/"soft_failure"
+    args=[
+        sys.executable,str(script),
+        "--geometry","3x1","--V","0.3","--filling",str(2/3),
+        "--K","0","0","--Q","0","0",
+        "--T",".4","--nw","3","--nomega","1",
+        "--methods","gw","cgw","postgw","cluster",
+        "--gw-channels","density","pseudospin","bj",
+        "--channels","z_same",
+        "--gw-max-iter","1","--gw-tol","1e-14",
+        "--skip-cluster-chi","--out",str(out),
+    ]
+    done=subprocess.run(args,capture_output=True,text=True,timeout=180)
+    assert done.returncode==0,done.stdout+"\n"+done.stderr
+    summary=json.loads((out/"summary.json").read_text())
+    assert summary["method_status"]["GW[density]"]["status"]=="unconverged"
+    assert summary["method_status"]["GW[pseudospin]"]["status"]=="unconverged"
+    assert summary["method_status"]["GW[bj]"]["status"]=="unconverged"
+    assert summary["method_status"]["cGW[density]"]["status"]=="skipped"
+    assert summary["method_status"]["post-GW[density]"]["status"]=="skipped"
+    assert summary["method_status"]["cluster-ED+GW"]["status"]=="skipped"
+    assert summary["G_methods"]==[]
+    assert not (out/"green_tau.png").exists()
+    assert (out/"comparison.csv").exists()
+    assert (out/"raw_arrays.npz").exists()
+    assert (out/"gw_failure_density.json").exists()
+    assert "GW[bj]" in done.stdout
+    assert "GW[pseudospin]" in done.stdout
+
+
+def test_opt_in_strict_fail_fast_retains_error_exit(tmp_path):
+    script=Path(__file__).resolve().parents[1]/"research"/"benchmark_three_tori.py"
+    args=[
+        sys.executable,str(script),"--geometry","3x1","--V",".3",
+        "--filling",str(2/3),"--T",".4","--nw","3","--nomega","1",
+        "--methods","gw","--gw-channels","density",
+        "--gw-max-iter","1","--gw-tol","1e-14",
+        "--strict-method-failures","--out",str(tmp_path/"strict")
+    ]
+    result=subprocess.run(args,capture_output=True,text=True,timeout=180)
+    assert result.returncode!=0
+    assert "did not converge" in result.stderr
