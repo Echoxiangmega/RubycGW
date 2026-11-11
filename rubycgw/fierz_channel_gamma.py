@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import ceil
+from time import perf_counter
 
 import numpy as np
 
@@ -76,6 +77,7 @@ class CovariantChannelResult:
     translation_reduced: bool = False
     source_vertices_solved: int = 0
     recycled_fallbacks: int = 0
+    transfer_wall_seconds: np.ndarray | None = None
 
 
 @dataclass
@@ -589,6 +591,7 @@ def compute_covariant_channel_susceptibility(
     h_static_ref = np.asarray(h0, dtype=complex) + np.asarray(background.Sigma_static)[None, None]
     solved_count = 0
     recycled_fallbacks = 0
+    transfer_wall_seconds = np.zeros(grid.nb, dtype=float)
 
     m_to_i = {int(m): i for i, m in enumerate(grid.m_values)}
     for im, m_raw in enumerate(grid.m_values):
@@ -597,6 +600,7 @@ def compute_covariant_channel_susceptibility(
             continue
         if m_max is not None and abs(m) > int(m_max):
             continue
+        tm_start = perf_counter()
         gammas = []
         errs = []
         oks = []
@@ -666,6 +670,7 @@ def compute_covariant_channel_susceptibility(
         converged[im] = bool(all(oks))
         max_error[im] = float(max(errs)) if errs else 0.0
         explicit[im] = True
+        transfer_wall_seconds[im] = float(perf_counter() - tm_start)
         if -m in m_to_i and m != 0:
             jm = m_to_i[-m]
             raw[jm] = raw[im].conj().T
@@ -686,6 +691,7 @@ def compute_covariant_channel_susceptibility(
             translation_reduced=translation is not None,
             source_vertices_solved=int(solved_count),
             recycled_fallbacks=int(recycled_fallbacks),
+            transfer_wall_seconds=transfer_wall_seconds,
         ),
         cache,
     )
