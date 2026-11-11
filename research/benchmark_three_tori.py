@@ -63,6 +63,7 @@ from rubycgw.three_torus_benchmark import (
     max_required_ed_dimension, uniform_primitive_cluster_ed_gw,
     SkewEDSectorAdapter, gw_energy_from_state, embedded_gm_energy,
 )
+from rubycgw.benchmark_report import make_comparison_scorecards
 from rubycgw.fierz_channel_gw import solve_channel_gw_same_torus
 from rubycgw.fierz_channel_continuation import solve_channel_gw_v_ramp
 from rubycgw.three_torus_interaction_channels import (
@@ -691,7 +692,7 @@ def main():
             arrays[f"Giw_full_{mode}"]=np.asarray(scheme.G)
             energy[label_gw]=channel_energy_estimate(scheme,geom.h0,grid)
             row(label_gw,"finite_T_internal_energy_estimate",energy[label_gw],
-                notes=("E-only selected-channel, nonvariational approximation"
+                notes=("exact A1+E Fierz bare interaction; finite-T GW energy estimate, not E0"
                        if mode=="pseudospin" else
                        "finite-T Galitskii-Migdal estimate; not E0"))
             if "ED" in energy:
@@ -906,10 +907,19 @@ def main():
     info["computed_chi"]=chi_by_method
     info["G_methods"]=list(green_by_method)
     output_rows(rows,out)
+    # Keep comparison.csv as a detailed log, but also create one-row-per-
+    # method summaries to make the best G and best chi choices visible.
+    try:
+        make_comparison_scorecards(rows,out)
+    except (ValueError,KeyError,OSError) as exc:
+        info["errors"]["summary_scorecards"]=f"{type(exc).__name__}: {exc}"
+        print(f"[benchmark] scorecard export failed: {exc}",flush=True)
+        if a.strict_method_failures:
+            raise
     with (out/"summary.json").open("w",encoding="utf-8") as f:
         json.dump(json_safe(info),f,ensure_ascii=False,indent=2,allow_nan=False)
     np.savez_compressed(out/"raw_arrays.npz",**arrays)
-    print(f"[benchmark] saved {out/'comparison.csv'}, summary.json, raw_arrays.npz",flush=True)
+    print(f"[benchmark] saved {out/'comparison.csv'}, comparison_wide.csv, ranking_green.csv, ranking_susceptibility.csv, summary.json, raw_arrays.npz",flush=True)
     if curves: print(f"[benchmark] saved {out/'green_tau.png'} and .pdf",flush=True)
     if info["errors"]: print("[benchmark] partial failures:",info["errors"],flush=True)
 
