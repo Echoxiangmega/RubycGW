@@ -242,6 +242,24 @@ Use a damped direct GW diagnostic without repeating ED:
       --methods gw --gw-channels density --gw-mixing 0.05 \
       --gw-max-iter 600 --verbose --out results/hex18_gw_debug
 
+For a default fast benchmark, continuation is OFF: the program solves
+each GW representation directly at the requested V with
+--gw-ramp-steps 0 (the default). It does NOT run through intermediate V
+unless the user explicitly requests it. A failed method is marked
+"unconverged" or "failed" in comparison.csv and summary.json, and
+the program continues with the other independent interaction channels.
+The corresponding dependent cGW/post-GW (and cluster-ED+GW when the
+density GW background fails) are marked "skipped"; no invalid Green
+function, energy or susceptibility is compared against ED. If the
+covariant static vertex fails but GW succeeds, the independent bare
+GG bubble is still reported and post-GW can be attempted separately.
+A failed ED reference does not prevent GW-only diagnostics.
+
+--strict-method-failures restores the old fail-fast behavior for
+debugging. --skip-failed-gw-channel is kept as a compatibility alias,
+but is no longer needed. --allow-unconverged is deprecated for
+comparative calculations and does not authorize using failed results.
+
 To systematically approach strong coupling, set --gw-ramp-steps 10.
 This starts from a converged V=0 state, advances through intermediate
 interactions, uses the previous solution's static/dynamic self-energy
@@ -280,6 +298,13 @@ temperature, orbital momenta, ED truncation or RNG seed invalidates it.
 --refresh-ed-cache forces a recalculation, and --no-ed-cache disables
 it. This does not cache GW continuation states across *processes*:
 only within one ramp run are intermediate GW results reused.
+
+The summary.json method_status map provides status and reason for
+each requested method; comparison.csv contains rows with empty
+numeric values for unconverged/failed/skipped methods. The
+gw_failure_<mode>.json file retains numerical residual, smin, and
+ramp history. A normal process exit means the benchmark collected all
+possible outputs, NOT that all methods converged; always check status.
 
 The fixed-point symmetry assumption still matters: a symmetric
 continuation from V=0 can reach an unstable symmetric branch or fail
