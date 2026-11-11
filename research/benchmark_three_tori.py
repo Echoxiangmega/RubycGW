@@ -42,6 +42,7 @@ from rubycgw.supercell_gw_split import one_body_density_matrix_tail
 from rubycgw.supercell_cgw import SupercellVertexOptions
 from rubycgw.ed18 import ED18Solver
 from rubycgw.momentum_ed import MomentumTorusED
+from rubycgw.momentum_ed_green import momentum_thermal_lanczos_green
 from rubycgw.ed18_thermal import thermal_response as hex_thermal_response
 from rubycgw.ed_cluster import RubyEDClusterSolver
 from rubycgw.ed_cluster_thermal import thermal_response as rect_thermal_response
@@ -112,6 +113,8 @@ def parse_args():
                    help="skip expensive finite-source cluster-covariant chi; no false bubble alias")
     p.add_argument("--ed-symmetry",choices=["momentum","legacy"],default="momentum",
                    help="canonical ED ground and finite-T chi: momentum-block Krylov or legacy full-sector Krylov; ED G still uses thermal Lanczos full-sector")
+    p.add_argument("--ed-green-symmetry",choices=["momentum","legacy"],default="legacy",
+                   help="momentum: evaluate G(K,iw) with N+/-1 momentum-block resolvents; legacy: full-sector thermal Lanczos")
     p.add_argument("--ed-samples",type=int,default=6)
     p.add_argument("--ed-tau-points",type=int,default=17)
     p.add_argument("--ed-sector-padding",type=int,default=1)
@@ -285,7 +288,9 @@ def main():
                   if a.ed_symmetry=="momentum" else
                   "legacy full fixed-N solver"
               ),
-              ED_green="truncated-sector finite-T Lanczos (not full thermal trace)",
+              ED_green=("momentum-sector N+/-1 low-T thermal Lanczos" if a.ed_green_symmetry=="momentum" else
+                        "full fixed-N sector low-T thermal Lanczos"),
+              ed_green_symmetry=a.ed_green_symmetry,
               ED_chi="canonical fixed-N stochastic thermal typicality",
               GW_ensemble="grand canonical, fixed mean N",
               chi="connected static source response at same physical Q",
@@ -381,6 +386,11 @@ def main():
                     krylov_dim=a.ed_krylov_steps,
                     verbose=a.verbose
                 )
+                if a.ed_green_symmetry=="momentum":
+                    return momentum_thermal_lanczos_green(
+                        geom,params,V=a.V,T=a.T,target_particles=total,
+                        omega=grid.omega,K=K,opts=opts
+                    )
                 if geom.name=="hex18":
                     return thermal_lanczos_green(
                         3,1,params,V=a.V,T=a.T,target_particles=total,
@@ -397,14 +407,22 @@ def main():
                 info["diagnostics"]["ED_Green"]=dict(
                     mu=gr.mu,thermal_kept_weight=gr.kept_thermal_weight,
                     sector_edge_weight=float(gr.sector_probabilities[0]+gr.sector_probabilities[-1]),
-                    translation_residual=gr.translation_residual,
+                    translation_residual=getattr(gr,"translation_residual",None),
+                    symmetry=a.ed_green_symmetry,
+                    momentum_sector_dimensions=getattr(gr,"sector_dimensions_by_N",None),
                     sector_numbers=gr.sector_numbers,
                     sector_probabilities=gr.sector_probabilities,
                     krylov_steps_max=gr.krylov_steps_max)
-                ed_full=np.asarray(gr.G)
-                ed_scalar=project_k_green(ed_full,geom,K)
+                if a.ed_green_symmetry=="momentum":
+                    ed_scalar=np.asarray(gr.G,dtype=complex)
+                    if ed_scalar.shape!=(grid.nf,6,6):
+                        raise RuntimeError("momentum ED Green must be nf x 6 x 6")
+                    ed_full=None
+                else:
+                    ed_full=np.asarray(gr.G)
+                    ed_scalar=project_k_green(ed_full,geom,K)
+                    arrays["ED_Giw_full"]=ed_full
                 green_by_method["ED"]=ed_scalar
-                arrays["ED_Giw_full"]=ed_full
                 energy["ED_mu"]=float(gr.mu)
                 row("ED","G_reference_initialized",0.,runtime=times["ED_Green"],
                     notes="finite-T sector-truncated thermal Lanczos ED")
