@@ -99,6 +99,19 @@ def make_comparison_scorecards(rows, output_dir):
             b = _num(quantities.get("G_reference_initialized", {}).get("stage_runtime_seconds"))
             if a is not None and b is not None:
                 runtime = a+b
+        energy_item = quantities.get(
+            "ground_state_E0",
+            quantities.get(
+                "finite_T_internal_energy_estimate",
+                quantities.get("finite_T_GM_proxy", {}),
+            ),
+        )
+        energy_diag = quantities.get(
+            "energy_estimate_vs_ED_E0_diagnostic",
+            quantities.get("energy_proxy_vs_ED_E0_diagnostic", {}),
+        )
+        energy_value = _num(energy_item.get("value"))
+        energy_difference = _num(energy_diag.get("relative_error"))
         row = {
             "method": method, "status": status,
             "G_iomega_error_pct": None if iw is None else iw*100,
@@ -109,6 +122,15 @@ def make_comparison_scorecards(rows, output_dir):
             "runtime_s": runtime,
             "runtime_min": None if runtime is None else runtime/60,
             "G_shared_with_GW": bool(g_shared),
+            "energy_value": energy_value,
+            "energy_vs_ED_E0_diagnostic_pct": (
+                None if energy_difference is None else energy_difference * 100
+            ),
+            "energy_comparability": (
+                "ED ground E0" if method == "ED"
+                else "finite-T approximate vs zero-T ED (not comparable)"
+                if energy_value is not None else "not evaluated"
+            ),
             "notes": (status_row.get("notes", "") if status_row
                       else "cGW G is identical to underlying GW" if g_shared
                       else "post-GW chi was not computed" if method.startswith("post-GW")
@@ -130,7 +152,8 @@ def make_comparison_scorecards(rows, output_dir):
         *(f"chi_{c}_error_pct" for c in CHANNELS),
         *(f"chi_{c}_value" for c in CHANNELS),
         "chi_same_minus_opposite", "runtime_s", "runtime_min",
-        "G_shared_with_GW", "notes",
+        "G_shared_with_GW", "energy_value",
+        "energy_vs_ED_E0_diagnostic_pct", "energy_comparability", "notes",
     ]
     _csv(output/"comparison_wide.csv", wide, columns)
     green = sorted((
