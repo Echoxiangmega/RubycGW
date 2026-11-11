@@ -51,6 +51,13 @@ from rubycgw.three_torus_benchmark import (
     max_required_ed_dimension, uniform_primitive_cluster_ed_gw,
     SkewEDSectorAdapter, gw_energy_from_state, embedded_gm_energy,
 )
+from rubycgw.three_torus_interaction_channels import (
+    build_torus_interaction_channel,
+    solve_interaction_channel_response,
+    one_shot_post_interaction_channel,
+    channel_energy_estimate,
+)
+from types import SimpleNamespace
 from rubycgw.post_gw import run_post_gw
 from rubycgw.free_energy import evaluate_gw_free_energy
 from rubycgw.cluster_ed_gw_multicell import (
@@ -77,6 +84,9 @@ def parse_args():
     p.add_argument("--nomega",type=int,default=10)
     p.add_argument("--methods",nargs="+",choices=["ed","gw","cgw","postgw","cluster"],
                    default=["ed","gw","cgw","postgw","cluster"])
+    p.add_argument("--gw-channels",nargs="+",choices=["density","pseudospin","bj"],
+                   default=["density","pseudospin","bj"],
+                   help="interaction-screening GW variants: original density, projected E pseudospin, half B plus half J")
     p.add_argument("--channels",nargs="+",
                    default=["x_even","y_even","z_same","z_opposite"])
     p.add_argument("--plot-orbital",type=str,default="trace",
@@ -261,6 +271,8 @@ def main():
               K=K,Q=Q,T=a.T,beta=1/a.T,
               hoppings=dict(t=a.t,t1=a.t1,t2=a.t2),
               channels=channels,allowed_K=geom.allowed_momenta(),
+              gw_interaction_channels=list(a.gw_channels),
+              ed_symmetry="fixed-N sectors only; translation used for Green reconstruction, not momentum-block diagonalization",
               ED_green="truncated-sector finite-T Lanczos (not full thermal trace)",
               ED_chi="canonical fixed-N stochastic thermal typicality",
               GW_ensemble="grand canonical, fixed mean N",
@@ -271,6 +283,7 @@ def main():
               timings={},diagnostics={},errors={})
     rows=[]; curves={}; arrays={}; green_by_method={}; chi_by_method={}
     times={}; energy={}; ed_scalar=None; ed_full=None; ed_chi={}
+    method_mu={}; total_times={}; channel_states={}
     def row(method, quantity, val, *, ref=None, runtime=None, status="ok",notes=""):
         if runtime is None: runtime=times.get(method,None)
         err=("" if ref is None or val is None or not np.isfinite(float(ref))
@@ -375,93 +388,123 @@ def main():
         verbose=a.verbose,momentum_backend="fft",
         mu_tol=1e-10,mu_max_iter=100
     )
+    # Each different bosonic/Fierz interaction channel requires its OWN
+    # self-consistent GW G; within each channel, later stages reuse that G.
+    # The original density-channel GW is also the background for our
+    # primitive V-only cluster embedding (not BJ or E-only).
+    requested_gw_modes=list(dict.fromkeys(a.gw_channels))
+    if "cluster" in methods and "density" not in requested_gw_modes:
+        requested_gw_modes.insert(0,"density")
     gw=None
+    vertex_opts=SupercellVertexOptions(
+        max_iter=a.vertex_max_iter,tol=a.vertex_tol,
+        solver="gmres",gmres_restart=a.vertex_restart,
+        verbose=a.verbose,momentum_backend="fft"
+    )
     if "gw" in methods:
-        gw=run("GW",lambda:solve_matrix_gw_fast(
-            geom.h0,geom.vq,grid,opts=opts_gw
-        ))
-        if gw is not None:
-            info["diagnostics"]["GW"]=dict(
-                converged=gw.converged,residual=gw.final_error,mu=gw.mu)
-            if not gw.converged and not a.allow_unconverged:
-                raise RuntimeError(f"GW did not converge: {gw.final_error:.3e}")
-            green_by_method["GW"]=project_k_green(gw.G,geom,K)
-            arrays["GW_Giw_full"]=np.asarray(gw.G)
-            energy["GW"]=run("GW_energy",lambda:gw_energy_from_state(gw,geom,grid))
-            if energy["GW"] is not None:
-                row("GW","finite_T_internal_energy_estimate",
-                    energy["GW"],ref=None,
-                    notes="Galitskii-Migdal finite-T estimate; NOT ground-state E0")
-                if "ED" in energy:
-                    row("GW","energy_estimate_vs_ED_E0_diagnostic",
-                        energy["GW"],ref=energy["ED"],
-                        status="mixed-temperature",
-                        notes="finite-T vs T=0; not a controlled ground-state error")
-            try:
-                F=evaluate_gw_free_energy(
-                    gw,geom.h0,geom.vq,grid,target_particles=total,
-                    primitive_cells_per_supercell=geom.ncell
+        for mode in requested_gw_modes:
+            definition=build_torus_interaction_channel(geom,a.V,mode)
+            label_gw=f"GW[{mode}]"
+            label_cgw=f"cGW[{mode}]"
+            label_post=f"post-GW[{mode}]"
+            scheme=run(label_gw,lambda definition=definition:
+                solve_channel_gw_same_torus(
+                    geom.h0,definition,grid,opts=opts_gw
                 )
-                energy["GW_F"]=float(F.helmholtz_free_energy)
-                row("GW","finite_T_Helmholtz_F",energy["GW_F"],
-                    notes="stationary GW free energy, not E0")
-            except Exception as exc:
-                info["errors"]["GW_free_energy"]=str(exc)
-    if gw is not None and ("cgw" in methods):
-        vertex_opts=SupercellVertexOptions(
-            max_iter=a.vertex_max_iter,tol=a.vertex_tol,
-            solver="gmres",gmres_restart=a.vertex_restart,
-            verbose=a.verbose,momentum_backend="fft"
-        )
-        resp=run("cGW",lambda:channel_static_response(
-            gw,geom,grid,Q,channels,include_cgw=True,
-            vertex_opts=vertex_opts,strict=not a.allow_unconverged
-        ))
-        if resp is not None:
-            bubble,cov,valid=resp
-            chi_by_method["GW_bubble"]=bubble
-            chi_by_method["cGW"]=cov
-            info["diagnostics"]["cGW"]=dict(vertex_converged=valid)
-            for ch in channels:
-                row("GW",f"chi_GG[{ch}](Q)",bubble[ch],ref=ed_chi.get(ch),
-                    runtime=times.get("GW"),notes="bare bubble on self-consistent GW G")
-                row("cGW",f"chi[{ch}](Q)",cov[ch],ref=ed_chi.get(ch),
-                    status="ok" if valid[ch] else "unconverged",
-                    notes="tail-consistent covariant vertex at Omega_ext=0")
-            row("cGW","G_same_as_GW",0.,notes="cGW does not update Dyson G")
-            if "GW" in energy:
-                row("cGW","finite_T_internal_energy_estimate",energy["GW"],
-                    notes="same GW background; cGW vertex does not recalculate energy")
-    elif gw is not None:
-        bubble,_,_=channel_static_response(
-            gw,geom,grid,Q,channels,include_cgw=False
-        )
-        chi_by_method["GW_bubble"]=bubble
-        for ch in channels:
-            row("GW",f"chi_GG[{ch}](Q)",bubble[ch],ref=ed_chi.get(ch),
-                notes="bare GW-GG bubble")
-    if gw is not None and "postgw" in methods:
-        def stage_post():
-            opts=SupercellVertexOptions(
-                max_iter=a.vertex_max_iter,tol=a.vertex_tol,
-                solver="gmres",gmres_restart=a.vertex_restart,
-                verbose=a.verbose,momentum_backend="fft"
             )
-            return run_post_gw(
-                gw,geom.h0,geom.vq,grid,gw_opts=opts_gw,
-                vertex_opts=opts,m_max=a.post_mmax,
-                allow_unconverged=a.allow_unconverged
+            if scheme is None:
+                continue
+            channel_states[mode]=scheme
+            info["diagnostics"][label_gw]=dict(
+                converged=scheme.converged,residual=scheme.final_error,
+                mu=scheme.mu,n_bosonic_channels=len(definition.labels),
+                selected_E_only=(mode=="pseudospin"),
+                exact_Fierz_identity=(mode!="pseudospin"),
+                screening_smin=scheme.min_screening_singular_value
             )
-        post=run("post-GW",stage_post)
-        if post is not None:
-            green_by_method["post-GW"]=project_k_green(post.G,geom,K)
-            arrays["post_Giw_full"]=post.G
-            info["diagnostics"]["post-GW"]=dict(
-                mu=post.mu,window_mmax=a.post_mmax,
-                fallback_fraction=float(np.mean(post.used_background_w_mask))
-            )
-            row("post-GW","chi",None,status="not_requested",
-                notes="post-GW is compared only through Green function")
+            if not scheme.converged and not a.allow_unconverged:
+                raise RuntimeError(f"{label_gw} did not converge: {scheme.final_error:.3e}")
+            green_by_method[label_gw]=project_k_green(scheme.G,geom,K)
+            method_mu[label_gw]=float(scheme.mu)
+            arrays[f"Giw_full_{mode}"]=np.asarray(scheme.G)
+            energy[label_gw]=channel_energy_estimate(scheme,geom.h0,grid)
+            row(label_gw,"finite_T_internal_energy_estimate",energy[label_gw],
+                notes=("E-only selected-channel, nonvariational approximation"
+                       if mode=="pseudospin" else
+                       "finite-T Galitskii-Migdal estimate; not E0"))
+            if "ED" in energy:
+                row(label_gw,"energy_estimate_vs_ED_E0_diagnostic",energy[label_gw],
+                    ref=energy["ED"],status="mixed-temperature",
+                    notes="finite-T estimate compared numerically against zero-T E0; not a controlled E0 error")
+            scheme_chi=run(label_cgw,lambda scheme=scheme,definition=definition:
+                solve_interaction_channel_response(
+                    scheme,definition,geom,grid,Q,channels,vertex_opts,
+                    strict=not a.allow_unconverged
+                )
+            ) if "cgw" in methods else None
+            if scheme_chi is not None:
+                bubble,cov,valid,ctimes=scheme_chi
+                chi_by_method[f"GG[{mode}]"]=bubble
+                chi_by_method[label_cgw]=cov
+                info["diagnostics"][label_cgw]=dict(vertex_converged=valid)
+                for ch in channels:
+                    row(label_gw,f"chi_GG[{ch}](Q)",bubble[ch],ref=ed_chi.get(ch),
+                        notes="bare GG response on this interaction-channel GW G")
+                    row(label_cgw,f"chi[{ch}](Q)",cov[ch],ref=ed_chi.get(ch),
+                        status="ok" if valid[ch] else "unconverged",
+                        notes="same physical source; static tail-completed covariant channel vertex")
+            if "cgw" not in methods:
+                from rubycgw.three_torus_benchmark import hermitian_source_components
+                from rubycgw.production_cgw_sox import static_gg_tail_completed
+                b={}
+                hstat=geom.h0+scheme.Sigma_static[None,None]
+                for ch in channels:
+                    b[ch]=float(sum(
+                        static_gg_tail_completed(scheme.G,src[None],grid,
+                                                 hstat,scheme.mu)["completed"][0,0].real
+                        for src in hermitian_source_components(geom,ch,Q)
+                    ))
+                    row(label_gw,f"chi_GG[{ch}](Q)",b[ch],ref=ed_chi.get(ch),
+                        notes="bare bubble; no cGW vertex requested")
+                chi_by_method[f"GG[{mode}]"]=b
+            if "postgw" in methods:
+                post=run(label_post,lambda scheme=scheme,definition=definition:
+                    one_shot_post_interaction_channel(
+                        scheme,definition,geom.h0,grid,total,vertex_opts,
+                        m_max=a.post_mmax,allow_unconverged=a.allow_unconverged,
+                        mu_tol=opts_gw.mu_tol,mu_max_iter=opts_gw.mu_max_iter
+                    ))
+                if post is not None:
+                    green_by_method[label_post]=project_k_green(post.G,geom,K)
+                    method_mu[label_post]=float(post.mu)
+                    arrays[f"Giw_full_post_{mode}"]=np.asarray(post.G)
+                    info["diagnostics"][label_post]=dict(
+                        mu=post.mu,window_mmax=a.post_mmax,
+                        fallback_fraction=post.fallback_fraction,
+                        screening_identity_error=post.screening_identity_error
+                    )
+                    row(label_post,"chi",None,status="not_requested",
+                        notes="post-GW compared in G only")
+            base=times.get(label_gw,0.)
+            cstep=times.get(label_cgw,0.)
+            pstep=times.get(label_post,0.)
+            total_times[label_gw]=base
+            if "cgw" in methods:
+                total_times[label_cgw]=base+cstep
+            if "postgw" in methods:
+                total_times[label_post]=base+cstep+pstep
+            if mode=="density":
+                # Adapt density-channel skeleton to the existing separated
+                # Hartree + Fock/correlation V-only cluster embedding API.
+                gw=SimpleNamespace(
+                    G=scheme.G,
+                    W=scheme.W[:,None,None,:,:],
+                    P=scheme.P[:,None,None,:,:],
+                    Sigma_H=scheme.Sigma_tadpole,
+                    Sigma_GW=(scheme.Sigma_exchange[None,None,None]+scheme.Sigma_c),
+                    mu=float(scheme.mu),density=scheme.density,
+                    converged=bool(scheme.converged),final_error=float(scheme.final_error)
+                )
     if gw is not None and "cluster" in methods:
         cl=run("cluster-ED+GW",lambda:uniform_primitive_cluster_ed_gw(
             geom,grid,gw,nbath=a.nbath,max_iter=a.cluster_max_iter,
@@ -476,6 +519,7 @@ def main():
                     f"uniform cluster ED+GW did not converge: {cl.final_error:.3e}"
                 )
             green_by_method["cluster-ED+GW"]=project_k_green(cl.G,geom,K)
+            method_mu["cluster-ED+GW"]=float(cl.mu)
             arrays["cluster_Giw_full"]=cl.G
             info["diagnostics"]["cluster-ED+GW"]=dict(
                 converged=cl.converged,residual=cl.final_error,
@@ -519,10 +563,7 @@ def main():
                 row(name,"G_rel_Frobenius_K",e,ref=None,
                     status=status,
                     notes="||G_method(K,iw)-G_ED(K,iw)||_F/||G_ED||_F")
-            mu=(energy.get("ED_mu") if name=="ED" else
-                float(gw.mu) if name=="GW" else
-                float(post.mu) if name=="post-GW" and 'post' in locals() and post else
-                float(cl.mu) if name=="cluster-ED+GW" and 'cl' in locals() and cl else None)
+            mu=(energy.get("ED_mu") if name=="ED" else method_mu.get(name))
             if mu is None: continue
             g_tau=green_k_tau(G,grid.omega,a.T,mu,hK,tau)
             curves_data=np.trace(g_tau,axis1=1,axis2=2).real/6.0
@@ -538,34 +579,21 @@ def main():
                 rel=float(np.linalg.norm(curve-ed_curve)/max(np.linalg.norm(ed_curve),1e-300))
                 row(name,"G_tau_curve_relative_L2_error",rel,
                     notes="selected trace/orbital on 0<tau<beta; ED TL approximation")
-        if "GW" in curves and "cgw" in methods:
-            row("cGW","G_rel_Frobenius_K",
-                float(np.linalg.norm(green_by_method["GW"]-ed_scalar)/
-                      max(np.linalg.norm(ed_scalar),1e-300))
-                if ed_scalar is not None else None,
-                notes="identical to GW Green by definition")
         save_plot(out,tau,curves,K,a.V,a.filling,1/a.T)
         arrays["tau"]=tau
         arrays["tau_over_beta"]=tau*a.T
-    # Shared GW is a prerequisite for cGW, post-GW and cluster embedding.
-    # Report both incremental stage times and end-to-end method costs.
-    cumulative = {
-        "ED": times.get("ED",0.0)+times.get("ED_Green",0.0),
-        "GW": times.get("GW",0.0)+times.get("GW_energy",0.0),
-        "cGW": times.get("GW",0.0)+times.get("cGW",0.0),
-        "post-GW": times.get("GW",0.0)+times.get("post-GW",0.0),
-        "cluster-ED+GW": times.get("GW",0.0)+times.get("cluster-ED+GW",0.0)
-                         +times.get("cluster_chi",0.0),
-    }
-    for key in list(cumulative):
-        if key not in ("ED" if "ED" in methods else "", "GW" if gw is not None else "",
-                       "cGW" if "cgw" in methods else "", "post-GW" if "postgw" in methods else "",
-                       "cluster-ED+GW" if "cluster" in methods else ""):
-            del cumulative[key]
-    for key,total_s in cumulative.items():
-        row(key,"total_method_runtime_seconds",float(total_s),
-            runtime=total_s,notes="includes shared GW when required; stage times recorded separately")
-    info["method_total_runtime_seconds"]=cumulative
+    if "ED" in methods:
+        total_times["ED"]=times.get("ED",0.0)+times.get("ED_Green",0.0)
+    if "cluster" in methods and "cluster-ED+GW" in times:
+        total_times["cluster-ED+GW"]=(
+            times.get("GW[density]",0.0)+times.get("cluster-ED+GW",0.0)
+            +times.get("cluster_chi",0.0)
+        )
+    for name,total_s in total_times.items():
+        row(name,"total_method_runtime_seconds",float(total_s),
+            runtime=total_s,
+            notes="cumulative in one interaction-channel pipeline; shared GW counted once")
+    info["method_total_runtime_seconds"]=total_times
     for method,timing in times.items():
         info["timings"][method]=float(timing)
     info["energies"]=energy
