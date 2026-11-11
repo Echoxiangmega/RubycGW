@@ -171,6 +171,60 @@ variants still truncate low thermal states and Lanczos depth and
 require convergence checks. Neither uses point-group irreducible
 representations yet.
 
+
+## Optimized post-GW dynamic covariant response
+
+One-shot post-GW is **not** an extra nonlinear GW self-consistency loop.
+For each internal bosonic transfer m, the code solves the linear covariant
+vertex equation on the converged channel GW G and W. The expensive part
+is constructing the full internal n/B/J/A1+E response matrix, not the
+final one-shot Sigma and Dyson update.
+
+The default post solver now applies three performance improvements:
+
+1. Precompute/caches the frequency-specific out-of-box W lookup and
+   reference-tail eigensystem once per transfer rather than once for every
+   GMRES operator application and source.
+2. For a translation-invariant periodic torus, solve only the source
+   operators located in one reference primitive cell, and reconstruct
+   the other columns using the exact group identity
+   chi[(R,a),(R',b)](iOmega)=chi[(R-R',a),(0,b)](iOmega).
+   The code checks translation invariance of G, W, bare coupling,
+   and all translated source form factors before enabling this shortcut.
+   It automatically falls back to the full source solve if any check fails.
+3. Share a bounded GCROT(m,k) Krylov subspace across the different
+   right-hand-source operators at fixed external bosonic frequency.
+   Because the m=0 static HF response includes a Hermitian projection,
+   the matrix-free operator is real-linear and is solved using a realified
+   representation. The final true complex max-norm residual is checked;
+   failures fall back to the original per-source GMRES solver. At most
+   four recycled vectors are stored (bounded memory).
+
+For hex18, the number of independent solves per nonnegative transfer
+drops from density 18 to 6, exact A1+E pseudospin 30 to 10, and
+symmetric BJ 36 to 12. For 2x2 the source count is reduced by four.
+Actual wall-time improvement depends on kernel matvec cost, Krylov
+convergence and machine BLAS performance.
+
+The existing *static-window post-GW* remains intact:
+
+    --post-mmax 0
+
+This computes chi_cov only at Omega=0 and retains W_GW for all nonzero
+bosonic transfer frequencies. It is a diagnostic approximation, not the
+same output as full dynamical post-GW (default: --post-mmax omitted).
+
+For comparisons or difficult parameter regimes, the original paths
+remain available:
+
+    --post-no-translation   # solve every source explicitly
+    --post-no-recycle       # GMRES without recycled Krylov basis
+
+The benchmark summary.json now records each post channel's
+translation_reduced status, number of solved source vertices,
+Krylov fallbacks, transfer_wall_seconds and phase_seconds split into
+covariant, screening, self-energy and Dyson stages.
+
 ## Outputs
 
 - comparison.csv: method, observable, value, ED reference, relative
