@@ -92,7 +92,7 @@ mixed-temperature, not a controlled ground-state energy relative error.
 ## Outputs
 
 - comparison.csv: method, observable, value, ED reference, relative
-  error where meaningful, incremental run time, status, and caveats.
+  error where meaningful, incremental stage run time, status, and caveats. A dedicated\n  total_method_runtime_seconds row also includes any shared GW background\n  and the cluster source-response stage where applicable.
 - summary.json: geometry, allowed momenta, solver diagnostics, failures,
   and all stage timings.
 - raw_arrays.npz: full Matsubara/imaginary-time matrices and ED
