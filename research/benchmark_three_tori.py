@@ -212,8 +212,8 @@ def save_plot(out, tau, curves, K, V, filling, beta):
 
 def main():
     a=parse_args()
-    if a.T<=0 or a.V<0:
-        raise ValueError("require T>0 and V>=0")
+    if a.T<=0:
+        raise ValueError("require T>0")
     if a.nw<3 or a.nomega<1:
         raise ValueError("require nw>=3 and nomega>=1")
     if a.ed_tau_points<3 or a.ed_tau_points%2!=1:
@@ -359,7 +359,7 @@ def main():
                 green_by_method["ED"]=ed_scalar
                 arrays["ED_Giw_full"]=ed_full
                 energy["ED_mu"]=float(gr.mu)
-                row("ED","G_rel_Frobenius_K",0.,ref=0.,runtime=times["ED_Green"],
+                row("ED","G_reference_initialized",0.,runtime=times["ED_Green"],
                     notes="finite-T sector-truncated thermal Lanczos ED")
     opts_gw=GWOptions(
         target_filling=total,max_iter=a.gw_max_iter,tol=a.gw_tol,
