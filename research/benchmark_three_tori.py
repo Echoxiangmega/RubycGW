@@ -178,7 +178,7 @@ def solve_cluster_source_response(geom, params, grid, channels, Q, args):
 
 def output_rows(rows, out):
     columns=["method","quantity","value","ED_reference","relative_error",
-             "runtime_seconds","status","notes"]
+             "runtime_seconds","stage_runtime_seconds","status","notes"]
     with (out/"comparison.csv").open("w",newline="",encoding="utf-8") as f:
         wr=csv.DictWriter(f,fieldnames=columns)
         wr.writeheader()
@@ -598,6 +598,12 @@ def main():
             runtime=total_s,
             notes="cumulative in one interaction-channel pipeline; shared GW counted once")
     info["method_total_runtime_seconds"]=total_times
+    # CSV's primary runtime column is the cumulative time the user requested.
+    # Preserve the incremental per-stage/per-channel value separately.
+    for rec in rows:
+        rec["stage_runtime_seconds"] = rec.get("runtime_seconds", "")
+        if rec.get("method") in total_times:
+            rec["runtime_seconds"] = float(total_times[rec["method"]])
     for method,timing in times.items():
         info["timings"][method]=float(timing)
     info["energies"]=energy
