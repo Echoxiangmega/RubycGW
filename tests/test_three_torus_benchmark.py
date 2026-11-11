@@ -128,7 +128,7 @@ def test_three_torus_cli_end_to_end_small_free_case(tmp_path):
     summary=json.loads((out/"summary.json").read_text())
     assert summary["geometry"]=="3x1"
     assert summary["N"]==2
-    assert "GW" in summary["timings"]
+    assert "GW[density]" in summary["timings"]
     assert "ED_Green" in summary["timings"]
 
 
@@ -173,7 +173,7 @@ def test_additional_finite_torus_cli_ed_gw_smoke(tmp_path,geometry,filling,K):
     assert summary["geometry"]==geometry
     assert summary["N"]==2
     assert "ED_Green" in summary["timings"]
-    assert "GW" in summary["timings"]
+    assert "GW[density]" in summary["timings"]
 
 
 def test_cluster_source_response_is_real_finite_difference(tmp_path):
@@ -202,3 +202,64 @@ def test_cluster_source_response_is_real_finite_difference(tmp_path):
     value=summary["computed_chi"]["cluster-ED+GW"]["x_even"]
     assert np.isfinite(value)
     assert "cluster_source_chi" in summary["diagnostics"]
+
+
+def test_selected_pseudospin_and_symmetric_bj_interaction_channels():
+    """All schemes share the original V-only HF map; only dynamical W changes."""
+    from rubycgw.three_torus_interaction_channels import (
+        build_torus_interaction_channel, triangle_v_pairs
+    )
+    from rubycgw.fierz_channel_gw import channel_static_self_energy
+    geom=build_torus_geometry("3x1",RubyParameters(V=0.8))
+    definitions={
+        m:build_torus_interaction_channel(geom,0.8,m)
+        for m in ("density","pseudospin","bj")
+    }
+    assert len(definitions["density"].labels)==18
+    assert len(definitions["pseudospin"].labels)==18
+    assert len(definitions["bj"].labels)==36
+    np.testing.assert_allclose(
+        np.diag(definitions["bj"].coupling),-0.4
+    )
+    np.testing.assert_allclose(
+        np.diag(definitions["pseudospin"].coupling),-0.8/3
+    )
+    rng=np.random.default_rng(20261111)
+    A=rng.normal(size=(18,18))+1j*rng.normal(size=(18,18))
+    rho=.3*np.eye(18)+.02*(A+A.conj().T)
+    values=[channel_static_self_energy(rho,d)[0] for d in definitions.values()]
+    for val in values[1:]:
+        np.testing.assert_allclose(val,values[0],atol=1e-11)
+    # Distinguish selected E-only interaction-channel from a rotated
+    # density basis: its K includes off-diagonal chiral pseudospin form.
+    assert np.max(np.abs(definitions["pseudospin"].vertices.imag))>0.01
+    assert len(triangle_v_pairs(3))==18
+
+
+def test_bj_mode_channel_gw_and_cgw_at_v0():
+    from rubycgw.three_torus_interaction_channels import (
+        build_torus_interaction_channel,
+        solve_interaction_channel_response,
+        one_shot_post_interaction_channel,
+    )
+    from rubycgw.fierz_channel_gw import solve_channel_gw_same_torus
+    from rubycgw.gw import GWOptions
+    from rubycgw.supercell_cgw import SupercellVertexOptions
+    geom=build_torus_geometry("3x1",RubyParameters(ti=1,t1=-.5,t2=.5,V=0))
+    grid=MatsubaraGrid(nk1=1,nk2=1,nw=3,nOmega=1,T=.4)
+    definition=build_torus_interaction_channel(geom,0.,"bj")
+    gwopts=GWOptions(target_filling=2,max_iter=8,tol=1e-6,
+                     mixing=.3,mixing_method="pulay",verbose=False)
+    res=solve_channel_gw_same_torus(geom.h0,definition,grid,opts=gwopts)
+    assert res.converged
+    vopts=SupercellVertexOptions(max_iter=12,tol=1e-5,verbose=False)
+    bare,cov,conv,_=solve_interaction_channel_response(
+        res,definition,geom,grid,(0,0),("z_same",),vopts
+    )
+    assert conv["z_same"]
+    np.testing.assert_allclose(bare["z_same"],cov["z_same"],atol=1e-6)
+    post=one_shot_post_interaction_channel(
+        res,definition,geom.h0,grid,2,vopts,m_max=0
+    )
+    np.testing.assert_allclose(post.G,res.G,atol=1e-7)
+    assert post.fallback_fraction>=0
