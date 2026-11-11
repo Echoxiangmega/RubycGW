@@ -101,6 +101,12 @@ def primitive_cell_pseudospin_channels() -> dict[str, np.ndarray]:
 
     out["z_same"] = out["z_even"]
     out["z_opposite"] = out["z_odd"]
+
+    # Density channels in addition to triangular E-type charge pseudospin.
+    # Uniform charge_total is conserved by canonical ED; its q=0 response
+    # should not be compared to grand-canonical fixed-mu compressibility.
+    out["charge_total"] = np.eye(NSUB, dtype=complex)
+    out["charge_ab"] = np.diag([1, 1, 1, -1, -1, -1]).astype(complex) / np.sqrt(6.0)
     return out
 
 
@@ -113,6 +119,10 @@ _CHANNEL_ALIASES = {
     "xodd": "x_odd",
     "yeven": "y_even",
     "yodd": "y_odd",
+    "cdw": "charge_total",
+    "charge": "charge_total",
+    "n_total": "charge_total",
+    "n_ab": "charge_ab",
 }
 
 
@@ -142,6 +152,7 @@ def available_pseudospin_channels() -> list[str]:
         "Ax", "Ay", "Az", "Bx", "By", "Bz",
         "x_even", "x_odd", "y_even", "y_odd",
         "z_even", "z_odd", "z_same", "z_opposite",
+        "charge_total", "charge_ab",
     ]
 
 
