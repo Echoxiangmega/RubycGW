@@ -120,6 +120,9 @@ def one_shot_post_interaction_channel(
     vertex_opts: SupercellVertexOptions, *,
     m_max: int | None = None,
     allow_unconverged: bool = False,
+    geometry=None,
+    optimize_translation: bool = True,
+    recycle_krylov: bool = True,
     mu_tol: float = 1.e-10,
     mu_max_iter: int = 100,
 ):
@@ -133,7 +136,9 @@ def one_shot_post_interaction_channel(
     """
     response, cache = compute_covariant_channel_susceptibility(
         background, definition, h0, grid, vertex_opts=vertex_opts,
-        m_max=m_max, allow_unconverged=allow_unconverged
+        m_max=m_max, allow_unconverged=allow_unconverged,
+        geometry=geometry, optimize_translation=optimize_translation,
+        recycle_krylov=recycle_krylov,
     )
     Wpost,Ppost,fallback,identity_error=build_channel_gamma_screening(
         definition,response.chi_completed,
@@ -153,4 +158,7 @@ def one_shot_post_interaction_channel(
         fallback_fraction=float(np.mean(fallback)),
         screening_identity_error=float(identity_error),
         response=response,background=background,
+        translation_reduced=bool(response.translation_reduced),
+        source_vertices_solved=int(response.source_vertices_solved),
+        recycled_fallbacks=int(response.recycled_fallbacks),
     )
