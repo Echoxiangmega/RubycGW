@@ -64,6 +64,7 @@ from rubycgw.three_torus_benchmark import (
     SkewEDSectorAdapter, gw_energy_from_state, embedded_gm_energy,
 )
 from rubycgw.fierz_channel_gw import solve_channel_gw_same_torus
+from rubycgw.fierz_channel_continuation import solve_channel_gw_v_ramp
 from rubycgw.three_torus_interaction_channels import (
     build_torus_interaction_channel,
     solve_interaction_channel_response,
@@ -108,6 +109,14 @@ def parse_args():
     p.add_argument("--gw-max-iter",type=int,default=150)
     p.add_argument("--gw-tol",type=float,default=1e-7)
     p.add_argument("--gw-mixing",type=float,default=.22)
+    p.add_argument("--gw-mixing-method",choices=["pulay","linear"],default="pulay")
+    p.add_argument("--gw-pulay-history",type=int,default=6)
+    p.add_argument("--gw-ramp-steps",type=int,default=0,
+                   help="0: direct solve; N>=1: start at V=0 and warm-start N steps to requested V")
+    p.add_argument("--gw-ramp-min-step",type=float,default=.02,
+                   help="abort ramp if a failed V step must be halved below this value")
+    p.add_argument("--gw-ramp-max-stages",type=int,default=100,
+                   help="hard limit on all continuation attempts, including retried stages")
     p.add_argument("--vertex-max-iter",type=int,default=120)
     p.add_argument("--vertex-tol",type=float,default=2e-7)
     p.add_argument("--vertex-restart",type=int,default=12)
@@ -443,7 +452,8 @@ def main():
                     notes="finite-T sector-truncated thermal Lanczos ED")
     opts_gw=GWOptions(
         target_filling=total,max_iter=a.gw_max_iter,tol=a.gw_tol,
-        mixing=a.gw_mixing,mixing_method="pulay",
+        mixing=a.gw_mixing,mixing_method=a.gw_mixing_method,
+        pulay_history=a.gw_pulay_history,
         verbose=a.verbose,momentum_backend="fft",
         mu_tol=1e-10,mu_max_iter=100
     )
@@ -466,11 +476,46 @@ def main():
             label_gw=f"GW[{mode}]"
             label_cgw=f"cGW[{mode}]"
             label_post=f"post-GW[{mode}]"
-            scheme=run(label_gw,lambda definition=definition:
-                solve_channel_gw_same_torus(
-                    geom.h0,definition,grid,opts=opts_gw
+            if a.gw_ramp_steps > 0:
+                ramp=run(label_gw,lambda mode=mode:
+                    solve_channel_gw_v_ramp(
+                        geom.h0,
+                        definition.interaction_pairs,grid,a.V,mode,opts_gw,
+                        initial_steps=a.gw_ramp_steps,
+                        min_step=a.gw_ramp_min_step,
+                        max_stages=a.gw_ramp_max_stages,
+                    )
                 )
-            )
+                if ramp is None:
+                    continue
+                info["diagnostics"][f"{label_gw}_ramp"]=ramp.diagnostics()
+                scheme=ramp.state
+                if not ramp.reached_target:
+                    failure=dict(
+                        method=label_gw,target_V=float(a.V),
+                        last_converged_V=ramp.last_converged_V,
+                        ramp=ramp.diagnostics(),
+                        recommendation=(
+                            "Inspect screening_smin and residual across V. "
+                            "If the response is singular, test symmetry-broken "
+                            "finite-Q solutions; do not treat the last lower-V "
+                            "converged G as the requested target."
+                        ),
+                    )
+                    (out/"gw_failure.json").write_text(
+                        json.dumps(json_safe(failure),indent=2),encoding="utf-8"
+                    )
+                    raise RuntimeError(
+                        f"{label_gw}: continuation did not reach V={a.V:g}; "
+                        f"last converged V={ramp.last_converged_V}, "
+                        f"failure details saved to {out/'gw_failure.json'}"
+                    )
+            else:
+                scheme=run(label_gw,lambda definition=definition:
+                    solve_channel_gw_same_torus(
+                        geom.h0,definition,grid,opts=opts_gw
+                    )
+                )
             if scheme is None:
                 continue
             channel_states[mode]=scheme
@@ -483,7 +528,24 @@ def main():
                 screening_smin=scheme.min_screening_singular_value
             )
             if not scheme.converged and not a.allow_unconverged:
-                raise RuntimeError(f"{label_gw} did not converge: {scheme.final_error:.3e}")
+                failure=dict(method=label_gw,target_V=float(a.V),
+                             residual=float(scheme.final_error),
+                             iterations=int(scheme.iterations),
+                             screening_smin=float(scheme.min_screening_singular_value),
+                             mixing=float(a.gw_mixing),
+                             mixing_method=a.gw_mixing_method,
+                             max_iter=int(a.gw_max_iter),
+                             tolerance=float(a.gw_tol))
+                (out/"gw_failure.json").write_text(
+                    json.dumps(json_safe(failure),indent=2),encoding="utf-8"
+                )
+                raise RuntimeError(
+                    f"{label_gw} did not converge: residual={scheme.final_error:.3e}, "
+                    f"smin={scheme.min_screening_singular_value:.3e}, "
+                    f"iterations={scheme.iterations}; "
+                    f"details saved to {out/'gw_failure.json'}. "
+                    "Use --gw-ramp-steps 10 for warm-start continuation."
+                )
             green_by_method[label_gw]=project_k_green(scheme.G,geom,K)
             method_mu[label_gw]=float(scheme.mu)
             arrays[f"Giw_full_{mode}"]=np.asarray(scheme.G)
