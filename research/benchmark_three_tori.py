@@ -100,7 +100,7 @@ def parse_args():
                    default=["ed","gw","cgw","postgw","cluster"])
     p.add_argument("--gw-channels",nargs="+",choices=["density","pseudospin","bj"],
                    default=["density","pseudospin","bj"],
-                   help="interaction-screening GW variants: original density, projected E pseudospin, half B plus half J")
+                   help="interaction-screening GW variants: original density, exact A1+E pseudospin, half B plus half J")
     p.add_argument("--channels",nargs="+",
                    default=["x_even","y_even","z_same","z_opposite"])
     p.add_argument("--plot-orbital",type=str,default="trace",
@@ -118,7 +118,9 @@ def parse_args():
     p.add_argument("--gw-ramp-max-stages",type=int,default=100,
                    help="hard limit on all continuation attempts, including retried stages")
     p.add_argument("--skip-failed-gw-channel",action="store_true",
-                   help="skip failed GW mode instead of aborting; never evaluate cGW/post from an unconverged G")
+                   help="deprecated compatibility alias: failed GW channels are skipped by default")
+    p.add_argument("--strict-method-failures",action="store_true",
+                   help="optional fail-fast behavior; default is to record failed/unconverged methods and continue")
     p.add_argument("--vertex-max-iter",type=int,default=120)
     p.add_argument("--vertex-tol",type=float,default=2e-7)
     p.add_argument("--vertex-restart",type=int,default=12)
@@ -154,7 +156,8 @@ def parse_args():
     p.add_argument("--no-ed-cache",action="store_true",
                    help="disable saving/loading out/ed_reference.npz across failed GW retries")
     p.add_argument("--seed",type=int,default=20261111)
-    p.add_argument("--allow-unconverged",action="store_true")
+    p.add_argument("--allow-unconverged",action="store_true",
+                   help="deprecated: unconverged results are never used as a reference")
     p.add_argument("--verbose",action="store_true")
     p.add_argument("--out",type=Path,default=Path("results/three_torus_benchmark"))
     return p.parse_args()
@@ -361,6 +364,16 @@ def main():
     rows=[]; curves={}; arrays={}; green_by_method={}; chi_by_method={}
     times={}; energy={}; ed_scalar=None; ed_full=None; ed_chi={}
     method_mu={}; total_times={}; channel_states={}
+    method_status={}
+    def mark_method(method, status, reason="", *, dependent=()):
+        """Persist explicit method status and a readable CSV row."""
+        method_status[method]=dict(status=str(status),reason=str(reason))
+        row(method,"method_status",None,status=status,notes=str(reason))
+        for name in dependent:
+            method_status[name]=dict(status="skipped",reason=f"{method} {status}: {reason}")
+            row(name,"method_status",None,status="skipped",
+                notes=f"depends on {method}: {reason}")
+
     def row(method, quantity, val, *, ref=None, runtime=None, status="ok",notes=""):
         if runtime is None: runtime=times.get(method,None)
         err=("" if ref is None or val is None or not np.isfinite(float(ref))
@@ -383,7 +396,12 @@ def main():
             times[label]=float(perf_counter()-start)
             info["errors"][label]=f"{type(exc).__name__}: {exc}"
             print(f"[benchmark] {label} FAILED: {exc}",flush=True)
-            if not a.allow_unconverged:
+            nonconv=("converge" in str(exc).lower() or
+                     "residual" in str(exc).lower() or
+                     "singular" in str(exc).lower())
+            mark_method(label,"unconverged" if nonconv else "failed",
+                        f"{type(exc).__name__}: {exc}")
+            if a.strict_method_failures:
                 raise
             return None
     if "ed" in methods and ed_cache_data is None:
@@ -420,6 +438,13 @@ def main():
                 )
             return ed,spec,chi
         result=run("ED",stage_ed)
+        if result is None:
+            for ch in channels:
+                row("ED",f"chi[{ch}](Q)",None,status="failed",
+                    notes="canonical ED reference did not complete")
+            row("ED","ground_state_E0",None,status="failed",
+                notes="ED ground/thermal stage did not complete")
+            mark_method("ED_Green","skipped","ED reference stage failed")
         if result is not None:
             ed,sp,chi=result
             energy["ED"]=float(sp.energies[0])
@@ -463,6 +488,9 @@ def main():
                     omega=grid.omega,opts=opts
                 )
             gr=run("ED_Green",stage_ed_green)
+            if gr is None:
+                row("ED","G_rel_Frobenius_K",None,status="failed",
+                    notes="ED Green reference did not complete")
             if gr is not None:
                 info["diagnostics"]["ED_Green"]=dict(
                     mu=gr.mu,thermal_kept_weight=gr.kept_thermal_weight,
@@ -578,6 +606,8 @@ def main():
                     )
                 )
                 if ramp is None:
+                    mark_method(label_cgw,"skipped",f"{label_gw} failed") if "cgw" in methods else None
+                    mark_method(label_post,"skipped",f"{label_gw} failed") if "postgw" in methods else None
                     continue
                 info["diagnostics"][f"{label_gw}_ramp"]=ramp.diagnostics()
                 scheme=ramp.state
@@ -597,16 +627,17 @@ def main():
                     failure_path.write_text(
                         json.dumps(json_safe(failure),indent=2),encoding="utf-8"
                     )
-                    if a.skip_failed_gw_channel:
-                        row(label_gw,"fixed_point",None,status="unconverged",
-                            notes=f"continuation failed; last converged V={ramp.last_converged_V}; {failure_path}")
-                        print(f"[benchmark] skipping {label_gw}: ramp did not reach V={a.V:g}",flush=True)
-                        continue
-                    raise RuntimeError(
-                        f"{label_gw}: continuation did not reach V={a.V:g}; "
-                        f"last converged V={ramp.last_converged_V}, "
-                        f"failure details saved to {failure_path}"
-                    )
+                    why=(f"continuation stopped below target V={a.V:g}; "
+                         f"last converged V={ramp.last_converged_V}; {failure_path}")
+                    mark_method(label_gw,"unconverged",why,
+                                dependent=(
+                                    ([label_cgw] if "cgw" in methods else [])+
+                                    ([label_post] if "postgw" in methods else [])
+                                ))
+                    print(f"[benchmark] {label_gw}: {why}; continuing",flush=True)
+                    if a.strict_method_failures:
+                        raise RuntimeError(why)
+                    continue
             else:
                 scheme=run(label_gw,lambda definition=definition:
                     solve_channel_gw_same_torus(
@@ -614,8 +645,11 @@ def main():
                     )
                 )
             if scheme is None:
+                if "cgw" in methods:
+                    mark_method(label_cgw,"skipped",f"no converged {label_gw}")
+                if "postgw" in methods:
+                    mark_method(label_post,"skipped",f"no converged {label_gw}")
                 continue
-            channel_states[mode]=scheme
             info["diagnostics"][label_gw]=dict(
                 converged=scheme.converged,residual=scheme.final_error,
                 mu=scheme.mu,n_bosonic_channels=len(definition.labels),
@@ -624,7 +658,7 @@ def main():
                 exact_Fierz_identity=True,
                 screening_smin=scheme.min_screening_singular_value
             )
-            if not scheme.converged and not a.allow_unconverged:
+            if not scheme.converged:
                 failure=dict(method=label_gw,target_V=float(a.V),
                              residual=float(scheme.final_error),
                              iterations=int(scheme.iterations),
@@ -637,18 +671,21 @@ def main():
                 failure_path.write_text(
                     json.dumps(json_safe(failure),indent=2),encoding="utf-8"
                 )
-                if a.skip_failed_gw_channel:
-                    row(label_gw,"fixed_point",None,status="unconverged",
-                        notes=f"residual={scheme.final_error:.3e}, smin={scheme.min_screening_singular_value:.3e}; {failure_path}")
-                    print(f"[benchmark] skipping nonconverged {label_gw}",flush=True)
-                    continue
-                raise RuntimeError(
-                    f"{label_gw} did not converge: residual={scheme.final_error:.3e}, "
-                    f"smin={scheme.min_screening_singular_value:.3e}, "
-                    f"iterations={scheme.iterations}; "
-                    f"details saved to {failure_path}. "
-                    "Use --gw-ramp-steps 10 for warm-start continuation."
-                )
+                why=(f"residual={scheme.final_error:.3e} > tol={a.gw_tol:.3e}; "
+                     f"smin={scheme.min_screening_singular_value:.3e}; "
+                     f"iterations={scheme.iterations}; {failure_path}")
+                mark_method(label_gw,"unconverged",why,
+                            dependent=(
+                                ([label_cgw] if "cgw" in methods else [])+
+                                ([label_post] if "postgw" in methods else [])
+                            ))
+                print(f"[benchmark] {label_gw}: {why}; continuing",flush=True)
+                if a.strict_method_failures:
+                    raise RuntimeError(f"{label_gw} did not converge: {why}")
+                continue
+            channel_states[mode]=scheme
+            method_status[label_gw]=dict(status="converged",
+                                         residual=float(scheme.final_error))
             green_by_method[label_gw]=project_k_green(scheme.G,geom,K)
             method_mu[label_gw]=float(scheme.mu)
             arrays[f"Giw_full_{mode}"]=np.asarray(scheme.G)
@@ -664,21 +701,33 @@ def main():
             scheme_chi=run(label_cgw,lambda scheme=scheme,definition=definition:
                 solve_interaction_channel_response(
                     scheme,definition,geom,grid,Q,channels,vertex_opts,
-                    strict=not a.allow_unconverged
+                    strict=True
                 )
             ) if "cgw" in methods else None
+            if "cgw" in methods and scheme_chi is None:
+                for ch in channels:
+                    row(label_cgw,f"chi[{ch}](Q)",None,status="failed",
+                        notes="covariant vertex computation failed; GW background remains valid")
             if scheme_chi is not None:
                 bubble,cov,valid,ctimes=scheme_chi
                 chi_by_method[f"GG[{mode}]"]=bubble
-                chi_by_method[label_cgw]=cov
+                chi_by_method[label_cgw]={
+                    ch:cov[ch] for ch in channels if valid.get(ch,False)
+                }
                 info["diagnostics"][label_cgw]=dict(vertex_converged=valid)
+                method_status[label_cgw]=dict(
+                    status="converged" if all(valid.values()) else "unconverged",
+                    channel_status=valid
+                )
                 for ch in channels:
                     row(label_gw,f"chi_GG[{ch}](Q)",bubble[ch],ref=ed_chi.get(ch),
                         notes="bare GG response on this interaction-channel GW G")
-                    row(label_cgw,f"chi[{ch}](Q)",cov[ch],ref=ed_chi.get(ch),
+                    row(label_cgw,f"chi[{ch}](Q)",
+                        cov[ch] if valid[ch] else None,
+                        ref=ed_chi.get(ch),
                         status="ok" if valid[ch] else "unconverged",
                         notes="same physical source; static tail-completed covariant channel vertex")
-            if "cgw" not in methods:
+            if "cgw" not in methods or scheme_chi is None:
                 from rubycgw.three_torus_benchmark import hermitian_source_components
                 from rubycgw.production_cgw_sox import static_gg_tail_completed
                 b={}
@@ -690,19 +739,21 @@ def main():
                         for src in hermitian_source_components(geom,ch,Q)
                     ))
                     row(label_gw,f"chi_GG[{ch}](Q)",b[ch],ref=ed_chi.get(ch),
-                        notes="bare bubble; no cGW vertex requested")
+                        notes=("bare bubble; cGW vertex unavailable" if scheme_chi is None and "cgw" in methods
+                               else "bare bubble; no cGW vertex requested"))
                 chi_by_method[f"GG[{mode}]"]=b
             if "postgw" in methods:
                 post=run(label_post,lambda scheme=scheme,definition=definition:
                     one_shot_post_interaction_channel(
                         scheme,definition,geom.h0,grid,total,vertex_opts,
-                        m_max=a.post_mmax,allow_unconverged=a.allow_unconverged,
+                        m_max=a.post_mmax,allow_unconverged=False,
                         geometry=geom,
                         optimize_translation=not a.post_no_translation,
                         recycle_krylov=not a.post_no_recycle,
                         mu_tol=opts_gw.mu_tol,mu_max_iter=opts_gw.mu_max_iter
                     ))
                 if post is not None:
+                    method_status[label_post]=dict(status="converged")
                     green_by_method[label_post]=project_k_green(post.G,geom,K)
                     method_mu[label_post]=float(post.mu)
                     arrays[f"Giw_full_post_{mode}"]=np.asarray(post.G)
@@ -739,6 +790,9 @@ def main():
                     mu=float(scheme.mu),density=scheme.density,
                     converged=bool(scheme.converged),final_error=float(scheme.final_error)
                 )
+    if gw is None and "cluster" in methods:
+        mark_method("cluster-ED+GW","skipped",
+                    "no converged GW[density] lattice background")
     if gw is not None and "cluster" in methods:
         cl=run("cluster-ED+GW",lambda:uniform_primitive_cluster_ed_gw(
             geom,grid,gw,nbath=a.nbath,max_iter=a.cluster_max_iter,
@@ -748,10 +802,21 @@ def main():
             verbose=a.verbose
         ))
         if cl is not None:
-            if not cl.converged and not a.allow_unconverged:
-                raise RuntimeError(
-                    f"uniform cluster ED+GW did not converge: {cl.final_error:.3e}"
+            if not cl.converged:
+                why=f"cluster ED+GW residual={cl.final_error:.3e}, tol={a.cluster_tol:.3e}"
+                info["diagnostics"]["cluster-ED+GW"]=dict(
+                    converged=False, residual=float(cl.final_error),
+                    bath_fit_error=float(cl.bath_fit_error),
+                    impurity_mismatch=float(cl.impurity_mismatch),
+                    iterations=int(cl.iterations)
                 )
+                mark_method("cluster-ED+GW","unconverged",why)
+                print(f"[benchmark] {why}; omitting G and energy",flush=True)
+                if a.strict_method_failures:
+                    raise RuntimeError(why)
+            else:
+                method_status["cluster-ED+GW"]=dict(status="converged")
+        if cl is not None and cl.converged:
             green_by_method["cluster-ED+GW"]=project_k_green(cl.G,geom,K)
             method_mu["cluster-ED+GW"]=float(cl.mu)
             arrays["cluster_Giw_full"]=cl.G
@@ -828,6 +893,7 @@ def main():
             runtime=total_s,
             notes="cumulative in one interaction-channel pipeline; shared GW counted once")
     info["method_total_runtime_seconds"]=total_times
+    info["method_status"]=method_status
     # CSV's primary runtime column is the cumulative time the user requested.
     # Preserve the incremental per-stage/per-channel value separately.
     for rec in rows:
