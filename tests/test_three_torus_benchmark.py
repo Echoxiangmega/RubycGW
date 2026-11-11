@@ -130,3 +130,47 @@ def test_three_torus_cli_end_to_end_small_free_case(tmp_path):
     assert summary["N"]==2
     assert "GW" in summary["timings"]
     assert "ED_Green" in summary["timings"]
+
+
+@pytest.mark.parametrize("geometry,filling,K",[
+    ("hex18", 2.0/3.0, (1.0/3.0,1.0/3.0)),
+    ("2x2", 0.5, (0.5,0.0)),
+])
+def test_additional_finite_torus_cli_ed_gw_smoke(tmp_path,geometry,filling,K):
+    """Really run ED spectrum, ED finite-T chi/G and GW on each alternative PBC."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    import json
+    script=Path(__file__).resolve().parents[1]/"research"/"benchmark_three_tori.py"
+    out=tmp_path/geometry
+    cmd=[
+        sys.executable,str(script),
+        "--geometry",geometry,
+        "--V","0",
+        "--filling",str(filling),
+        "--K",str(K[0]),str(K[1]),
+        "--Q",str(K[0]),str(K[1]),
+        "--T",".4",
+        "--nw","3","--nomega","1",
+        "--methods","ed","gw",
+        "--channels","z_same",
+        "--ed-samples","1",
+        "--ed-tau-points","3",
+        "--ed-thermal-eigs","2",
+        "--ed-krylov-steps","12",
+        "--ed-sector-padding","1",
+        "--gw-max-iter","8",
+        "--gw-tol","1e-6",
+        "--plot-tau-points","9",
+        "--out",str(out),
+    ]
+    result=subprocess.run(cmd,capture_output=True,text=True,timeout=180)
+    assert result.returncode==0, result.stdout+"\n"+result.stderr
+    assert (out/"comparison.csv").is_file()
+    assert (out/"green_tau.png").is_file()
+    summary=json.loads((out/"summary.json").read_text())
+    assert summary["geometry"]==geometry
+    assert summary["N"]==2
+    assert "ED_Green" in summary["timings"]
+    assert "GW" in summary["timings"]
