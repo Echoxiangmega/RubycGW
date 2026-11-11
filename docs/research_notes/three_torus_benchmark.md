@@ -313,6 +313,38 @@ smin becomes small, compare symmetry-broken supercell solutions or
 use targeted finite-Q source fields; changing damping alone is not a
 physical remedy.
 
+## Human-readable scorecards (automatically generated)
+
+The original long-format comparison.csv is retained for complete numerical
+provenance. Four additional files are automatically written at the end of
+every benchmark, including runs where one or more methods do not converge:
+
+- **comparison_wide.csv**: one row per method, ED-relative Matsubara G error,
+  imaginary-time G error, four-channel mean chi error, charge (x/y) mean,
+  loop-current (z_same/z_opposite) mean, each individual chi value/error,
+  actual runtime and separate finite-T-vs-E0 energy diagnostic.
+- **ranking_green.csv**: independent Green G(iw) ranking excluding cGW's
+  duplicate GW Green; includes the tau error and time.
+- **ranking_susceptibility.csv**: independent ranking by the arithmetic mean
+  of four physical susceptibility relative errors; a missing, unconverged
+  or skipped channel prevents that method from being ranked.
+- **comparison_summary.md**: two readable ranked tables and physical caveats.
+
+No single all-purpose score is reported, since good G, good susceptibility
+and accurate zero-T energy are not equivalent criteria. Covariant GW
+does not recalculate the one-particle G and therefore reuses the parent
+GW value in comparison_wide.csv (marked shared). post-GW has no chi
+in the current benchmark, and cluster chi can be skipped. The energy
+columns are explicitly *not* ranked because ED E0 and finite-T GW or
+nonvariational cluster energy estimates are not thermodynamically matched.
+
+A particularly important additional diagnostic is
+chi(z_same)-chi(z_opposite). If the ED result distinguishes the two current
+patterns but a GW/cGW variant gives identical values, inspect the
+inter-triangle susceptibility, the physical current vertices and the
+lattice symmetry at Q before asserting that the method selects the
+right current ground state.
+
 ## Outputs
 
 - comparison.csv: method, observable, value, ED reference, relative
