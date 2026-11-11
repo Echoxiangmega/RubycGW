@@ -155,7 +155,11 @@ class RubyEDClusterSolver:
 
         self.basis = fixed_popcount_basis(self.n_sites, self.n_particles)
         self.dimension = int(len(self.basis))
-        if self.dimension < 2:
+        # Particle-addition/removal resolvents at low/high filling need the
+        # physical vacuum/full sectors, each of dimension one. They are
+        # valid Hamiltonian sectors, even though an eigsh ground-state search
+        # requesting several eigenvectors is not meaningful there.
+        if self.dimension < 2 and self.n_particles not in (0, self.n_sites):
             raise ValueError("nontrivial Lanczos ED requires Hilbert-space dimension >= 2")
         self._index_dtype = np.int32 if self.dimension < np.iinfo(np.int32).max else np.int64
 
