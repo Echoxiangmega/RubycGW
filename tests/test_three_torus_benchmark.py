@@ -174,3 +174,31 @@ def test_additional_finite_torus_cli_ed_gw_smoke(tmp_path,geometry,filling,K):
     assert summary["N"]==2
     assert "ED_Green" in summary["timings"]
     assert "GW" in summary["timings"]
+
+
+def test_cluster_source_response_is_real_finite_difference(tmp_path):
+    """Exercise actual +/- source-shifted three-impurity solver at V=0."""
+    import subprocess
+    import sys
+    import json
+    from pathlib import Path
+    script=Path(__file__).resolve().parents[1]/"research"/"benchmark_three_tori.py"
+    out=tmp_path/"cluster_source"
+    cmd=[
+        sys.executable,str(script),
+        "--geometry","3x1","--V","0","--filling",str(2./3.),
+        "--K","0","0","--Q","0","0",
+        "--T",".4","--nw","3","--nomega","1",
+        "--methods","gw","cluster","--channels","x_even",
+        "--gw-max-iter","8","--gw-tol","1e-6",
+        "--nbath","1","--cluster-max-iter","3",
+        "--cluster-tol","1e-4","--source-step","0.01",
+        "--plot-tau-points","9","--out",str(out),
+    ]
+    result=subprocess.run(cmd,capture_output=True,text=True,timeout=180)
+    assert result.returncode==0,result.stdout+"\n"+result.stderr
+    summary=json.loads((out/"summary.json").read_text())
+    assert "cluster-ED+GW" in summary["computed_chi"]
+    value=summary["computed_chi"]["cluster-ED+GW"]["x_even"]
+    assert np.isfinite(value)
+    assert "cluster_source_chi" in summary["diagnostics"]
