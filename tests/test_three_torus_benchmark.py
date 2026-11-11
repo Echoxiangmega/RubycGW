@@ -270,3 +270,34 @@ def test_bj_mode_channel_gw_and_cgw_at_v0():
     )
     np.testing.assert_allclose(post.G,res.G,atol=1e-7)
     assert post.fallback_fraction>=0
+
+
+def test_cli_momentum_green_nplus_nminus_sector_resolvents(tmp_path):
+    """Run the new momentum-resolved ED Green entrypoint, not the legacy one."""
+    import subprocess
+    import sys
+    import json
+    from pathlib import Path
+    script=Path(__file__).resolve().parents[1]/"research"/"benchmark_three_tori.py"
+    out=tmp_path/"ed_momentum_G"
+    cmd=[
+        sys.executable,str(script),
+        "--geometry","3x1","--V","0.1","--filling",str(2./3.),
+        "--K",str(1./3.),"0","--Q","0","0",
+        "--methods","ed","--channels","z_same",
+        "--T",".4","--nw","4","--nomega","1",
+        "--ed-symmetry","momentum","--ed-green-symmetry","momentum",
+        "--ed-samples","1","--ed-tau-points","3",
+        "--ed-sector-padding","1","--ed-thermal-eigs","2",
+        "--ed-krylov-steps","12","--plot-tau-points","9",
+        "--out",str(out),
+    ]
+    r=subprocess.run(cmd,capture_output=True,text=True,timeout=180)
+    assert r.returncode==0,r.stdout+"\n"+r.stderr
+    d=json.loads((out/"summary.json").read_text())
+    assert d["ed_green_symmetry"]=="momentum"
+    assert d["diagnostics"]["ED_Green"]["momentum_sector_dimensions"]
+    G=np.load(out/"raw_arrays.npz")
+    assert G["Giw_K_ED"].shape==(8,6,6)
+    assert np.all(np.isfinite(G["Giw_K_ED"]))
+    assert (out/"green_tau.png").exists()
