@@ -12,7 +12,7 @@ from rubycgw.model import RubyParameters, build_h0, build_interaction
 
 
 def test_pack_dynamic_roundtrip_balances_impurity_block():
-    emb = np.arange(2 * 3 * 2 * 2, dtype=float).reshape(2, 3, 2, 2).astype(complex)
+    emb = np.arange(2 * 3 * 1 * 2 * 2, dtype=float).reshape(2, 3, 1, 2, 2).astype(complex)
     imp = (10 + np.arange(2 * 2 * 2, dtype=float)).reshape(2, 2, 2).astype(complex)
     packed = _pack_dynamic(emb, imp, nk=3)
     emb2, imp2 = _unpack_dynamic(packed, emb.shape, imp.shape, nk=3)

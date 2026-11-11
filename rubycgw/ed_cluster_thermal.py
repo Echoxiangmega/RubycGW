@@ -104,7 +104,10 @@ def _shifted_generator(
     shift = float(energy_shift)
 
     def matvec(x):
-        arr = np.asarray(x)
+        # scipy.sparse.linalg.expm_multiply may call LinearOperator.matvec
+        # with an (dim, 1) column even though the sector solver expects 1D.
+        # Matvec must return a 1D vector; matmat below handles true blocks.
+        arr = np.asarray(x).reshape(-1)
         return -(solver.apply_hamiltonian(V, arr) - shift * arr)
 
     def matmat(X):

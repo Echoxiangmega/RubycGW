@@ -110,9 +110,12 @@ def build_channel_definition(
         "bj": "bj",
         "b+j": "bj",
         "symmetric": "bj",
+        "pseudospin": "pseudospin",
+        "e": "pseudospin",
+        "e_only": "pseudospin",
     }
     if mode_key not in aliases:
-        raise ValueError("mode must be one of density, B, J, BJ")
+        raise ValueError("mode must be one of density, pseudospin, B, J, BJ")
     mode_key = aliases[mode_key]
     pairs = tuple((int(i), int(j)) for i, j in interaction_pairs)
     nsite = int(nsite)
@@ -128,6 +131,51 @@ def build_channel_definition(
             g[j, i] += V
         labels = tuple(f"n{i}" for i in range(nsite))
         return ChannelDefinition("density", K, g, labels, pairs)
+
+    if mode_key == "pseudospin":
+        # Exact three-orbital identity (no E-only truncation):
+        #   V*(n0*n1+n1*n2+n2*n0)
+        #     = -(V/6)*(Sx**2+Sy**2+Sz**2)
+        #       + V*n_A1*n_E + (V/2)*n_E.
+        # Here d_A1, d_+, d_- are the unitary triangle Fourier orbitals,
+        # S are Pauli bilinears in the E doublet, and n_E=n_++n_-.
+        # Thus g_S=-V/3, g_A1,E=g_E,A1=V in 1/2 O^T g O.
+        # The linear shift +(V/2)n_E belongs to the operator-square
+        # identity. In the GW numerical skeleton the exact original-V
+        # Hartree-Fock map is retained explicitly (see channel_static_parts)
+        # and consequently this shift must NOT be added to h0 again.
+        # The complete (Sx,Sy,Sz,n_A1,n_E) bosonic set is retained:
+        # this is an exact bare interaction rewriting, not E-only projection.
+        if nsite % 6:
+            raise ValueError("exact triangle pseudospin requires complete six-site Ruby cells")
+        omega = np.exp(2j*np.pi/3.0)
+        a1 = np.ones(3, dtype=complex) / np.sqrt(3.0)
+        eplus = np.array([1.0, omega, omega**2]) / np.sqrt(3.0)
+        eminus = np.array([1.0, omega**2, omega]) / np.sqrt(3.0)
+        cross = np.outer(eplus, eminus.conj())
+        sx = cross + cross.conj().T
+        sy = -1j*(cross-cross.conj().T)
+        sz = np.outer(eplus, eplus.conj()) - np.outer(eminus, eminus.conj())
+        na = np.outer(a1, a1.conj())
+        ne = np.eye(3, dtype=complex)-na
+        vertices = []
+        labels = []
+        g = np.zeros((5*(nsite//3),5*(nsite//3)), dtype=complex)
+        for tri in range(nsite//3):
+            cell, kind = divmod(tri, 2)
+            sign = 1.0 if kind == 0 else -1.0
+            local = (sx, sign*sy, sign*sz, na, ne)
+            names = ("x","y","z","n_A1","n_E")
+            sl = slice(3*tri,3*(tri+1))
+            for mu,(mat,name) in enumerate(zip(local,names)):
+                full = np.zeros((nsite,nsite),dtype=complex)
+                full[sl,sl]=0.5*(mat+mat.conj().T)
+                vertices.append(full)
+                labels.append(f"E{cell}_{'A' if kind==0 else 'B'}_{name}")
+            a=5*tri
+            g[a:a+3,a:a+3]=(-V/3.0)*np.eye(3)
+            g[a+3,a+4]=g[a+4,a+3]=V
+        return ChannelDefinition("pseudospin",np.asarray(vertices),g,tuple(labels),pairs)
 
     vertices = []
     labels = []
@@ -153,22 +201,51 @@ def build_channel_definition(
     return ChannelDefinition(mode_key, K, g, tuple(labels), pairs)
 
 
+def channel_static_parts(
+    rho: np.ndarray,
+    definition: ChannelDefinition,
+    *,
+    symmetrize: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Static first-order tadpole/exchange, exact for all three benchmark modes.
+
+    Density and BJ are algebraically exact Fierz representations; the E-only
+    pseudospin selection is applied exclusively to the *dynamic* W-g part.
+    Its static H/F contribution is reconstructed from the six physical
+    triangle-V bonds, avoiding an unphysical O(V) offset.
+    For finite transfer derivatives, use symmetrize=False.
+    """
+    rho = np.asarray(rho, dtype=complex)
+    if definition.mode == "pseudospin":
+        n = rho.shape[0]
+        tad = np.zeros_like(rho)
+        exchange = np.zeros_like(rho)
+        V = -3.0 * float(np.real(definition.coupling[0, 0]))
+        for i, j in definition.interaction_pairs:
+            tad[i, i] += V * rho[j, j]
+            tad[j, j] += V * rho[i, i]
+            exchange[i, j] -= V * rho[i, j]
+            exchange[j, i] -= V * rho[j, i]
+    else:
+        K = np.asarray(definition.vertices, dtype=complex)
+        g = np.asarray(definition.coupling, dtype=complex)
+        obs = np.einsum("aij,ji->a", K, rho, optimize=True)
+        tad = np.einsum("aij,ab,b->ij", K, g, obs, optimize=True)
+        exchange = -np.einsum(
+            "ba,aik,kl,blj->ij", g, K, rho, K, optimize=True
+        )
+    if symmetrize:
+        tad = 0.5 * (tad + tad.conj().T)
+        exchange = 0.5 * (exchange + exchange.conj().T)
+    return tad + exchange, tad, exchange
+
+
 def channel_static_self_energy(
     rho: np.ndarray,
     definition: ChannelDefinition,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Exact first-order tadpole+exchange for the chosen bilinear representation."""
-    rho = np.asarray(rho, dtype=complex)
-    K = np.asarray(definition.vertices, dtype=complex)
-    g = np.asarray(definition.coupling, dtype=complex)
-    obs = np.einsum("aij,ji->a", K, rho, optimize=True)
-    tad = np.einsum("aij,ab,b->ij", K, g, obs, optimize=True)
-    exchange = -np.einsum(
-        "ba,aik,kl,blj->ij", g, K, rho, K, optimize=True
-    )
-    tad = 0.5 * (tad + tad.conj().T)
-    exchange = 0.5 * (exchange + exchange.conj().T)
-    return tad + exchange, tad, exchange
+    """Return the exact physical static HF map for the selected channel."""
+    return channel_static_parts(rho, definition, symmetrize=True)
 
 
 def _pair_polarization(
@@ -395,17 +472,7 @@ def channel_vertex_kernel_parts(
     g = np.asarray(definition.coupling, dtype=complex)
 
     drho = float(grid.T) * np.sum(X0, axis=0)
-    dobs = np.einsum("aij,ji->a", K, drho, optimize=True)
-    d_tad = np.einsum("aij,ab,b->ij", K, g, dobs, optimize=True)
-    d_ex = -np.einsum(
-        "ba,aik,kl,blj->ij", g, K, drho, K, optimize=True
-    )
-    d_static = d_tad + d_ex
-    # The background map explicitly Hermitian-symmetrizes its static
-    # tadpole/exchange matrices. Differentiate that numerical map itself, rather
-    # than its unsymmetrized algebraic precursor, so the analytic cGW kernel is
-    # exactly the tangent of the fixed-point equations used above.
-    d_static = 0.5 * (d_static + d_static.conj().T)
+    d_static, _, _ = channel_static_parts(drho, definition, symmetrize=True)
     gamma_static = np.broadcast_to(
         d_static[None, None, None], np.asarray(Gamma).shape
     ).copy()
@@ -518,6 +585,7 @@ __all__ = [
     "ChannelVertexResult",
     "build_channel_definition",
     "channel_static_self_energy",
+    "channel_static_parts",
     "compute_channel_polarization",
     "compute_channel_screened_interaction",
     "compute_channel_correlation_self_energy",

@@ -1,0 +1,303 @@
+"""Fast unit tests for identical finite-torus benchmark geometry and observables."""
+import numpy as np
+import pytest
+
+from rubycgw.model import RubyParameters, build_h0
+from rubycgw.grids import MatsubaraGrid
+from rubycgw.pseudospin import primitive_pseudospin_vertex
+from rubycgw.three_torus_benchmark import (
+    build_torus_geometry, k_projector, project_k_green,
+    hermitian_source_components, green_k_tau, max_required_ed_dimension,
+)
+
+
+@pytest.mark.parametrize("name,ncell,momenta",[
+    ("3x1",3,[(0,0),(1/3,0),(2/3,0)]),
+    ("2x2",4,[(0,0),(.5,0),(0,.5),(.5,.5)]),
+    ("hex18",3,[(0,0),(1/3,1/3),(2/3,2/3)]),
+])
+def test_torus_geometry_projectors_orthogonal_and_spectral(name,ncell,momenta):
+    params=RubyParameters(ti=1.,t1=-.5,t2=.5,V=.3)
+    g=build_torus_geometry(name,params)
+    assert g.nsites==ncell*6
+    assert g.h0.shape==(1,1,6*ncell,6*ncell)
+    assert g.vq.shape==(1,1,6*ncell,6*ncell)
+    assert np.max(abs(g.h0-g.h0.swapaxes(-1,-2).conj()))<1e-12
+    assert np.max(abs(g.vq-g.vq.swapaxes(-1,-2).conj()))<1e-12
+    P=[k_projector(g,q) for q in momenta]
+    allP=np.column_stack(P)
+    np.testing.assert_allclose(allP.conj().T@allP,np.eye(6*ncell),atol=2e-12)
+    for q,U in zip(momenta,P):
+        H=U.conj().T@g.h0[0,0]@U
+        h_expected=build_h0(np.array([q]),params)[0]
+        np.testing.assert_allclose(H,h_expected,atol=2e-12)
+    vals=np.sort(np.linalg.eigvalsh(g.h0[0,0]))
+    valsk=np.sort(np.concatenate([
+        np.linalg.eigvalsh(U.conj().T@g.h0[0,0]@U) for U in P
+    ]))
+    np.testing.assert_allclose(vals,valsk,atol=2e-12)
+
+
+def test_invalid_torus_momenta_are_rejected():
+    p=RubyParameters()
+    for geo,invalid in [("3x1",(.5,0)),("2x2",(1/3,0)),("hex18",(1/3,0))]:
+        g=build_torus_geometry(geo,p)
+        with pytest.raises(ValueError,match="commensurate"):
+            g.validate_momentum(invalid)
+
+
+@pytest.mark.parametrize("name,Q",[
+    ("3x1",(1/3,0)),("2x2",(.5,0)),("hex18",(1/3,1/3))
+])
+def test_source_components_reconstruct_complex_q(name,Q):
+    g=build_torus_geometry(name,RubyParameters())
+    comps=hermitian_source_components(g,"z_same",Q)
+    assert all(np.max(abs(x-x.conj().T))<1e-12 for x in comps)
+    K=primitive_pseudospin_vertex("z_same")
+    reference=np.zeros((g.nsites,g.nsites),dtype=complex)
+    for i,R in enumerate(g.cells):
+        reference[6*i:6*(i+1),6*i:6*(i+1)]=(
+            np.exp(-2j*np.pi*np.dot(Q,R))*K/np.sqrt(g.ncell)
+        )
+    reconstructed=comps[0] if len(comps)==1 else comps[0]-1j*comps[1]
+    np.testing.assert_allclose(reconstructed,reference,atol=1e-12)
+
+
+def test_finite_fermionic_green_tau_reference_exact():
+    p=RubyParameters(ti=1.,t1=-.5,t2=.5,V=0.)
+    g=build_torus_geometry("3x1",p)
+    q=(1/3,0)
+    U=k_projector(g,q)
+    H=U.conj().T@g.h0[0,0]@U
+    T=.125; mu=.11
+    grid=MatsubaraGrid(nk1=1,nk2=1,nw=10,nOmega=2,T=T)
+    G=np.asarray([np.linalg.inv((1j*w+mu)*np.eye(6)-H) for w in grid.omega])
+    tau=np.linspace(0,1/T,17)
+    gt=green_k_tau(G,grid.omega,T,mu,H,tau)
+    evals=np.linalg.eigvalsh(H)
+    from scipy.special import expit
+    n=float(np.sum(expit(-(evals-mu)/T)))
+    np.testing.assert_allclose(np.trace(gt[0]),-(6-n),atol=3e-13)
+    np.testing.assert_allclose(np.trace(gt[-1]),-n,atol=3e-13)
+    assert np.max(abs(gt[:,0,0].imag))<1e-13
+
+
+def test_noninteracting_GK_projection_and_ed_sector_cap():
+    g=build_torus_geometry("2x2",RubyParameters(V=0))
+    U=k_projector(g,(.5,.5))
+    H=g.h0[0,0]
+    omega=(2*np.arange(-4,4)+1)*np.pi*.2
+    full=np.asarray([np.linalg.inv((1j*w+.05)*np.eye(24)-H) for w in omega])
+    projected=project_k_green(full,g,(.5,.5))
+    direct=np.asarray([np.linalg.inv((1j*w+.05)*np.eye(6)-U.conj().T@H@U) for w in omega])
+    np.testing.assert_allclose(projected,direct,atol=2e-12)
+    assert max_required_ed_dimension(24,8,1)>=735471
+
+
+def test_three_torus_cli_end_to_end_small_free_case(tmp_path):
+    """Small noninteracting full-pipeline smoke; no physics claim at tiny grids."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    script=Path(__file__).resolve().parents[1]/"research"/"benchmark_three_tori.py"
+    out=tmp_path/"smoke"
+    cmd=[
+        sys.executable,str(script),
+        "--geometry","3x1","--V","0","--filling",str(2./3.),
+        "--K","0","0","--Q","0","0",
+        "--T",".4","--nw","3","--nomega","1",
+        "--methods","ed","gw","cgw","postgw","cluster",
+        "--channels","x_even",
+        "--gw-max-iter","8","--gw-tol","1e-6",
+        "--vertex-max-iter","12","--vertex-tol","1e-5",
+        "--post-mmax","0","--nbath","1",
+        "--cluster-max-iter","3","--cluster-tol","1e-4",
+        "--ed-samples","1","--ed-tau-points","3",
+        "--ed-thermal-eigs","2","--ed-krylov-steps","12",
+        "--ed-sector-padding","1","--plot-tau-points","9",
+        "--skip-cluster-chi",
+        "--out",str(out),
+    ]
+    result=subprocess.run(cmd,capture_output=True,text=True,timeout=180)
+    assert result.returncode==0, result.stdout+"\n"+result.stderr
+    assert (out/"summary.json").is_file()
+    assert (out/"comparison.csv").is_file()
+    assert (out/"raw_arrays.npz").is_file()
+    assert (out/"green_tau.png").is_file()
+    import json
+    summary=json.loads((out/"summary.json").read_text())
+    assert summary["geometry"]=="3x1"
+    assert summary["N"]==2
+    assert "GW[density]" in summary["timings"]
+    assert "ED_Green" in summary["timings"]
+
+
+@pytest.mark.parametrize("geometry,filling,K",[
+    ("hex18", 2.0/3.0, (1.0/3.0,1.0/3.0)),
+    ("2x2", 0.5, (0.5,0.0)),
+])
+def test_additional_finite_torus_cli_ed_gw_smoke(tmp_path,geometry,filling,K):
+    """Really run ED spectrum, ED finite-T chi/G and GW on each alternative PBC."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    import json
+    script=Path(__file__).resolve().parents[1]/"research"/"benchmark_three_tori.py"
+    out=tmp_path/geometry
+    cmd=[
+        sys.executable,str(script),
+        "--geometry",geometry,
+        "--V","0",
+        "--filling",str(filling),
+        "--K",str(K[0]),str(K[1]),
+        "--Q",str(K[0]),str(K[1]),
+        "--T",".4",
+        "--nw","3","--nomega","1",
+        "--methods","ed","gw",
+        "--channels","z_same",
+        "--ed-samples","1",
+        "--ed-tau-points","3",
+        "--ed-thermal-eigs","2",
+        "--ed-krylov-steps","12",
+        "--ed-sector-padding","1",
+        "--gw-max-iter","8",
+        "--gw-tol","1e-6",
+        "--plot-tau-points","9",
+        "--out",str(out),
+    ]
+    result=subprocess.run(cmd,capture_output=True,text=True,timeout=180)
+    assert result.returncode==0, result.stdout+"\n"+result.stderr
+    assert (out/"comparison.csv").is_file()
+    assert (out/"green_tau.png").is_file()
+    summary=json.loads((out/"summary.json").read_text())
+    assert summary["geometry"]==geometry
+    assert summary["N"]==2
+    assert "ED_Green" in summary["timings"]
+    assert "GW[density]" in summary["timings"]
+
+
+def test_cluster_source_response_is_real_finite_difference(tmp_path):
+    """Exercise actual +/- source-shifted three-impurity solver at V=0."""
+    import subprocess
+    import sys
+    import json
+    from pathlib import Path
+    script=Path(__file__).resolve().parents[1]/"research"/"benchmark_three_tori.py"
+    out=tmp_path/"cluster_source"
+    cmd=[
+        sys.executable,str(script),
+        "--geometry","3x1","--V","0","--filling",str(2./3.),
+        "--K","0","0","--Q","0","0",
+        "--T",".4","--nw","3","--nomega","1",
+        "--methods","gw","cluster","--channels","x_even",
+        "--gw-max-iter","8","--gw-tol","1e-6",
+        "--nbath","1","--cluster-max-iter","3",
+        "--cluster-tol","1e-4","--source-step","0.01",
+        "--plot-tau-points","9","--out",str(out),
+    ]
+    result=subprocess.run(cmd,capture_output=True,text=True,timeout=180)
+    assert result.returncode==0,result.stdout+"\n"+result.stderr
+    summary=json.loads((out/"summary.json").read_text())
+    assert "cluster-ED+GW" in summary["computed_chi"]
+    value=summary["computed_chi"]["cluster-ED+GW"]["x_even"]
+    assert np.isfinite(value)
+    assert "cluster_source_chi" in summary["diagnostics"]
+
+
+def test_selected_pseudospin_and_symmetric_bj_interaction_channels():
+    """All schemes share the original V-only HF map; only dynamical W changes."""
+    from rubycgw.three_torus_interaction_channels import (
+        build_torus_interaction_channel, triangle_v_pairs
+    )
+    from rubycgw.fierz_channel_gw import channel_static_self_energy
+    geom=build_torus_geometry("3x1",RubyParameters(V=0.8))
+    definitions={
+        m:build_torus_interaction_channel(geom,0.8,m)
+        for m in ("density","pseudospin","bj")
+    }
+    assert len(definitions["density"].labels)==18
+    assert len(definitions["pseudospin"].labels)==30
+    assert len(definitions["bj"].labels)==36
+    np.testing.assert_allclose(
+        np.diag(definitions["bj"].coupling),-0.4
+    )
+    diag=np.diag(definitions["pseudospin"].coupling)
+    for m in range(6):
+        np.testing.assert_allclose(diag[5*m:5*m+3],-0.8/3)
+        np.testing.assert_allclose(diag[5*m+3:5*m+5],0.)
+        np.testing.assert_allclose(
+            definitions["pseudospin"].coupling[5*m+3,5*m+4],0.8
+        )
+        np.testing.assert_allclose(
+            definitions["pseudospin"].coupling[5*m+4,5*m+3],0.8
+        )
+    rng=np.random.default_rng(20261111)
+    A=rng.normal(size=(18,18))+1j*rng.normal(size=(18,18))
+    rho=.3*np.eye(18)+.02*(A+A.conj().T)
+    values=[channel_static_self_energy(rho,d)[0] for d in definitions.values()]
+    for val in values[1:]:
+        np.testing.assert_allclose(val,values[0],atol=1e-11)
+    # Distinguish selected E-only interaction-channel from a rotated
+    # density basis: its K includes off-diagonal chiral pseudospin form.
+    assert np.max(np.abs(definitions["pseudospin"].vertices.imag))>0.01
+    assert len(triangle_v_pairs(3))==18
+
+
+def test_bj_mode_channel_gw_and_cgw_at_v0():
+    from rubycgw.three_torus_interaction_channels import (
+        build_torus_interaction_channel,
+        solve_interaction_channel_response,
+        one_shot_post_interaction_channel,
+    )
+    from rubycgw.fierz_channel_gw import solve_channel_gw_same_torus
+    from rubycgw.gw import GWOptions
+    from rubycgw.supercell_cgw import SupercellVertexOptions
+    geom=build_torus_geometry("3x1",RubyParameters(ti=1,t1=-.5,t2=.5,V=0))
+    grid=MatsubaraGrid(nk1=1,nk2=1,nw=3,nOmega=1,T=.4)
+    definition=build_torus_interaction_channel(geom,0.,"bj")
+    gwopts=GWOptions(target_filling=2,max_iter=8,tol=1e-6,
+                     mixing=.3,mixing_method="pulay",verbose=False)
+    res=solve_channel_gw_same_torus(geom.h0,definition,grid,opts=gwopts)
+    assert res.converged
+    vopts=SupercellVertexOptions(max_iter=12,tol=1e-5,verbose=False)
+    bare,cov,conv,_=solve_interaction_channel_response(
+        res,definition,geom,grid,(0,0),("z_same",),vopts
+    )
+    assert conv["z_same"]
+    np.testing.assert_allclose(bare["z_same"],cov["z_same"],atol=1e-6)
+    post=one_shot_post_interaction_channel(
+        res,definition,geom.h0,grid,2,vopts,m_max=0
+    )
+    np.testing.assert_allclose(post.G,res.G,atol=1e-7)
+    assert post.fallback_fraction>=0
+
+
+def test_cli_momentum_green_nplus_nminus_sector_resolvents(tmp_path):
+    """Run the new momentum-resolved ED Green entrypoint, not the legacy one."""
+    import subprocess
+    import sys
+    import json
+    from pathlib import Path
+    script=Path(__file__).resolve().parents[1]/"research"/"benchmark_three_tori.py"
+    out=tmp_path/"ed_momentum_G"
+    cmd=[
+        sys.executable,str(script),
+        "--geometry","3x1","--V","0.1","--filling",str(2./3.),
+        "--K",str(1./3.),"0","--Q","0","0",
+        "--methods","ed","--channels","z_same",
+        "--T",".4","--nw","4","--nomega","1",
+        "--ed-symmetry","momentum","--ed-green-symmetry","momentum",
+        "--ed-samples","1","--ed-tau-points","3",
+        "--ed-sector-padding","1","--ed-thermal-eigs","2",
+        "--ed-krylov-steps","12","--plot-tau-points","9",
+        "--out",str(out),
+    ]
+    r=subprocess.run(cmd,capture_output=True,text=True,timeout=180)
+    assert r.returncode==0,r.stdout+"\n"+r.stderr
+    d=json.loads((out/"summary.json").read_text())
+    assert d["ed_green_symmetry"]=="momentum"
+    assert d["diagnostics"]["ED_Green"]["momentum_sector_dimensions"]
+    G=np.load(out/"raw_arrays.npz")
+    assert G["Giw_K_ED"].shape==(8,6,6)
+    assert np.all(np.isfinite(G["Giw_K_ED"]))
+    assert (out/"green_tau.png").exists()
