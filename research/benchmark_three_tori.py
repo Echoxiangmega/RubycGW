@@ -117,6 +117,8 @@ def parse_args():
                    help="abort ramp if a failed V step must be halved below this value")
     p.add_argument("--gw-ramp-max-stages",type=int,default=100,
                    help="hard limit on all continuation attempts, including retried stages")
+    p.add_argument("--skip-failed-gw-channel",action="store_true",
+                   help="skip failed GW mode instead of aborting; never evaluate cGW/post from an unconverged G")
     p.add_argument("--vertex-max-iter",type=int,default=120)
     p.add_argument("--vertex-tol",type=float,default=2e-7)
     p.add_argument("--vertex-restart",type=int,default=12)
@@ -591,13 +593,19 @@ def main():
                             "converged G as the requested target."
                         ),
                     )
-                    (out/"gw_failure.json").write_text(
+                    failure_path=out/f"gw_failure_{mode}.json"
+                    failure_path.write_text(
                         json.dumps(json_safe(failure),indent=2),encoding="utf-8"
                     )
+                    if a.skip_failed_gw_channel:
+                        row(label_gw,"fixed_point",None,status="unconverged",
+                            notes=f"continuation failed; last converged V={ramp.last_converged_V}; {failure_path}")
+                        print(f"[benchmark] skipping {label_gw}: ramp did not reach V={a.V:g}",flush=True)
+                        continue
                     raise RuntimeError(
                         f"{label_gw}: continuation did not reach V={a.V:g}; "
                         f"last converged V={ramp.last_converged_V}, "
-                        f"failure details saved to {out/'gw_failure.json'}"
+                        f"failure details saved to {failure_path}"
                     )
             else:
                 scheme=run(label_gw,lambda definition=definition:
@@ -625,14 +633,20 @@ def main():
                              mixing_method=a.gw_mixing_method,
                              max_iter=int(a.gw_max_iter),
                              tolerance=float(a.gw_tol))
-                (out/"gw_failure.json").write_text(
+                failure_path=out/f"gw_failure_{mode}.json"
+                failure_path.write_text(
                     json.dumps(json_safe(failure),indent=2),encoding="utf-8"
                 )
+                if a.skip_failed_gw_channel:
+                    row(label_gw,"fixed_point",None,status="unconverged",
+                        notes=f"residual={scheme.final_error:.3e}, smin={scheme.min_screening_singular_value:.3e}; {failure_path}")
+                    print(f"[benchmark] skipping nonconverged {label_gw}",flush=True)
+                    continue
                 raise RuntimeError(
                     f"{label_gw} did not converge: residual={scheme.final_error:.3e}, "
                     f"smin={scheme.min_screening_singular_value:.3e}, "
                     f"iterations={scheme.iterations}; "
-                    f"details saved to {out/'gw_failure.json'}. "
+                    f"details saved to {failure_path}. "
                     "Use --gw-ramp-steps 10 for warm-start continuation."
                 )
             green_by_method[label_gw]=project_k_green(scheme.G,geom,K)
