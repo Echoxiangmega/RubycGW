@@ -176,13 +176,21 @@ def output_rows(rows, out):
 
 
 def json_safe(x):
-    if isinstance(x,(np.integer,)): return int(x)
-    if isinstance(x,(np.floating,)): return float(x)
-    if isinstance(x,(np.bool_,)): return bool(x)
-    if isinstance(x,np.ndarray): return x.tolist()
-    if isinstance(x,dict): return {str(k):json_safe(v) for k,v in x.items()}
-    if isinstance(x,(list,tuple)): return [json_safe(y) for y in x]
-    if isinstance(x,(float,int,str,bool)) or x is None: return x
+    if isinstance(x, np.ndarray):
+        return json_safe(x.tolist())
+    if isinstance(x, (np.integer,)):
+        return int(x)
+    if isinstance(x, (np.floating, float)):
+        val=float(x)
+        return val if np.isfinite(val) else None
+    if isinstance(x, (np.bool_,)):
+        return bool(x)
+    if isinstance(x, dict):
+        return {str(k):json_safe(v) for k,v in x.items()}
+    if isinstance(x, (list,tuple)):
+        return [json_safe(y) for y in x]
+    if isinstance(x, (int,str,bool)) or x is None:
+        return x
     return str(x)
 
 
