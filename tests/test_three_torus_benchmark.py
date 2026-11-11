@@ -216,14 +216,21 @@ def test_selected_pseudospin_and_symmetric_bj_interaction_channels():
         for m in ("density","pseudospin","bj")
     }
     assert len(definitions["density"].labels)==18
-    assert len(definitions["pseudospin"].labels)==18
+    assert len(definitions["pseudospin"].labels)==30
     assert len(definitions["bj"].labels)==36
     np.testing.assert_allclose(
         np.diag(definitions["bj"].coupling),-0.4
     )
-    np.testing.assert_allclose(
-        np.diag(definitions["pseudospin"].coupling),-0.8/3
-    )
+    diag=np.diag(definitions["pseudospin"].coupling)
+    for m in range(6):
+        np.testing.assert_allclose(diag[5*m:5*m+3],-0.8/3)
+        np.testing.assert_allclose(diag[5*m+3:5*m+5],0.)
+        np.testing.assert_allclose(
+            definitions["pseudospin"].coupling[5*m+3,5*m+4],0.8
+        )
+        np.testing.assert_allclose(
+            definitions["pseudospin"].coupling[5*m+4,5*m+3],0.8
+        )
     rng=np.random.default_rng(20261111)
     A=rng.normal(size=(18,18))+1j*rng.normal(size=(18,18))
     rho=.3*np.eye(18)+.02*(A+A.conj().T)
