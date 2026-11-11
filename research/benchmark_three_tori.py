@@ -41,6 +41,7 @@ from rubycgw.supercell_gw_fast import solve_matrix_gw_fast
 from rubycgw.supercell_gw_split import one_body_density_matrix_tail
 from rubycgw.supercell_cgw import SupercellVertexOptions
 from rubycgw.ed18 import ED18Solver
+from rubycgw.momentum_ed import MomentumTorusED
 from rubycgw.ed18_thermal import thermal_response as hex_thermal_response
 from rubycgw.ed_cluster import RubyEDClusterSolver
 from rubycgw.ed_cluster_thermal import thermal_response as rect_thermal_response
@@ -109,6 +110,8 @@ def parse_args():
     p.add_argument("--source-step",type=float,default=1e-3)
     p.add_argument("--skip-cluster-chi",action="store_true",
                    help="skip expensive finite-source cluster-covariant chi; no false bubble alias")
+    p.add_argument("--ed-symmetry",choices=["momentum","legacy"],default="momentum",
+                   help="canonical ED ground and finite-T chi: momentum-block Krylov or legacy full-sector Krylov; ED G still uses thermal Lanczos full-sector")
     p.add_argument("--ed-samples",type=int,default=6)
     p.add_argument("--ed-tau-points",type=int,default=17)
     p.add_argument("--ed-sector-padding",type=int,default=1)
@@ -276,7 +279,12 @@ def main():
               hoppings=dict(t=a.t,t1=a.t1,t2=a.t2),
               channels=channels,allowed_K=geom.allowed_momenta(),
               gw_interaction_channels=list(a.gw_channels),
-              ed_symmetry="fixed-N sectors only; translation used for Green reconstruction, not momentum-block diagonalization",
+              ed_symmetry=(
+                  "many-body translation blocks for ED ground state and canonical finite-T chi; "
+                  "ED Green still uses unblocked thermal Lanczos"
+                  if a.ed_symmetry=="momentum" else
+                  "legacy full fixed-N solver"
+              ),
               ED_green="truncated-sector finite-T Lanczos (not full thermal trace)",
               ED_chi="canonical fixed-N stochastic thermal typicality",
               GW_ensemble="grand canonical, fixed mean N",
@@ -315,6 +323,17 @@ def main():
             return None
     if "ed" in methods:
         def stage_ed():
+            if a.ed_symmetry=="momentum":
+                ed=MomentumTorusED(geom,params,n_particles=N)
+                spec=ed.ground_spectrum(a.V,n_eigs=a.ed_eigs)
+                chi=ed.thermal_response(
+                    a.V,a.T,Q,channels,
+                    n_trace_vectors=a.ed_samples,
+                    tau_points=a.ed_tau_points,
+                    seed=a.seed,
+                    energy_shift=float(spec.energies[0])
+                )
+                return ed,spec,chi
             if geom.name=="hex18":
                 ed=ED18Solver(params,n_particles=N)
                 spec=ed.solve(a.V,n_eigs=a.ed_eigs)
@@ -342,7 +361,10 @@ def main():
             info["diagnostics"]["ED"]=dict(
                 dimension=int(ed.dimension),ground_multiplicity=int(sp.ground_multiplicity),
                 gap=float(sp.gap_above_manifold),samples=a.ed_samples,
-                tau_points=a.ed_tau_points
+                tau_points=a.ed_tau_points,
+                symmetry=a.ed_symmetry,
+                sector_dimensions=(list(map(int,sp.sector_dimensions))
+                                   if hasattr(sp,"sector_dimensions") else None)
             )
             row("ED","ground_state_E0",energy["ED"],runtime=times["ED"],
                 notes="exact fixed-N ground state up to Lanczos tolerance")
