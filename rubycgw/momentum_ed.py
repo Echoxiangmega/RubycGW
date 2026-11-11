@@ -266,6 +266,7 @@ class MomentumTorusED:
     def thermal_response(
         self,V:float,T:float,Q,channels,*,n_trace_vectors=6,
         tau_points=17,seed=20261111,energy_shift=None,
+        trace_mode="stochastic",
     ):
         """Canonical finite-T C(Q,tau) and chi using K-sector stochastic traces."""
         if T<=0 or tau_points<3 or tau_points%2!=1:
@@ -304,10 +305,23 @@ class MomentumTorusED:
             As=(-Hs + sparse.eye(Hs.shape[0],format="csr")*float(energy_shift)).tocsr()
             At=(-Ht + sparse.eye(Ht.shape[0],format="csr")*float(energy_shift)).tocsr()
             transfer=[self.project_onebody(M,ik,kto) for M in sources]
-            # Random-phase vectors have norm sqrt(dim), giving E[r r^dag]=I.
-            for ir in range(int(n_trace_vectors)):
-                r=np.exp(1j*rng.uniform(0,2*np.pi,block.dimension))
-                wr=1.0/float(n_trace_vectors)
+            # E[r r^dag]=I for unit-modulus random phases. In exact
+            # test mode, iterate the full orthonormal block basis instead.
+            if trace_mode == "exact":
+                if block.dimension > 128:
+                    raise ValueError("exact momentum-sector trace is restricted to dimensions <=128")
+                trace_vecs=np.eye(block.dimension,dtype=complex)
+                trace_weight=1.0
+            elif trace_mode == "stochastic":
+                trace_vecs=np.exp(
+                    1j*rng.uniform(0,2*np.pi,(block.dimension,int(n_trace_vectors)))
+                )
+                trace_weight=1.0/float(n_trace_vectors)
+            else:
+                raise ValueError("trace_mode must be stochastic or exact")
+            for ir in range(trace_vecs.shape[1]):
+                r=np.asarray(trace_vecs[:,ir],dtype=complex)
+                wr=trace_weight
                 rt=expm_multiply(
                     As,r,start=0,stop=beta,num=tau_points,
                     endpoint=True,traceA=complex(As.diagonal().sum())
