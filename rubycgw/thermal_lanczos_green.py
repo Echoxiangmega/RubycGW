@@ -295,8 +295,15 @@ def thermal_lanczos_green(
     target_particles: float,
     omega: np.ndarray,
     opts: ThermalLanczosOptions = ThermalLanczosOptions(),
+    sector_solver_factory=None,
 ) -> ThermalLanczosResult:
-    """Approximate finite-T grand-canonical G(iw) for Ruby tori up to 24 sites."""
+    """Approximate finite-T G(iw) with an optional identical-layout sector factory.
+
+    The optional factory must return sector solvers with a common site ordering,
+    compatible bit bases, apply_hamiltonian, hamiltonian_operator and
+    _state_indices. It enables an index-three skew torus using L1=3, L2=1
+    solely for its cyclic sector ordering, without changing physical bonds.
+    """
     L1, L2 = int(L1), int(L2)
     nsites = NSUB * L1 * L2
     if nsites > 24:
@@ -312,10 +319,13 @@ def thermal_lanczos_green(
     Nmin = max(1, center - int(opts.sector_padding))
     Nmax = min(nsites - 1, center + int(opts.sector_padding))
     sectors = list(range(Nmin, Nmax + 1))
+    if sector_solver_factory is None:
+        def sector_solver_factory(N):
+            return RubyEDClusterSolver(L1, L2, params, n_particles=N)
 
     spectra: dict[int, np.ndarray] = {}
     for N in sectors:
-        solver = RubyEDClusterSolver(L1, L2, params, n_particles=N)
+        solver = sector_solver_factory(N)
         if opts.verbose:
             print(f"[TL-ED] sector N={N}: dim={solver.dimension}, low spectrum ...", flush=True)
         spectra[N] = _lowest_energies(
@@ -354,7 +364,7 @@ def thermal_lanczos_green(
         retained = keep[N]
         if not retained:
             continue
-        src_solver = RubyEDClusterSolver(L1, L2, params, n_particles=N)
+        src_solver = sector_solver_factory(N)
         nneed = max(retained) + 1
         energies, vecs = _lowest_eigensystem(
             src_solver,
@@ -364,8 +374,8 @@ def thermal_lanczos_green(
             opts.eig_maxiter,
         )
 
-        add_solver = RubyEDClusterSolver(L1, L2, params, n_particles=N + 1)
-        rem_solver = RubyEDClusterSolver(L1, L2, params, n_particles=N - 1)
+        add_solver = sector_solver_factory(N + 1)
+        rem_solver = sector_solver_factory(N - 1)
         add_maps = [_transition_map(src_solver, add_solver, i, creation=True) for i in range(nsites)]
         rem_maps = [_transition_map(src_solver, rem_solver, i, creation=False) for i in range(nsites)]
 
