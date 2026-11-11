@@ -205,22 +205,25 @@ def json_safe(x):
 
 
 def save_plot(out, tau, curves, K, V, filling, beta):
-    styles=[
-        ("ED","red","-",2.0),
-        ("GW","blue",":",2.0),
-        ("post-GW","forestgreen","--",2.0),
-        ("cluster-ED+GW","black","-.",1.8),
-    ]
-    fig,ax=plt.subplots(figsize=(6.2,4.65),dpi=130)
-    for label,color,ls,lw in styles:
-        if label in curves:
-            ax.plot(tau/beta,curves[label],label=label,color=color,
-                    linestyle=ls,linewidth=lw)
+    palette={"density":"#1565c0","pseudospin":"#7b1fa2","bj":"#00897b"}
+    fig,ax=plt.subplots(figsize=(7.0,5.0),dpi=130)
+    for label,data in curves.items():
+        if label=="ED":
+            color,ls,lw="red","-",2.25
+        elif label=="cluster-ED+GW":
+            color,ls,lw="black","-.",1.9
+        else:
+            mode=label.split("[")[-1].rstrip("]") if "[" in label else "density"
+            color=palette.get(mode,"gray")
+            ls="--" if label.startswith("post-GW") else ":"
+            lw=1.8
+        ax.plot(tau/beta,data,label=label,color=color,
+                linestyle=ls,linewidth=lw)
     ax.set_xlabel(r"$\tau/\beta$")
     ax.set_ylabel(r"$G(K,\tau)$")
     ax.set_xlim(0,1)
     ax.set_title(f"Ruby {V=:.3g}, filling={filling:g}, K=({K[0]:g},{K[1]:g})")
-    ax.legend(loc="best",frameon=True,fontsize=9)
+    ax.legend(loc="best",frameon=True,fontsize=8,ncol=2)
     ax.grid(alpha=.16)
     fig.tight_layout()
     fig.savefig(out/"green_tau.png",dpi=200)
