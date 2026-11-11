@@ -547,6 +547,25 @@ def main():
         save_plot(out,tau,curves,K,a.V,a.filling,1/a.T)
         arrays["tau"]=tau
         arrays["tau_over_beta"]=tau*a.T
+    # Shared GW is a prerequisite for cGW, post-GW and cluster embedding.
+    # Report both incremental stage times and end-to-end method costs.
+    cumulative = {
+        "ED": times.get("ED",0.0)+times.get("ED_Green",0.0),
+        "GW": times.get("GW",0.0)+times.get("GW_energy",0.0),
+        "cGW": times.get("GW",0.0)+times.get("cGW",0.0),
+        "post-GW": times.get("GW",0.0)+times.get("post-GW",0.0),
+        "cluster-ED+GW": times.get("GW",0.0)+times.get("cluster-ED+GW",0.0)
+                         +times.get("cluster_chi",0.0),
+    }
+    for key in list(cumulative):
+        if key not in ("ED" if "ED" in methods else "", "GW" if gw is not None else "",
+                       "cGW" if "cgw" in methods else "", "post-GW" if "postgw" in methods else "",
+                       "cluster-ED+GW" if "cluster" in methods else ""):
+            del cumulative[key]
+    for key,total_s in cumulative.items():
+        row(key,"total_method_runtime_seconds",float(total_s),
+            runtime=total_s,notes="includes shared GW when required; stage times recorded separately")
+    info["method_total_runtime_seconds"]=cumulative
     for method,timing in times.items():
         info["timings"][method]=float(timing)
     info["energies"]=energy
