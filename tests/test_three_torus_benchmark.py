@@ -92,3 +92,41 @@ def test_noninteracting_GK_projection_and_ed_sector_cap():
     direct=np.asarray([np.linalg.inv((1j*w+.05)*np.eye(6)-U.conj().T@H@U) for w in omega])
     np.testing.assert_allclose(projected,direct,atol=2e-12)
     assert max_required_ed_dimension(24,8,1)>=735471
+
+
+def test_three_torus_cli_end_to_end_small_free_case(tmp_path):
+    """Small noninteracting full-pipeline smoke; no physics claim at tiny grids."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    script=Path(__file__).resolve().parents[1]/"research"/"benchmark_three_tori.py"
+    out=tmp_path/"smoke"
+    cmd=[
+        sys.executable,str(script),
+        "--geometry","3x1","--V","0","--filling",str(2./3.),
+        "--K","0","0","--Q","0","0",
+        "--T",".4","--nw","3","--nomega","1",
+        "--methods","ed","gw","cgw","postgw","cluster",
+        "--channels","x_even",
+        "--gw-max-iter","8","--gw-tol","1e-6",
+        "--vertex-max-iter","12","--vertex-tol","1e-5",
+        "--post-mmax","0","--nbath","1",
+        "--cluster-max-iter","3","--cluster-tol","1e-4",
+        "--ed-samples","1","--ed-tau-points","3",
+        "--ed-thermal-eigs","2","--ed-krylov-steps","12",
+        "--ed-sector-padding","1","--plot-tau-points","9",
+        "--skip-cluster-chi",
+        "--out",str(out),
+    ]
+    result=subprocess.run(cmd,capture_output=True,text=True,timeout=180)
+    assert result.returncode==0, result.stdout+"\n"+result.stderr
+    assert (out/"summary.json").is_file()
+    assert (out/"comparison.csv").is_file()
+    assert (out/"raw_arrays.npz").is_file()
+    assert (out/"green_tau.png").is_file()
+    import json
+    summary=json.loads((out/"summary.json").read_text())
+    assert summary["geometry"]=="3x1"
+    assert summary["N"]==2
+    assert "GW" in summary["timings"]
+    assert "ED_Green" in summary["timings"]
