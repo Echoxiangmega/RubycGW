@@ -549,6 +549,8 @@ def main():
                         source_vertices_solved=int(post.source_vertices_solved),
                         recycled_fallbacks=int(post.recycled_fallbacks),
                         post_solver="recycled" if not a.post_no_recycle else "gmres",
+                        phase_seconds=post.phase_seconds,
+                        transfer_wall_seconds=post.transfer_wall_seconds,
                     )
                     row(label_post,"chi",None,status="not_requested",
                         notes="post-GW compared in G only")
