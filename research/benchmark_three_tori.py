@@ -51,6 +51,7 @@ from rubycgw.three_torus_benchmark import (
     max_required_ed_dimension, uniform_primitive_cluster_ed_gw,
     SkewEDSectorAdapter, gw_energy_from_state, embedded_gm_energy,
 )
+from rubycgw.fierz_channel_gw import solve_channel_gw_same_torus
 from rubycgw.three_torus_interaction_channels import (
     build_torus_interaction_channel,
     solve_interaction_channel_response,
