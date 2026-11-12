@@ -32,13 +32,13 @@ K/Q are shared by ED and all cluster results.
 
 For each choice `f=density,pseudospin,bj`, the physical embedding is
 
-[
+\[
 \Sigma_{\rm emb}^{(f)} =
 \Sigma_{\rm GW,lat}^{(f)}
 + \bigoplus_{C=0}^2
 \bigl(\Sigma_{\rm ED}^{C}-
 \Sigma_{\rm GW,cluster}^{(f),C}\bigr).
-]
+\]
 
 The impurity Hamiltonian is the **same physical density-density model**
 for all three choices, with V on the 3 A-triangle and 3 B-triangle
