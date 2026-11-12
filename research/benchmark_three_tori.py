@@ -1050,7 +1050,8 @@ def main():
                     converged=False, residual=float(cl.final_error),
                     bath_fit_error=float(cl.bath_fit_error),
                     impurity_mismatch=float(cl.impurity_mismatch),
-                    iterations=int(cl.iterations)
+                    iterations=int(cl.iterations),
+                    timing_seconds=getattr(cl,"timing_seconds",None),
                 )
                 mark_method("cluster-ED+GW","unconverged",why)
                 print(f"[benchmark] {why}; omitting G and energy",flush=True)
@@ -1076,7 +1077,8 @@ def main():
                 seed_GW_converged=bool(gw.converged),
                 seed_GW_residual=json_safe(float(gw.final_error)),
                 seed_origin=str(gw.seed_origin),
-                seed_dyson_rebuilt=bool(gw.seed_dyson_rebuilt))
+                seed_dyson_rebuilt=bool(gw.seed_dyson_rebuilt),
+                timing_seconds=getattr(cl,"timing_seconds",None))
             ecl=embedded_gm_energy(cl,geom,grid)
             energy["cluster"]=ecl
             row("cluster-ED+GW","finite_T_GM_proxy",ecl,
