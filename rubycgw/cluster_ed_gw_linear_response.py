@@ -177,10 +177,26 @@ class StaticClusterEDGWLinearizer:
             Gc=self.g[:,0,0,sl,sl]
             pc=compute_polarization_matrix(Gc[:,None,None],self.cg)
             wc=compute_screened_interaction_matrix(pc,self.vc[None,None])
+            invGc=np.linalg.inv(Gc)
+            # Differentiate the exact normal-equation/Hessian of the
+            # finite bath fitting ONCE, not on each GMRES matvec.
+            prepared=None
+            if np.max(abs(self.vq),initial=0.)>1.e-14:
+                target=(
+                    (1j*grid.omega[:,None,None]+self.mu)*np.eye(6)[None]
+                    -hl[None]-S[None]-invGc-self.sigma_imp[c]
+                )
+                prepared=complex_bath_fit_tangent(
+                    target,np.zeros_like(target),
+                    grid.omega,self.mu,bath,nfit=self.nfit,
+                    stationarity_tol=self.bath_stationarity_tol,
+                    prepare_only=True
+                )
             self.cells.append(dict(
                 sl=sl,hl=hl,S=S,bath=bath,impurity=impurity,
                 Gimp=Gimp,invGimp=np.linalg.inv(Gimp),
-                Gc=Gc,invGc=np.linalg.inv(Gc),pc=pc,wc=wc
+                Gc=Gc,invGc=invGc,pc=pc,wc=wc,
+                bath_linearizer=prepared
             ))
 
     def _pack(self,dh,dSigma,dImp):
@@ -288,18 +304,7 @@ class StaticClusterEDGWLinearizer:
                 dtarget,self.grid.omega
             )
             dhloc=dh[0,0,sl,sl]+dS
-            # The reference dynamic fit target is reconstructed from the
-            # exact (converged) zero-field Weiss map.
-            raw=(
-                (1j*self.grid.omega[:,None,None]+self.mu)
-                *np.eye(6)[None]
-                -part["hl"][None]-part["S"][None]
-                -part["invGc"]-self.sigma_imp[c]
-            )
-            dx,dv,diag=complex_bath_fit_tangent(
-                raw,dDelta,self.grid.omega,self.mu,part["bath"],
-                nfit=self.nfit,stationarity_tol=self.bath_stationarity_tol
-            )
+            dx,dv,diag=part["bath_linearizer"].apply(dDelta)
             bstation=max(bstation,diag.stationarity)
             berr=max(berr,diag.linearized_residual)
             # Grand-canonical one-body tangent d(Himp-mu*N):
