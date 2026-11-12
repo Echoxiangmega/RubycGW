@@ -92,7 +92,7 @@ def build_embedding_channels(interactions,ncell,mode,Vq=None):
     )
 
 
-def lattice_gw_map(G,rho,h0,Vq,grid,M,*,static_reference=None):
+def lattice_gw_map(G,rho,h0,Vq,grid,M,mu,*,static_reference=None):
     """Return (static, dynamic/rest, P, W) at one embedding iteration.
 
     density: static=Hartree, rest=Fock+dynamic; identical to legacy.
@@ -104,7 +104,7 @@ def lattice_gw_map(G,rho,h0,Vq,grid,M,*,static_reference=None):
         P=compute_polarization_matrix(G,grid,backend="fft")
         W=compute_screened_interaction_matrix(P,Vq)
         rest=compute_sigma_gw_split_matrix(
-            G,W,Vq,grid,h0,0.,
+            G,W,Vq,grid,h0,float(mu),
             sh if static_reference is None else static_reference,
             backend="fft",
         )
