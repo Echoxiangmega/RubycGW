@@ -149,6 +149,10 @@ def parse_args():
     p.add_argument("--cluster-bath-fit-nfreq",type=int,default=12)
     p.add_argument("--cluster-bath-max-nfev",type=int,default=200)
     p.add_argument("--source-step",type=float,default=1e-3)
+    p.add_argument("--cluster-chi-tol",type=float,default=None,
+                   help="optional tighter self-consistency tolerance for finite-field χ; default is --cluster-tol")
+    p.add_argument("--cluster-chi-max-iter",type=int,default=None,
+                   help="optional extra iterations per ±source solve; default is --cluster-max-iter")
     p.add_argument("--cluster-chi-workers",type=int,default=1,
                    help="number of independent +h/-h source processes (1=serial; 2-4 on CPU with enough RAM)")
     p.add_argument("--cluster-chi-coldstart",action="store_true",
@@ -246,7 +250,10 @@ def solve_cluster_source_response(geom, params, grid, channels, Q, args, *,
     out={}; times={}; diagnostics={}
     interactions=ruby_cluster_interactions(params)
     opts=MultiCellEDGWOptions(
-        max_iter=int(args.cluster_max_iter),tol=float(args.cluster_tol),
+        max_iter=int(args.cluster_chi_max_iter if args.cluster_chi_max_iter is not None
+                     else args.cluster_max_iter),
+        tol=float(args.cluster_chi_tol if args.cluster_chi_tol is not None
+                  else args.cluster_tol),
         mixing=float(args.cluster_mixing),nbath=int(args.nbath),
         bath_fit_nfreq=int(args.cluster_bath_fit_nfreq),
         bath_fit_max_nfev=int(args.cluster_bath_max_nfev),
@@ -333,12 +340,19 @@ def solve_cluster_source_response(geom, params, grid, channels, Q, args, *,
                 work_seconds=work,wall_total_seconds=wall,
                 workers=workers,phase_seconds=phases,
                 residual_over_h=maxres/h,
+                numerical_resolution_warning=(
+                    "cluster source residual/h exceeds 0.01; confirm finite-h "
+                    "and outer-iteration convergence before interpreting χ"
+                    if maxres/h>0.01 else None
+                ),
                 initial_state="uniform-cluster-restart" if use_warm else "cold-GW"
             )
         # Aggregate independent source compute time, not the wall-clock of
         # concurrent tasks. The overall cluster_chi stage timer is the real
         # elapsed wall time and can be compared to other stages.
         times[ch]=work
+        if diagnostics[ch].get("numerical_resolution_warning"):
+            print(f"[cluster-chi] WARNING {ch}: {diagnostics[ch]['numerical_resolution_warning']}",flush=True)
         print(
             f"[cluster-chi] {ch}: {diagnostics[ch]['status']}; "
             f"source-work={work:.2f}s, workers={workers}",
