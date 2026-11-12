@@ -101,3 +101,54 @@ def test_windows_safe_parallel_source_chi_matches_serial(tmp_path):
             rtol=1e-8,atol=3e-8
         )
     assert "timing_seconds" in serial["diagnostics"]["cluster-ED+GW"]
+
+
+def test_grand_ed_near_vacuum_and_full_filling():
+    from rubycgw.grand_canonical_ed import (
+        selected_charge_sectors,grand_canonical_ed_response
+    )
+    from rubycgw.model import RubyParameters
+    from rubycgw.three_torus_benchmark import build_torus_geometry
+    params=RubyParameters(ti=1,t1=-.5,t2=.5,V=.2)
+    geom=build_torus_geometry("3x1",params)
+    assert selected_charge_sectors(18,.5,0)==[0,1]
+    assert selected_charge_sectors(18,17.5,0)==[17,18]
+    T=.55
+    for target in (.5,17.5):
+        response=grand_canonical_ed_response(
+            geom,params,V=.2,T=T,target_particles=target,
+            Q=(0,0),channels=("charge_total",),
+            n_trace_vectors=1,tau_points=3,padding=0,
+            trace_mode="exact",use_momentum=True
+        )
+        assert abs(response.average_particles-target)<2e-9
+        np.testing.assert_allclose(
+            response.sector_probabilities,[.5,.5],atol=2e-9
+        )
+        # Ocharge_total(0)=N/sqrt(3); GC Var(N)=1/4.
+        np.testing.assert_allclose(
+            response.susceptibility_matrix[0,0].real,
+            .25/(T*geom.ncell),atol=2e-9
+        )
+
+
+def test_momentum_green_near_vacuum_includes_exact_zero_particle_sector():
+    from rubycgw.model import RubyParameters
+    from rubycgw.grids import MatsubaraGrid
+    from rubycgw.three_torus_benchmark import build_torus_geometry
+    from rubycgw.momentum_ed_green import momentum_thermal_lanczos_green
+    from rubycgw.thermal_lanczos_green import ThermalLanczosOptions
+    params=RubyParameters(ti=1,t1=-.5,t2=.5,V=.15)
+    geom=build_torus_geometry("3x1",params)
+    grid=MatsubaraGrid(nk1=1,nk2=1,nw=3,nOmega=1,T=.6)
+    options=ThermalLanczosOptions(
+        sector_padding=1,thermal_eigs=2,krylov_dim=12,verbose=False
+    )
+    out=momentum_thermal_lanczos_green(
+        geom,params,V=.15,T=.6,target_particles=.5,
+        omega=grid.omega,K=(0.,0.),opts=options
+    )
+    assert 0 in out.sector_numbers
+    assert abs(out.average_particles-.5)<1e-8
+    assert np.all(np.isfinite(out.G))
+    assert out.G.shape==(grid.nf,6,6)
