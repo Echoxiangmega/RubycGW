@@ -130,3 +130,32 @@ def test_bath_exact_hessian_nonzero_residual_vs_refitted_finite_difference():
     np.testing.assert_allclose(predicted,fd,atol=2e-4,rtol=4e-2)
     assert diag.stationarity<5e-5
     assert diag.linearized_residual<5e-5
+
+
+def test_degenerate_impurity_spectral_multiplets_have_correct_complex_response():
+    h=np.diag([0.,0.,.42]).astype(complex)
+    D=np.array([
+        [.13,.27+.09j,0.],
+        [.27-.09j,-.08,0.],
+        [0.,0.,.11],
+    ],complex)
+    mu=.12
+    T=.35
+    w=(2*np.arange(-4,4)+1)*np.pi*T
+    interaction=()
+    imp=FiniteBathImpurityED(h,interaction,correlated_orbitals=(0,1))
+    imp.diagonalize()
+    pred,diag=impurity_green_tangent(
+        imp,w,mu,T,D,discard_weight_tol=0.
+    )
+    assert diag.degenerate_blocks>0
+    step=2e-5
+    vals=[]
+    for sign in (-1.,1.):
+        probe=FiniteBathImpurityED(h+sign*step*D,interaction,
+                                  correlated_orbitals=(0,1))
+        probe.diagonalize()
+        got,_=probe.green_iomega(1j*w,mu,T,discard_weight_tol=0.)
+        vals.append(got)
+    actual=(vals[1]-vals[0])/(2*step)
+    np.testing.assert_allclose(pred,actual,atol=2e-6,rtol=3e-5)
