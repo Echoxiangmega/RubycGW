@@ -272,6 +272,33 @@ def main(argv=None):
             out/"green_curves.npz",
             omega=grid.omega,tau=tau,**data_G,**data_tau
         )
+        # Plain CSV traces for Origin, without discarding the complex
+        # 6x6 matrix information retained in green_curves.npz.
+        iw_fields=["omega"]
+        it_fields=["tau","tau_over_beta"]
+        for label in ("ED",)+tuple("cluster_"+m for m in modes):
+            iw_fields.extend([label+"_Re",label+"_Im"])
+            it_fields.append(label)
+        iw_rows=[]
+        for iw,w in enumerate(grid.omega):
+            row={"omega":float(w)}
+            for label in ("ED",)+tuple("cluster_"+m for m in modes):
+                G=data_G.get("Giw_"+label)
+                if G is not None:
+                    v=np.trace(G[iw])/6.
+                    row[label+"_Re"]=float(v.real)
+                    row[label+"_Im"]=float(v.imag)
+            iw_rows.append(row)
+        _save_csv(out/"green_iomega_trace.csv",iw_rows,iw_fields)
+        tau_rows=[]
+        for j,tt in enumerate(tau):
+            row={"tau":float(tt),"tau_over_beta":float(tt*a.T)}
+            for label in ("ED",)+tuple("cluster_"+m for m in modes):
+                G=data_tau.get("Gtau_"+label)
+                if G is not None:
+                    row[label]=float(np.trace(G[j]).real/6.)
+            tau_rows.append(row)
+        _save_csv(out/"green_tau_trace.csv",tau_rows,it_fields)
 
     def ed_func():
         N=int(round(target))
@@ -514,6 +541,25 @@ def main(argv=None):
             ax.legend()
             fig.tight_layout()
             fig.savefig(out/"green_tau_comparison.png",dpi=180)
+            plt.close(fig)
+        if Gr is not None:
+            fig,ax=plt.subplots(figsize=(8,4.5))
+            positive=np.asarray(grid.omega)>0.
+            ax.plot(grid.omega[positive],
+                    np.trace(Gref[positive],axis1=1,axis2=2).imag/6,
+                    label="ED",lw=2.2)
+            for mode in modes:
+                item=data_G.get("Giw_cluster_"+mode)
+                if item is not None:
+                    ax.plot(grid.omega[positive],
+                            np.trace(item[positive],axis1=1,axis2=2).imag/6,
+                            label="cluster "+mode)
+            ax.set(xlabel=r"$\\omega_n$",
+                   ylabel=r"$\\mathrm{Im}\\,\\mathrm{Tr}G(K,i\\omega_n)/6$",
+                   title=f"Hex18 PBC, V={a.V:g}, n={a.filling:g}")
+            ax.legend()
+            fig.tight_layout()
+            fig.savefig(out/"green_iomega_comparison.png",dpi=180)
             plt.close(fig)
         if chi_rows and not a.skip_chi:
             fig,ax=plt.subplots(figsize=(max(8,2*len(channels)),4.7))
