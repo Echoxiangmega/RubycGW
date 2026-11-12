@@ -52,6 +52,9 @@ from rubycgw.supercell_gw_split import one_body_density_matrix_tail
 from rubycgw.supercell_cgw import SupercellVertexOptions
 from rubycgw.ed18 import ED18Solver
 from rubycgw.momentum_ed import MomentumTorusED
+from rubycgw.grand_canonical_ed import (
+    grand_canonical_ed_response,selected_charge_sectors
+)
 from rubycgw.momentum_ed_green import momentum_thermal_lanczos_green
 from rubycgw.ed18_thermal import thermal_response as hex_thermal_response
 from rubycgw.ed_cluster import RubyEDClusterSolver
@@ -143,6 +146,10 @@ def parse_args():
     p.add_argument("--source-step",type=float,default=1e-3)
     p.add_argument("--skip-cluster-chi",action="store_true",
                    help="skip expensive finite-source cluster-covariant chi; no false bubble alias")
+    p.add_argument("--ed-ensemble",choices=["auto","canonical","grand"],default="auto",
+                   help="auto: fixed-N for integer total filling; grand-canonical thermal sector mixture otherwise")
+    p.add_argument("--ed-charge-sector-padding",type=int,default=1,
+                   help="extra integer N sectors on each side of floor/ceil(<N>) in grand-canonical chi")
     p.add_argument("--ed-symmetry",choices=["momentum","legacy"],default="momentum",
                    help="canonical ED ground and finite-T chi: momentum-block Krylov or legacy full-sector Krylov; ED G still uses thermal Lanczos full-sector")
     p.add_argument("--ed-green-symmetry",choices=["momentum","legacy"],default="legacy",
@@ -294,11 +301,20 @@ def main():
     K=geom.validate_momentum(a.K)
     Q=geom.validate_momentum(a.Q if a.Q is not None else K)
     total=float(a.filling*geom.ncell)
-    N=int(round(total))
-    if abs(total-N)>1e-10:
+    N_nearest=int(round(total))
+    integer_total=bool(abs(total-N_nearest)<1.e-10)
+    ensemble=(
+        "canonical" if integer_total else "grand"
+        if a.ed_ensemble=="auto" else a.ed_ensemble
+    )
+    if a.ed_ensemble!="auto":
+        ensemble=a.ed_ensemble
+    if "ed" in a.methods and ensemble=="canonical" and not integer_total:
         raise ValueError(
-            f"ED fixed-N requires integer filling*Ncell; got {total}"
+            f"canonical ED needs integer Ncell*filling; got {total}. "
+            "Use --ed-ensemble grand (or auto)."
         )
+    N=N_nearest if integer_total and ensemble=="canonical" else None
     grid=MatsubaraGrid(nk1=1,nk2=1,nw=a.nw,nOmega=a.nomega,T=a.T)
     tau=np.linspace(0,1/a.T,int(a.plot_tau_points))
     U=k_projector(geom,K)
@@ -307,14 +323,26 @@ def main():
     if ("cgw" in methods or "postgw" in methods or "cluster" in methods):
         methods.add("gw")
     if "ed" in methods:
-        dmax=max_required_ed_dimension(geom.nsites,N,int(a.ed_sector_padding))
+        ed_sectors=(
+            [int(N)] if ensemble=="canonical"
+            else selected_charge_sectors(
+                geom.nsites,total,int(a.ed_charge_sector_padding)
+            )
+        )
+        dmax=max(
+            max_required_ed_dimension(geom.nsites,int(n),int(a.ed_sector_padding))
+            for n in ed_sectors
+        )
         if dmax>int(a.ed_max_dim):
             raise RuntimeError(
-                f"ED adjacent-sector dimension {dmax:,} exceeds "
-                f"--ed-max-dim={a.ed_max_dim:,}; lower filling or allow "
-                "a larger explicit cap only with adequate RAM"
+                f"ED sector dimension {dmax:,} exceeds "
+                f"--ed-max-dim={a.ed_max_dim:,}; lower filling or increase "
+                "the explicit cap only with adequate RAM"
             )
-    info=dict(geometry=geom.name,V=a.V,filling=a.filling,N=N,sites=geom.nsites,
+    info=dict(geometry=geom.name,V=a.V,filling=a.filling,N=N,
+              target_mean_particles=total,ed_ensemble=ensemble,
+              ed_charge_sector_padding=int(a.ed_charge_sector_padding),
+              sites=geom.nsites,
               K=K,Q=Q,T=a.T,beta=1/a.T,
               hoppings=dict(t=a.t,t1=a.t1,t2=a.t2),
               channels=channels,allowed_K=geom.allowed_momenta(),
@@ -328,7 +356,8 @@ def main():
               ED_green=("momentum-sector N+/-1 low-T thermal Lanczos" if a.ed_green_symmetry=="momentum" else
                         "full fixed-N sector low-T thermal Lanczos"),
               ed_green_symmetry=a.ed_green_symmetry,
-              ED_chi="canonical fixed-N stochastic thermal typicality",
+              ED_chi=("canonical fixed-N stochastic thermal typicality" if ensemble=="canonical"
+                      else "grand-canonical selected N-sector stochastic trace at fixed mean N"),
               GW_ensemble="grand canonical, fixed mean N",
               chi="connected static source response at same physical Q",
               post_scope="one-shot Dyson; only G compared",
@@ -340,7 +369,8 @@ def main():
     # reuse exactly the same ED reference, but includes all ED controls.
     cache_signature=json.dumps({
         "geometry":geom.name,"V":float(a.V),"filling":float(a.filling),
-        "N":N,"K":list(map(float,K)),"Q":list(map(float,Q)),
+        "N":N,"ensemble":ensemble,"ed_charge_sector_padding":a.ed_charge_sector_padding,
+        "K":list(map(float,K)),"Q":list(map(float,Q)),
         "T":float(a.T),"nw":int(a.nw),"nomega":int(a.nomega),
         "t":float(a.t),"t1":float(a.t1),"t2":float(a.t2),
         "channels":list(channels),"ed_symmetry":a.ed_symmetry,
@@ -410,6 +440,25 @@ def main():
             return None
     if "ed" in methods and ed_cache_data is None:
         def stage_ed():
+            if ensemble=="grand":
+                grchi=grand_canonical_ed_response(
+                    geom,params,V=a.V,T=a.T,target_particles=total,
+                    Q=Q,channels=channels,n_trace_vectors=a.ed_samples,
+                    tau_points=a.ed_tau_points,seed=a.seed,
+                    padding=a.ed_charge_sector_padding,
+                    ed_eigs=a.ed_eigs,
+                    use_momentum=(a.ed_symmetry=="momentum")
+                )
+                from types import SimpleNamespace
+                sol=SimpleNamespace(
+                    dimension=sum(grchi.dimensions.values())
+                )
+                spec=SimpleNamespace(
+                    energies=np.asarray([np.nan],float),
+                    ground_multiplicity=0,gap_above_manifold=float("nan"),
+                    sector_dimensions=list(grchi.dimensions.values())
+                )
+                return sol,spec,grchi
             if a.ed_symmetry=="momentum":
                 ed=MomentumTorusED(geom,params,n_particles=N)
                 spec=ed.ground_spectrum(a.V,n_eigs=a.ed_eigs)
@@ -451,21 +500,37 @@ def main():
             mark_method("ED_Green","skipped","ED reference stage failed")
         if result is not None:
             ed,sp,chi=result
-            energy["ED"]=float(sp.energies[0])
+            if ensemble=="canonical":
+                energy["ED"]=float(sp.energies[0])
             info["diagnostics"]["ED"]=dict(
-                dimension=int(ed.dimension),ground_multiplicity=int(sp.ground_multiplicity),
+                dimension=int(ed.dimension),ensemble=ensemble,
+                target_mean_particles=float(total),
+                grand_mu=float(chi.mu) if ensemble=="grand" else None,
+                grand_charge_sectors=chi.sectors if ensemble=="grand" else None,
+                grand_charge_probabilities=chi.sector_probabilities if ensemble=="grand" else None,
+                grand_edge_probability=float(chi.edge_probability) if ensemble=="grand" else None,
+                ground_multiplicity=int(sp.ground_multiplicity),
                 gap=float(sp.gap_above_manifold),samples=a.ed_samples,
                 tau_points=a.ed_tau_points,
                 symmetry=a.ed_symmetry,
                 sector_dimensions=(list(map(int,sp.sector_dimensions))
                                    if hasattr(sp,"sector_dimensions") else None)
             )
-            row("ED","ground_state_E0",energy["ED"],runtime=times["ED"],
-                notes="exact fixed-N ground state up to Lanczos tolerance")
+            if ensemble=="canonical":
+                row("ED","ground_state_E0",energy["ED"],runtime=times["ED"],
+                    notes="exact fixed-N ground state up to Lanczos tolerance")
+            else:
+                row("ED","ground_state_E0",None,status="not-defined",
+                    notes="no single canonical ground-state E0 at fractional mean filling")
+                row("ED","grand_canonical_mu",float(chi.mu),
+                    notes="chemical potential estimated from truncated ED sector traces")
+                row("ED","mean_particles",float(chi.average_particles),
+                    notes="charge sector mixture at fixed mean particle number")
             for i,ch in enumerate(channels):
                 ed_chi[ch]=float(np.real(chi.susceptibility_matrix[i,i]))
                 row("ED",f"chi[{ch}](Q)",ed_chi[ch],runtime=times["ED"],
-                    notes="canonical stochastic thermal trace; increase samples/tau points")
+                    notes=("canonical stochastic thermal trace" if ensemble=="canonical"
+                           else "grand-canonical selected charge-sector trace; monitor edge probability"))
             arrays["ED_chi_matrix"]=np.asarray(chi.susceptibility_matrix)
             arrays["ED_connected_tau"]=np.asarray(chi.correlation_tau_matrix)
             def stage_ed_green():
@@ -525,7 +590,7 @@ def main():
                         np.savez_compressed(
                             handle,
                             signature=np.asarray(cache_signature),
-                            e0=np.asarray(energy["ED"]),
+                            e0=np.asarray(energy.get("ED",float("nan"))),
                             mu=np.asarray(energy["ED_mu"]),
                             chi_matrix=np.asarray(arrays["ED_chi_matrix"]),
                             corr_tau=np.asarray(arrays["ED_connected_tau"]),
@@ -540,7 +605,9 @@ def main():
                     temp.replace(ed_cache_path)
                     print(f"[benchmark] saved ED reference: {ed_cache_path}",flush=True)
     if "ed" in methods and ed_cache_data is not None:
-        energy["ED"]=float(ed_cache_data["e0"].item())
+        cached_e0=float(ed_cache_data["e0"].item())
+        if np.isfinite(cached_e0):
+            energy["ED"]=cached_e0
         energy["ED_mu"]=float(ed_cache_data["mu"].item())
         ed_scalar=np.asarray(ed_cache_data["giw_K"],dtype=complex)
         if ed_scalar.shape!=(grid.nf,6,6):
@@ -566,8 +633,9 @@ def main():
         green_by_method["ED"]=ed_scalar
         for i,ch in enumerate(channels):
             ed_chi[ch]=float(np.real(arrays["ED_chi_matrix"][i,i]))
-        row("ED","ground_state_E0",energy["ED"],status="cached",
-            notes="fixed-N ED ground state loaded from matching checkpoint")
+        row("ED","ground_state_E0",energy.get("ED"),status="cached" if ensemble=="canonical" else "not-defined",
+            notes=("fixed-N ED ground state loaded from checkpoint" if ensemble=="canonical"
+                   else "not defined at fractional average filling; ED chi is grand canonical"))
         for ch in channels:
             row("ED",f"chi[{ch}](Q)",ed_chi[ch],status="cached",
                 notes="canonical ED thermal susceptibility loaded from matching checkpoint")
