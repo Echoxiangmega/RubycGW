@@ -100,6 +100,7 @@ class MultiCellEDGWResult:
     impurity_mismatch: np.ndarray
     residual_history: np.ndarray
     elapsed_history: np.ndarray
+    timing_seconds: dict[str, float] | None = None
 
 
 def _maxabs(a):
@@ -268,6 +269,11 @@ def solve_multicell_cluster_ed_gw(
     fitter = fit_finite_bath_complex if bool(opts.complex_bath) else fit_finite_bath
     eye6 = np.eye(NSUB, dtype=complex)
 
+    wall_t0 = perf_counter()
+    time_lattice = 0.0
+    time_bath = 0.0
+    time_impurity = 0.0
+    time_dyson = 0.0
     converged = False
     err = np.inf
     residual_history = []
@@ -301,6 +307,7 @@ def solve_multicell_cluster_ed_gw(
             backend="fft",
         )
         sigma_emb_out = np.asarray(sigma_gw_lattice, dtype=complex).copy()
+        time_lattice += perf_counter()-t0
 
         for c in range(ncell):
             sl = _block_slice(c)
@@ -321,6 +328,7 @@ def solve_multicell_cluster_ed_gw(
             static_shift, delta = split_static_hybridization(raw_delta, grid.omega)
             static_shift_all[c] = static_shift
             himp_corr = hloc + static_shift
+            t_fit=perf_counter()
             bath = fitter(
                 delta,
                 grid.omega,
@@ -335,9 +343,11 @@ def solve_multicell_cluster_ed_gw(
                 metric="delta",
                 one_body=himp_corr,
             )
+            time_bath+=perf_counter()-t_fit
             baths[c] = bath
             bath_error_all[c] = float(bath.fit_error)
 
+            t_imp=perf_counter()
             himp = build_impurity_one_body(himp_corr, bath)
             impurity = FiniteBathImpurityED(
                 himp,
@@ -352,6 +362,7 @@ def solve_multicell_cluster_ed_gw(
                 orbitals=tuple(range(NSUB)),
                 discard_weight_tol=float(opts.discard_weight_tol),
             )
+            time_impurity+=perf_counter()-t_imp
             Gimp_all[c] = Gimp
             delta_fit = bath_hybridization(
                 grid.omega, mu, bath.energies, bath.couplings
@@ -389,6 +400,7 @@ def solve_multicell_cluster_ed_gw(
             sigma_h = sigma_h_out
             sigma_emb = sigma_emb_out
             sigma_imp = sigma_ed_all.copy()
+            t_dyson=perf_counter()
             mu, G, _, _ = _solve_mu_matrix_fast(
                 h0,
                 sigma_h,
@@ -399,12 +411,14 @@ def solve_multicell_cluster_ed_gw(
                 float(opts.mu_tol),
                 int(opts.mu_max_iter),
             )
+            time_dyson+=perf_counter()-t_dyson
             break
 
         a = float(opts.mixing)
         sigma_h = sigma_h + a * (sigma_h_out - sigma_h)
         sigma_emb = sigma_emb + a * (sigma_emb_out - sigma_emb)
         sigma_imp = sigma_imp + a * (sigma_ed_all - sigma_imp)
+        t_dyson=perf_counter()
         mu, G, _, _ = _solve_mu_matrix_fast(
             h0,
             sigma_h,
@@ -415,7 +429,9 @@ def solve_multicell_cluster_ed_gw(
             float(opts.mu_tol),
             int(opts.mu_max_iter),
         )
+        time_dyson+=perf_counter()-t_dyson
 
+    t_final_lattice=perf_counter()
     # Rebuild lattice quantities on exactly the returned Dyson state.  This is
     # especially important for free-energy differences, which can be much
     # smaller than the absolute self-consistency tolerance.
@@ -445,6 +461,9 @@ def solve_multicell_cluster_ed_gw(
 
     bath_energies = np.stack([np.asarray(b.energies, dtype=float) for b in baths])
     bath_couplings = np.stack([np.asarray(b.couplings, dtype=complex) for b in baths])
+    time_lattice+=perf_counter()-t_final_lattice
+    total_wall=perf_counter()-wall_t0
+    other=max(0.0,total_wall-time_lattice-time_bath-time_impurity-time_dyson)
 
     return MultiCellEDGWResult(
         G=np.asarray(G),
@@ -469,6 +488,14 @@ def solve_multicell_cluster_ed_gw(
         impurity_mismatch=np.asarray(mismatch_all),
         residual_history=np.asarray(residual_history),
         elapsed_history=np.asarray(elapsed_history),
+        timing_seconds={
+            "lattice":float(time_lattice),
+            "bath_fit":float(time_bath),
+            "impurity_ed":float(time_impurity),
+            "dyson":float(time_dyson),
+            "other":float(other),
+            "total":float(total_wall),
+        },
     )
 
 
