@@ -155,3 +155,40 @@ def test_three_method_cli_weakly_interacting_cluster_finite_source_agreement(tmp
     )
     diag=json.loads((out/"diagnostics.json").read_text())
     assert diag["stage"]["zero_field_complex_bath"]["status"]=="ok"
+
+
+def test_analytic_full_GW_split_tangent_matches_finite_difference():
+    from rubycgw.cluster_ed_gw_linear_response import (
+        _gw_tangent,_density_tangent_cache
+    )
+    from rubycgw.supercell_gw import (
+        compute_screened_interaction_matrix,dyson_from_sigma_matrix
+    )
+    from rubycgw.supercell_gw_split import compute_sigma_gw_split_matrix
+    p=RubyParameters(ti=1,t1=-.5,t2=.5,V=.13)
+    geom=build_torus_geometry("hex18",p)
+    g=MatsubaraGrid(nk1=1,nk2=1,nw=3,nOmega=1,T=.4)
+    h=np.asarray(geom.h0,complex)
+    Vq=np.asarray(geom.vq,complex)
+    sh=np.zeros((18,18),complex)
+    sg=np.zeros((g.nf,1,1,18,18),complex)
+    mu=.22
+    G=dyson_from_sigma_matrix(h,g,mu,sh,sg)
+    source=np.diag(np.linspace(-.3,.25,18)).astype(complex)
+    dG=np.matmul(np.matmul(G,source),G)
+    cache=_density_tangent_cache(h,mu,sh,G,g)
+    drho=cache["rho_tangent"](dG[:,0,0],np.zeros((18,18)))
+    P=compute_polarization_matrix(G,g)
+    W=compute_screened_interaction_matrix(P,Vq)
+    predicted,_,_=_gw_tangent(G,dG,drho,drho,W,Vq,g)
+    eps=2e-5
+    values=[]
+    for sign in (-1.,1.):
+        gs=G+sign*eps*dG
+        ps=compute_polarization_matrix(gs,g)
+        ws=compute_screened_interaction_matrix(ps,Vq)
+        values.append(compute_sigma_gw_split_matrix(
+            gs,ws,Vq,g,h,mu,sh,backend="fft"
+        ))
+    numeric=(values[1]-values[0])/(2*eps)
+    np.testing.assert_allclose(predicted,numeric,rtol=2e-5,atol=2e-7)
