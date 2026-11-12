@@ -554,8 +554,8 @@ def main(argv=None):
                     ax.plot(grid.omega[positive],
                             np.trace(item[positive],axis1=1,axis2=2).imag/6,
                             label="cluster "+mode)
-            ax.set(xlabel=r"$\\omega_n$",
-                   ylabel=r"$\\mathrm{Im}\\,\\mathrm{Tr}G(K,i\\omega_n)/6$",
+            ax.set(xlabel=r"$\omega_n$",
+                   ylabel=r"$\mathrm{Im}\,\mathrm{Tr}G(K,i\omega_n)/6$",
                    title=f"Hex18 PBC, V={a.V:g}, n={a.filling:g}")
             ax.legend()
             fig.tight_layout()
