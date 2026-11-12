@@ -106,7 +106,7 @@ def test_no_silent_unmatched_Fierz_interactions(bad):
 
 
 def test_fierz_compare_cli_three_modes_green_and_chi_at_V0(tmp_path):
-    """Actual ED + three zero-field embeddings + 3 finite-source chi values."""
+    """Default analytic chi runs for all three Fierz-matched embeddings."""
     out=tmp_path/"fierz"
     script=Path(__file__).resolve().parents[1]/"research"/"compare_fierz_cluster_ed_gw.py"
     cmd=[
@@ -138,6 +138,8 @@ def test_fierz_compare_cli_three_modes_green_and_chi_at_V0(tmp_path):
         chi=next(x for x in cs if x["method"]=="cluster-"+mode)
         assert green["status"]=="converged",(mode,r.stdout)
         assert chi["status"]=="ok",(mode,r.stdout)
+        assert chi["chi_method"]=="analytic"
+        assert int(chi["linear_iterations"])>=0
         # The ED thermal Green reference is intentionally retained with
         # only ONE state per charge/momentum sector, and is not converged at
         # T=.4. Its 16% relative error is a thermal Lanczos TRUNCATION,
@@ -152,6 +154,7 @@ def test_fierz_compare_cli_three_modes_green_and_chi_at_V0(tmp_path):
             arrays["Giw_cluster_density"],atol=3e-6,rtol=3e-6
         )
     d=json.loads((out/"diagnostics.json").read_text())
+    assert d["cluster_chi_method"]=="analytic"
     assert all(d["methods"][mode]["gw_mode"]==mode
                for mode in ("density","pseudospin","bj"))
 
@@ -205,8 +208,88 @@ def test_weak_interaction_three_mode_cluster_fixed_points(tmp_path):
     for mode in ("density","bj","pseudospin"):
         item=next(x for x in chi_rows if x["method"]=="cluster-"+mode)
         assert item["status"]=="ok",(mode,p.stdout)
+        assert item["chi_method"]=="analytic"
         assert np.isfinite(float(item["chi"]))
     diag=json.loads((output/"diagnostics.json").read_text())
     assert all(diag["methods"][mode]["gw_mode"]==mode for mode in (
         "density","bj","pseudospin"
     ))
+
+
+@pytest.mark.parametrize("mode",("pseudospin","bj"))
+def test_fierz_channel_dynamic_GW_tangent_matches_central_difference(mode):
+    """The analytic bosonic and self-energy derivatives use the exact
+    source/destination frequency windows of the production Fierz skeleton.
+    """
+    from rubycgw.cluster_ed_gw_linear_response import _channel_gw_tangent
+    from rubycgw.fierz_channel_gw import (
+        compute_channel_polarization,compute_channel_screened_interaction,
+        compute_channel_correlation_self_energy,channel_static_parts
+    )
+    rng=np.random.default_rng(20261112)
+    grid=MatsubaraGrid(nk1=1,nk2=1,nw=3,nOmega=1,T=.3)
+    pairs=((0,1),(1,2),(2,0),(3,4),(4,5),(5,3))
+    definition=build_channel_definition(pairs,6,.08,mode)
+    G=(rng.normal(size=(grid.nf,1,1,6,6))+
+       1j*rng.normal(size=(grid.nf,1,1,6,6)))*.06
+    dG=(rng.normal(size=G.shape)+
+        1j*rng.normal(size=G.shape))*.03
+    P=compute_channel_polarization(G,definition,grid)
+    W=compute_channel_screened_interaction(P,definition)
+    ds,dp,dw=_channel_gw_tangent(G,dG,W,definition,grid)
+    eps=1.e-5
+    pol=[];screen=[];selfenergy=[]
+    for sign in (-1.,1.):
+        gp=G+sign*eps*dG
+        pp=compute_channel_polarization(gp,definition,grid)
+        ww=compute_channel_screened_interaction(pp,definition)
+        pol.append(pp);screen.append(ww)
+        selfenergy.append(compute_channel_correlation_self_energy(
+            gp,ww,definition,grid
+        ))
+    np.testing.assert_allclose(dp,(pol[1]-pol[0])/(2*eps),
+                               atol=5e-10,rtol=5e-7)
+    np.testing.assert_allclose(dw,(screen[1]-screen[0])/(2*eps),
+                               atol=5e-10,rtol=5e-7)
+    np.testing.assert_allclose(ds,(selfenergy[1]-selfenergy[0])/(2*eps),
+                               atol=5e-10,rtol=5e-7)
+    drho=rng.normal(size=(6,6))+1j*rng.normal(size=(6,6))
+    drho=(drho+drho.conj().T)*.5
+    static=channel_static_parts(drho,definition)[0]
+    rho=np.eye(6,dtype=complex)*.4
+    numeric=(channel_static_parts(rho+eps*drho,definition)[0]-
+             channel_static_parts(rho-eps*drho,definition)[0])/(2*eps)
+    np.testing.assert_allclose(static,numeric,atol=1e-9,rtol=1e-8)
+
+
+def test_fierz_compare_cli_opt_in_finite_source(tmp_path):
+    """The old self-consistent +/-h path remains an explicit opt-in."""
+    out=tmp_path/"finite"
+    script=Path(__file__).resolve().parents[1]/"research"/"compare_fierz_cluster_ed_gw.py"
+    cmd=[
+        sys.executable,str(script),"--V","0","--n",str(2/3),
+        "--T",".4","--K","0","0","--Q","0","0",
+        "--modes","density","--channels","x_even",
+        "--nw","3","--nomega","1","--nbath","1",
+        "--bath-fit-nfreq","2","--bath-max-nfev","40",
+        "--ed-samples","1","--ed-tau-points","3",
+        "--ed-sector-padding","1","--ed-thermal-eigs","1",
+        "--ed-krylov-steps","10","--tau-points","9",
+        "--uniform-max-iter","6","--uniform-tol","1e-4",
+        "--baseline-max-iter","6","--baseline-tol","1e-4",
+        "--source-max-iter","6","--source-tol","1e-4",
+        "--source-step",".01","--cluster-chi-finite-source",
+        "--out",str(out)
+    ]
+    p=subprocess.run(cmd,capture_output=True,text=True,timeout=180)
+    assert p.returncode==0,p.stdout+"\n"+p.stderr
+    with (out/"chi_comparison.csv").open(encoding="utf-8",newline="") as f:
+        rows=list(csv.DictReader(f))
+    cluster=next(x for x in rows if x["method"]=="cluster-density")
+    assert cluster["status"]=="ok",p.stdout
+    assert cluster["chi_method"]=="finite-source"
+    assert int(float(cluster["finite_source_wall_seconds"])>=0)==1
+    assert cluster["analytic_wall_seconds"]==""
+    diag=json.loads((out/"diagnostics.json").read_text())
+    assert diag["cluster_chi_method"]=="finite-source"
+    assert diag["methods"]["density"]["source"]["x_even"]["n_source_solves"]==2
