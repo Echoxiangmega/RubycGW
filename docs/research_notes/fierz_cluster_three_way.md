@@ -115,8 +115,12 @@ Outputs are written incrementally:
   source solver residuals; failed/unavailable values are NOT filled in.
 - `green_curves.npz`: complex 6x6 G(K,iw) and real G(K,tau)
   matrices for ED and all completed embeddings.
+- `green_iomega_trace.csv` and `green_tau_trace.csv`:
+  Origin-readable real/imaginary traces versus frequency and imaginary
+  time for ED and all completed Fierz embeddings.
 - `green_tau_comparison.png`, `chi_comparison.png`:
-  plots of the three Fierz cluster results against ED.
+  plots of the three Fierz cluster results against ED, plus
+  `green_iomega_comparison.png` for the imaginary-frequency trace.
 - `diagnostics.json`: seed choice, time costs, mode-specific GW and
   local impurity fit residuals, and any error messages.
 
