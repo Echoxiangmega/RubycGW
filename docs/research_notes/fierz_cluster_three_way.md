@@ -10,18 +10,27 @@ python research/compare_fierz_cluster_ed_gw.py `
   --Q 0.333333333333 0.333333333333 `
   --modes density pseudospin bj `
   --channels x_even y_even z_same z_opposite `
-  --source-workers 2 `
   --out results/hex18_fierz_cluster_V0p5_n2
 ```
 
+The default cluster susceptibility is **analytic**, with no +/-h
+self-consistency. It differentiates the full finite-bath Fierz-matched
+fixed-point map for all three modes, including the static HF matrix,
+channel polarization, screening, local GW subtraction, bath fit and
+impurity ED Green function. It is **not** a bare GG bubble.
+
+For the original finite-source calculation, add
+`--cluster-chi-finite-source --source-step 0.001 --source-workers 2`.
+At finite Q, this uses two Hermitian cos/sin source components and
+both signs; four channels and three embeddings can trigger up to
+**48** complete three-impurity source self-consistencies.
+
 Increase `--nbath 6 --nw 49 --nomega 10` for main numerical
-results **after** checking the bath size, Matsubara cutoff, field step
-and source self-consistency. At finite Q the finite-source method uses
-two Hermitian cos/sin fields and two field signs; four channels and
-three Fierz embeddings can trigger up to **48** separate, complete,
-three-impurity cluster ED+GW self-consistency calculations.
-For a quick Green-only check use `--skip-chi`, then start full
-susceptibility with only `--channels z_same z_opposite`.
+results only after checking bath-size and frequency-grid dependence,
+bath stationarity and the analytic GMRES residual. Cross-check
+representative points with the finite-source route, including a
+scan of field step and source tolerance. For a quick Green-only check,
+use `--skip-chi`; start with only `--channels z_same z_opposite`.
 
 The benchmark's exact 18-site ED reference is computed **once** for
 all Fierz choices. Exact PBC geometry, the physical Hamiltonian,
@@ -83,18 +92,21 @@ For each Fierz channel:
    zero-source **complex**-bath three-impurity fixed point in that
    same Fierz mode.
 4. Save that converged zero-source `G(K,iw)` as the cluster reference.
-   Run separate fully self-consistent finite-source `+h/-h` sources
-   (cos and sin components) from identical copies of that mode's
-   zero-source restart. This derivative includes feedback of
-   `G, P, W, Sigma_GW, Sigma_ED` and reoptimizes every impurity bath.
-   Unconverged source solves return an explicit failed status.
+   By default, build the exact linear response of the same finite-bath
+   self-consistency equations and solve the matrix-free GMRES response
+   for each physical cos/sin component. The static HF response includes
+   the off-diagonal elements in the pseudospin and BJ modes.
+5. With `--cluster-chi-finite-source`, instead run separate
+   fully self-consistent `+h/-h` sources from identical copies of
+   that mode's converged zero-source restart. All impurity baths are
+   reoptimized. Failed source or analytic solves are reported, with
+   **no** fallback to a bare bubble or another approximation.
 
-The previous analytic cluster susceptibility linearizer is derived
-for the density-channel GW self-energy. It has NOT been generalized
-to BJ/pseudospin in this change. The matched three-channel comparison
-therefore uses the same **finite-source** susceptibility definition
-for all three, rather than silently using a density kernel with
-a different Fierz Green function.
+The analytic response assumes a smooth interior stationary complex-bath
+fit. Near fit bounds, nonstationary fits, or ill-conditioned soft modes,
+the analytic method may fail its stationarity or GMRES checks.
+Its consistency with finite-source responses should be checked
+numerically at representative interacting points.
 
 ## ED Green reference and numerical reporting
 
@@ -110,9 +122,10 @@ Outputs are written incrementally:
 - `green_comparison.csv`: full complex 6x6 G(K,iw) Frobenius error,
   lowest Matsubara frequencies error, trace G(K,tau) error,
   cluster convergence, bath fit and impurity/lattice mismatch.
-- `chi_comparison.csv`: ED and three full finite-source static chi
-  results for each requested physical channel, relative errors and
-  source solver residuals; failed/unavailable values are NOT filled in.
+- `chi_comparison.csv`: ED and three Fierz-matched static chi
+  results for each channel. The `chi_method` field identifies
+  `analytic` or `finite-source`; it also reports relevant solver
+  residuals and elapsed times. Failed values are not filled in.
 - `green_curves.npz`: complex 6x6 G(K,iw) and real G(K,tau)
   matrices for ED and all completed embeddings.
 - `green_iomega_trace.csv` and `green_tau_trace.csv`:
