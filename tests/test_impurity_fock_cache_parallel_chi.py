@@ -152,3 +152,33 @@ def test_momentum_green_near_vacuum_includes_exact_zero_particle_sector():
     assert abs(out.average_particles-.5)<1e-8
     assert np.all(np.isfinite(out.G))
     assert out.G.shape==(grid.nf,6,6)
+
+
+def test_impurity_real_diagonalization_uses_real_symmetric_eigensolver(monkeypatch):
+    original=np.linalg.eigh
+    seen=[]
+    def instrumented_eigh(H,*args,**kwargs):
+        seen.append(np.asarray(H).dtype.kind)
+        return original(H,*args,**kwargs)
+    monkeypatch.setattr(np.linalg,"eigh",instrumented_eigh)
+    h=np.array([
+        [.11,.26,0.,0.],
+        [.26,-.08,.17,0.],
+        [0.,.17,.04,.12],
+        [0.,0.,.12,-.05]
+    ],dtype=complex)
+    real=FiniteBathImpurityED(h,((0,1,.3),),correlated_orbitals=(0,1))
+    real.diagonalize()
+    assert "f" in seen  # 4-orbital real bath uses real LAPACK
+    for N,sec in enumerate(real.sectors):
+        H=real.dense_hamiltonian(N)
+        np.testing.assert_allclose(
+            sec.energies,np.linalg.eigvalsh(H),atol=4e-13
+        )
+    seen.clear()
+    h_complex=h.copy()
+    h_complex[0,1]=.26+.07j
+    h_complex[1,0]=.26-.07j
+    complex_solver=FiniteBathImpurityED(h_complex,((0,1,.3),))
+    complex_solver.diagonalize()
+    assert "c" in seen  # retain complex diagonalization for loop current
