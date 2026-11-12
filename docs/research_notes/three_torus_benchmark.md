@@ -592,6 +592,85 @@ solver residuals by 1/h; always compare source steps and convergence
 tolerances. Wall-time improvements depend on bath size, CPU BLAS
 configuration, worker count and whether EVD or bath fitting dominates.
 
+## Fixed-filling, multiple-V warm-start scan
+
+To avoid repeatedly constructing the self-consistent GW state from zero
+self-energy at strong V, run `research/scan_three_tori_v.py`:
+
+    python research/scan_three_tori_v.py \
+      --geometry hex18 --filling 2 \
+      --V-values 0.25 0.5 1 1.5 2 3 4 5 \
+      --K 0.333333333333 0.333333333333 \
+      --Q 0.333333333333 0.333333333333 \
+      --T 0.125 --methods ed gw cgw postgw cluster \
+      --gw-channels density pseudospin bj \
+      --post-mmax 0 --skip-cluster-chi \
+      --out results/hex18_V_scan
+
+The driver sorts the supplied V list in ascending order. Each V is
+evaluated using the same validated single-point benchmark. Each
+Fierz mode (density, exact A1+E pseudospin, symmetric BJ) maintains
+its OWN last converged GW background. On the next V point, it reuses
+the previous certified Sigma_static, Sigma_c and mu as a warm start,
+but recomputes G/P/W and requires the *new* V fixed-point residual
+to satisfy the usual `--gw-tol`. Warm starts are not used between
+different Fierz representations.
+
+The static cGW response has independent linear vertex solutions for
+each Hermitian cos/sin component of the requested channel. They now
+also take the last **converged** Gamma of that same component and
+Fierz scheme at the previous V as an initial guess; the new V
+linear response residual must still meet `--vertex-tol`.
+Dynamic full-channel post-GW at each V continues to use the GW
+background of that V; post does not perform another GW self-consistency.
+
+If GW or cGW fails at a V, its nonconverged self-energy or vertex
+is never substituted for the last valid seed. The next V point can
+still try from the last lower-V certified solution; the report records
+which V was reused. A warm start cannot cure a genuine finite-Q
+instability, missing symmetry-broken state, singular screening matrix,
+or an inconsistent branch of the fixed point; compare increasing and
+decreasing sweeps when testing hysteresis.
+
+Each V has its own folder, `V_000_0p25`, `V_001_0p5`, etc.,
+containing the ordinary benchmark scorecards and raw arrays. The
+parent output has `scan_results.csv` (one row per method/V, with
+G errors, chi mean errors, residual, smin, runtime and warm-source V),
+`scan_chi.csv` (individual channel/V susceptibility vs ED),
+and `scan_manifest.json` (all statuses and last certified V).
+All are updated after EACH V, so a later failure does not erase
+earlier results.
+
+The parent command can be rerun with `--resume`. Each completed
+point saves a `warm_seeds.npz` containing only certified GW self-energy
+and cGW vertex arrays, with a strict fingerprint of the physical
+model, Matsubara settings and numerical controls. The checkpoint
+uses no Python pickle. Resume skips completed points and reconstructs
+the last certified seeds for the remaining V values. You can use
+`--cold-each-point` or `--cold-vertex-each-point` to check the effect
+of GW or cGW warm starts separately; the normal defaults are warm.
+
+Do not combine the scan with `--gw-ramp-steps`: that would run a new
+0->V adaptive continuation inside every V point. The V scan is itself
+the continuation. The initial point begins from a cold GW unless
+you add an explicit small V point first.
+
+### Where intercell hopping enters the cluster
+
+The full 18/24-site folded single-particle h0 is constructed from
+the exact periodic Bloch hopping with its intercell terms, and
+the full lattice G, P, W, Sigma_GW and Dyson propagators keep it.
+For the uniform six-site correlated impurity, the explicit
+h_cluster is the average of the **diagonal six-site blocks of
+the finite-torus h0**, including intra-cell edges and hopping
+terms that wrap onto the same primitive cell due to the finite
+PBC. Other intercell hopping is retained through the projected
+lattice G_C and the Weiss hybridization Delta_C(iw), whose
+finite discrete bath approximates paths exiting and reentering
+the cluster. Nonlocal *many-body* correlations between different
+six-site impurities are NOT treated by ED; they remain at
+lattice GW level. This is different from an 18-site ED impurity.
+
 ## Outputs
 
 - comparison.csv: method, observable, value, ED reference, relative
