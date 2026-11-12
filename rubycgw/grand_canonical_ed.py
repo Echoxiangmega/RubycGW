@@ -35,16 +35,15 @@ def selected_charge_sectors(nsites: int, target_particles: float, padding: int):
     nsites = int(nsites)
     target = float(target_particles)
     pad = int(padding)
-    if not np.isfinite(target) or not 1 <= target <= nsites-1:
-        raise ValueError("grand-canonical ED target must be in [1, nsites-1]")
+    if not np.isfinite(target) or not 0 < target < nsites:
+        raise ValueError("grand-canonical ED target mean N must be in (0, nsites)")
     if pad < 0:
         raise ValueError("charge-sector padding must be nonnegative")
     lo = max(0, int(np.floor(target + 1.e-11)) - pad)
     hi = min(nsites, int(np.ceil(target - 1.e-11)) + pad)
-    # The extreme N=0/N=nsites sectors can be included in principle, but
-    # low-T Green resolvents require neighboring N±1; restrict the current
-    # thermal benchmark to the interior, consistently with Green.
-    lo, hi = max(lo,1), min(hi, nsites-1)
+    # Vacuum and full-band sectors each have a unique Fock state. Their
+    # canonical connected response vanishes identically, and their weight
+    # can be included exactly, even at very dilute/nearly full filling.
     if lo >= hi:
         # A grand-canonical mean strictly between its only two supported
         # sectors is necessary; users can increase padding explicitly.
@@ -85,6 +84,33 @@ def _grand_weights(log_partition, target: float, T: float):
     return mu,navg,dict(zip(map(int,nums),map(float,weights)))
 
 
+def _fock_boundary_response(geom,params,V,T,Q,channels,n,tau_points):
+    """Exact singleton thermal sector N=0 or N=Nsites, zero connected χ."""
+    if n not in (0,geom.nsites):
+        raise ValueError("not a single-state boundary sector")
+    from .pseudospin import primitive_pseudospin_vertex
+    Q=geom.validate_momentum(Q)
+    ncell=int(geom.ncell)
+    mean=np.zeros(len(channels),dtype=complex)
+    if n:
+        phase=np.exp(-2j*np.pi*np.asarray(geom.cells,dtype=float)@np.asarray(Q))/np.sqrt(ncell)
+        for i,ch in enumerate(channels):
+            mean[i]=np.sum(phase)*np.trace(primitive_pseudospin_vertex(ch))
+        E=float(np.trace(geom.h0[0,0]).real+6*ncell*float(V))
+    else:
+        E=0.
+    tau=np.linspace(0,1/float(T),int(tau_points))
+    nc=len(channels)
+    response=SimpleNamespace(
+        shifted_partition_estimate=1.0,
+        means=mean,
+        correlation_tau_matrix=np.zeros((int(tau_points),nc,nc),complex),
+        structure_matrix=np.zeros((nc,nc),complex),
+        tau_grid=tau,
+    )
+    return E,response
+
+
 def grand_canonical_ed_response(
     geom: TorusGeometry, params, *, V: float,T: float,target_particles: float,
     Q,channels,n_trace_vectors:int=6,tau_points:int=17,
@@ -98,6 +124,17 @@ def grand_canonical_ed_response(
     logZN={}
     dimension={}
     for n in Ns:
+        if n in (0,geom.nsites):
+            energy_boundary,response=_fock_boundary_response(
+                geom,params,V,T,Q,channels,n,int(tau_points)
+            )
+            E=float(energy_boundary)
+            z=1.0
+            ground_energies[n]=E
+            logZN[n]=-E/float(T)
+            dimension[n]=1
+            responses[n]=response
+            continue
         if use_momentum:
             sol=MomentumTorusED(geom,params,n_particles=n)
             spec=sol.ground_spectrum(V,n_eigs=max(2,int(ed_eigs)))
