@@ -147,3 +147,30 @@ def test_cluster_chi_warmstart_and_coldstart_agree_at_free_limit(tmp_path):
     warm=one_run(tmp_path/"warm",False)
     cold=one_run(tmp_path/"cold",True)
     np.testing.assert_allclose(warm,cold,atol=2e-4,rtol=1e-3)
+
+
+def test_cluster_only_free_seed_skips_preliminary_gw(tmp_path):
+    """Optional cheap seed must reach cluster outer loop without GW SCF."""
+    script=Path(__file__).resolve().parents[1]/"research"/"benchmark_three_tori.py"
+    out=tmp_path/"free_cluster"
+    cmd=[
+        sys.executable,str(script),"--geometry","3x1",
+        "--V","0","--filling",str(2/3),
+        "--K","0","0","--Q","0","0",
+        "--T",".4","--nw","3","--nomega","1",
+        "--methods","cluster","--cluster-initial-state","free",
+        "--gw-channels","density","--channels","x_even",
+        "--nbath","1","--cluster-max-iter","3",
+        "--cluster-tol","1e-4","--cluster-bath-fit-nfreq","2",
+        "--cluster-bath-max-nfev","30",
+        "--plot-tau-points","9","--skip-cluster-chi",
+        "--out",str(out),
+    ]
+    result=subprocess.run(cmd,capture_output=True,text=True,timeout=150)
+    assert result.returncode==0,result.stdout+"\\n"+result.stderr
+    data=json.loads((out/"summary.json").read_text())
+    assert "GW[density]" not in data["timings"]
+    assert data["diagnostics"]["cluster_seed"]["source_method"]=="noninteracting"
+    assert data["method_status"]["cluster-ED+GW"]["status"]=="converged"
+    assert "cluster-ED+GW" in data["G_methods"]
+    assert np.isfinite(data["diagnostics"]["cluster_seed"]["seed_density_error"])
