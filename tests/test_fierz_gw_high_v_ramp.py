@@ -127,6 +127,9 @@ def test_default_direct_run_marks_failed_methods_and_continues(tmp_path):
         "--gw-channels","density","pseudospin","bj",
         "--channels","z_same",
         "--gw-max-iter","1","--gw-tol","1e-14",
+        "--nbath","1","--cluster-max-iter","2",
+        "--cluster-bath-fit-nfreq","2",
+        "--cluster-bath-max-nfev","20",
         "--skip-cluster-chi","--out",str(out),
     ]
     done=subprocess.run(args,capture_output=True,text=True,timeout=180)
@@ -137,9 +140,17 @@ def test_default_direct_run_marks_failed_methods_and_continues(tmp_path):
     assert summary["method_status"]["GW[bj]"]["status"]=="unconverged"
     assert summary["method_status"]["cGW[density]"]["status"]=="skipped"
     assert summary["method_status"]["post-GW[density]"]["status"]=="skipped"
-    assert summary["method_status"]["cluster-ED+GW"]["status"]=="skipped"
-    assert summary["G_methods"]==[]
-    assert not (out/"green_tau.png").exists()
+    # A finite but unconverged preliminary density-GW state is still a
+    # legitimate *initial guess* for the independent embedding fixed point.
+    assert "cluster-ED+GW" in summary["timings"]
+    assert summary["method_status"]["cluster-ED+GW"]["status"] in (
+        "converged","unconverged","failed"
+    )
+    assert summary["diagnostics"]["cluster_seed"]["source_converged"] is False
+    assert summary["diagnostics"]["cluster_seed"]["seed_dyson_rebuilt"] is True
+    assert "GW[density]" not in summary["G_methods"]
+    assert "GW[pseudospin]" not in summary["G_methods"]
+    assert "GW[bj]" not in summary["G_methods"]
     assert (out/"comparison.csv").exists()
     assert (out/"raw_arrays.npz").exists()
     assert (out/"gw_failure_density.json").exists()
