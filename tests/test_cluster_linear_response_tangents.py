@@ -87,3 +87,46 @@ def test_bath_hessian_rejects_nonstationary_reference():
             target,np.zeros_like(target),w,.1,bath,nfit=3,
             stationarity_tol=1e-10
         )
+
+
+def test_bath_exact_hessian_nonzero_residual_vs_refitted_finite_difference():
+    from rubycgw.cluster_ed_gw_covariant import fit_finite_bath_complex
+    rng=np.random.default_rng(311)
+    T=.21
+    w=(2*np.arange(-6,6)+1)*np.pi*T
+    mu=.09
+    eps=np.array([-.28])
+    v=np.array([[.42+.06j],[.16-.13j]])
+    model=bath_hybridization(w,mu,eps,v)
+    # Add an out-of-bath-manifold target with a nonzero least-squares
+    # residual. If one drops the r*Hessian term, the response is wrong.
+    perturb=.016*(rng.normal(size=model.shape)+1j*
+                   rng.normal(size=model.shape))
+    target=model+perturb
+    fitted=fit_finite_bath_complex(
+        target,w,mu,nbath=1,nfit=4,
+        max_nfev=250,xtol=1e-11,
+        initial=BathParameters(eps,v,0.,0),
+    )
+    delta=.023*(rng.normal(size=model.shape)+1j*
+                 rng.normal(size=model.shape))
+    dx,dv,diag=complex_bath_fit_tangent(
+        target,delta,w,mu,fitted,nfit=4,
+        stationarity_tol=5e-5,svd_cutoff=1e-11,
+    )
+    predicted=bath_delta_tangent(w,mu,fitted,dx,dv)
+    eps_step=2e-4
+    vals=[]
+    for sign in (-1.,1.):
+        refit=fit_finite_bath_complex(
+            target+sign*eps_step*delta,w,mu,
+            nbath=1,nfit=4,max_nfev=250,
+            xtol=1e-11,initial=fitted
+        )
+        vals.append(bath_hybridization(
+            w,mu,refit.energies,refit.couplings
+        ))
+    fd=(vals[1]-vals[0])/(2*eps_step)
+    np.testing.assert_allclose(predicted,fd,atol=2e-4,rtol=4e-2)
+    assert diag.stationarity<5e-5
+    assert diag.linearized_residual<5e-5
