@@ -81,6 +81,7 @@ from rubycgw.post_gw import run_post_gw
 from rubycgw.free_energy import evaluate_gw_free_energy
 from rubycgw.cluster_ed_gw_multicell import (
     MultiCellEDGWOptions, solve_multicell_cluster_ed_gw,
+    restart_from_uniform_cluster,
 )
 from rubycgw.cluster_ed_gw import ruby_cluster_interactions
 
@@ -144,6 +145,8 @@ def parse_args():
     p.add_argument("--cluster-bath-fit-nfreq",type=int,default=12)
     p.add_argument("--cluster-bath-max-nfev",type=int,default=200)
     p.add_argument("--source-step",type=float,default=1e-3)
+    p.add_argument("--cluster-chi-coldstart",action="store_true",
+                   help="diagnostic only: recompute a separate initial GW at every source; default reuses uniform converged cluster")
     p.add_argument("--skip-cluster-chi",action="store_true",
                    help="skip expensive finite-source cluster-covariant chi; no false bubble alias")
     p.add_argument("--ed-ensemble",choices=["auto","canonical","grand"],default="auto",
@@ -179,13 +182,15 @@ def onebody_channel_expectation(state, H0, K, grid):
     return float(np.einsum("ab,ba->",K,rho[0,0]).real)
 
 
-def solve_cluster_source_response(geom, params, grid, channels, Q, args):
-    """Finite difference of the *full* multi-impurity self-consistent map.
+def solve_cluster_source_response(geom, params, grid, channels, Q, args, *,
+                                  uniform=None):
+    """Full finite-source derivative of the *multi-impurity* ED+GW fixed point.
 
-    This is NOT the ordinary GG bubble on the cluster-modified G. Each
-    physical cell in the finite supercell has its own six-site impurity,
-    with a complex bath, so a finite-Q source can induce distinct local
-    self-energies. Cost: 2*Nchannels*Ncomponents full multi-impurity runs.
+    Default warm start: replicate a converged unperturbed six-orbital
+    impurity Sigma and fitted bath over the physical cells. This avoids
+    a new 200-iteration folded-GW initializer for each of the ±h cos/sin
+    sources and greatly reduces the initial bath-fit distance.
+    Cold starts remain available for numerical cross-checks.
     """
     out={}; times={}; diagnostics={}
     interactions=ruby_cluster_interactions(params)
@@ -199,30 +204,58 @@ def solve_cluster_source_response(geom, params, grid, channels, Q, args):
     h=abs(float(args.source_step))
     if h==0:
         raise ValueError("--source-step must be nonzero")
+    use_warm=not bool(args.cluster_chi_coldstart)
+    restart=(
+        restart_from_uniform_cluster(uniform,geom.ncell)
+        if use_warm else None
+    )
     for ch in channels:
         t0=perf_counter()
         response=0.
         maxres=0.
-        for K in hermitian_source_components(geom,ch,Q):
-            vals=[]
-            for sign in (1.,-1.):
-                Hsrc=np.asarray(geom.h0,complex).copy()
-                Hsrc[0,0]-=sign*h*K
-                solved=solve_multicell_cluster_ed_gw(
-                    Hsrc,geom.vq,interactions,grid,
-                    target_particles=float(args.filling*geom.ncell),opts=opts
-                )
-                maxres=max(maxres,float(solved.final_error))
-                if not solved.converged and not args.allow_unconverged:
-                    raise RuntimeError(
-                        f"source clusterED+GW {ch} sign={sign} failed: "
-                        f"residual={solved.final_error:.3e}"
+        maxbath=0.
+        nsolves=0
+        try:
+            for K in hermitian_source_components(geom,ch,Q):
+                vals=[]
+                for sign in (1.,-1.):
+                    Hsrc=np.asarray(geom.h0,complex).copy()
+                    Hsrc[0,0]-=sign*h*K
+                    solved=solve_multicell_cluster_ed_gw(
+                        Hsrc,geom.vq,interactions,grid,
+                        target_particles=float(args.filling*geom.ncell),
+                        opts=opts,restart=restart,
                     )
-                vals.append(onebody_channel_expectation(solved,Hsrc,K,grid))
-            response+=(vals[0]-vals[1])/(2*h)
-        out[ch]=float(response)
+                    nsolves+=1
+                    maxres=max(maxres,float(solved.final_error))
+                    maxbath=max(maxbath,float(np.max(solved.bath_fit_error)))
+                    if not solved.converged:
+                        raise RuntimeError(
+                            f"source clusterED+GW {ch}, sign={sign:+g} "
+                            f"unconverged, residual={solved.final_error:.3e}"
+                        )
+                    vals.append(onebody_channel_expectation(solved,Hsrc,K,grid))
+                response+=(vals[0]-vals[1])/(2*h)
+            if not np.isfinite(response):
+                raise ValueError("nonfinite cluster finite-source response")
+            out[ch]=float(response)
+            diagnostics[ch]=dict(
+                status="converged",residual=maxres,bath_error=maxbath,
+                source_step=h,n_source_solves=nsolves,
+                initial_state="uniform-cluster-restart" if use_warm else "cold-GW"
+            )
+        except Exception as exc:
+            diagnostics[ch]=dict(
+                status="failed",error=f"{type(exc).__name__}: {exc}",
+                residual=maxres,source_step=h,n_source_solves=nsolves,
+                initial_state="uniform-cluster-restart" if use_warm else "cold-GW"
+            )
+            out[ch]=None
+            if args.strict_method_failures:
+                raise
         times[ch]=float(perf_counter()-t0)
-        diagnostics[ch]=dict(residual=maxres,source_step=h)
+        print(f"[cluster-chi] {ch}: {diagnostics[ch]['status']} "
+              f"({times[ch]:.2f}s, warm={use_warm})",flush=True)
     return out,times,diagnostics
 
 
@@ -946,16 +979,24 @@ def main():
                         status="skipped",notes="run without --skip-cluster-chi for expensive full source derivative")
             else:
                 chi_cl=run("cluster_chi",lambda:solve_cluster_source_response(
-                    geom,params,grid,channels,Q,a
+                    geom,params,grid,channels,Q,a,uniform=cl
                 ))
                 if chi_cl is not None:
                     cvals,ctimes,cdiag=chi_cl
-                    chi_by_method["cluster-ED+GW"]=cvals
+                    chi_by_method["cluster-ED+GW"]={
+                        ch:val for ch,val in cvals.items() if val is not None
+                    }
                     info["diagnostics"]["cluster_source_chi"]=cdiag
                     for ch in channels:
+                        passed=cvals[ch] is not None
                         row("cluster-ED+GW",f"chi[{ch}](Q)",cvals[ch],
                             ref=ed_chi.get(ch),runtime=ctimes[ch],
-                            notes="fixed-filling finite difference, independent 6-site impurity per cell")
+                            status="ok" if passed else "failed",
+                            notes=("full multi-impurity fixed-source derivative, warm started"
+                                   if passed else cdiag[ch].get("error","source failed")))
+                    info["diagnostics"]["cluster_source_chi"]["warmstart_used"]=(
+                        not a.cluster_chi_coldstart
+                    )
     if len(green_by_method):
         arrays["omega"]=np.asarray(grid.omega)
         for name,G in green_by_method.items():
