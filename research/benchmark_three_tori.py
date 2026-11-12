@@ -65,7 +65,7 @@ from rubycgw.three_torus_benchmark import (
     hermitian_source_components, channel_static_response,
     max_required_ed_dimension, uniform_primitive_cluster_ed_gw,
     SkewEDSectorAdapter, gw_energy_from_state, embedded_gm_energy,
-    cluster_seed_from_density_gw,
+    cluster_seed_from_density_gw, noninteracting_cluster_seed,
 )
 from rubycgw.benchmark_report import make_comparison_scorecards
 from rubycgw.fierz_channel_gw import solve_channel_gw_same_torus
@@ -137,6 +137,8 @@ def parse_args():
     p.add_argument("--post-no-recycle",action="store_true",
                    help="disable real-linear Krylov recycling; use legacy GMRES per source")
     p.add_argument("--nbath",type=int,default=6)
+    p.add_argument("--cluster-initial-state",choices=["gw","free"],default="gw",
+                   help="gw: initialize embedding from preliminary density GW; free: skip GW pre-solve when only cluster is requested")
     p.add_argument("--cluster-max-iter",type=int,default=50)
     p.add_argument("--cluster-tol",type=float,default=3e-5)
     p.add_argument("--cluster-mixing",type=float,default=.35)
@@ -353,7 +355,11 @@ def main():
     U=k_projector(geom,K)
     hK=U.conj().T@geom.h0[0,0]@U
     methods=set(a.methods)
-    if ("cgw" in methods or "postgw" in methods or "cluster" in methods):
+    # A cluster embedding can start directly from a noninteracting Dyson G:
+    # no preliminary GW call is needed unless a standalone GW/cGW/post
+    # method was explicitly requested or the user selects the GW seed.
+    if ("cgw" in methods or "postgw" in methods or
+            ("cluster" in methods and a.cluster_initial_state=="gw")):
         methods.add("gw")
     if "ed" in methods:
         ed_sectors=(
@@ -686,9 +692,23 @@ def main():
     # The original density-channel GW is also the background for our
     # primitive V-only cluster embedding (not BJ or E-only).
     requested_gw_modes=list(dict.fromkeys(a.gw_channels))
-    if "cluster" in methods and "density" not in requested_gw_modes:
+    if ("cluster" in methods and a.cluster_initial_state=="gw" and
+            "density" not in requested_gw_modes):
         requested_gw_modes.insert(0,"density")
     gw=None
+    if "cluster" in methods and a.cluster_initial_state=="free":
+        gw=run("cluster_seed",lambda:noninteracting_cluster_seed(
+            geom,grid,total,mu_tol=opts_gw.mu_tol
+        ))
+        if gw is not None:
+            info["diagnostics"]["cluster_seed"]=dict(
+                source_method="noninteracting",
+                source_converged=False,
+                source_residual=None,
+                seed_dyson_rebuilt=True,
+                seed_density_error=float(gw.seed_density_error),
+                target_V=float(a.V),seed_mu=float(gw.mu)
+            )
     vertex_opts=SupercellVertexOptions(
         max_iter=a.vertex_max_iter,tol=a.vertex_tol,
         solver="gmres",gmres_restart=a.vertex_restart,
@@ -769,7 +789,7 @@ def main():
             # its output Sigma_H/Sigma_GW, then let the embedding map update
             # lattice W and Sigma on every outer iteration. The preliminary GW
             # result remains "unconverged" for all independent comparisons.
-            if mode=="density" and "cluster" in methods:
+            if mode=="density" and "cluster" in methods and a.cluster_initial_state=="gw":
                 if scheme.converged or not a.cluster_require_converged_gw:
                     gw=run("cluster_seed",lambda:
                         cluster_seed_from_density_gw(
@@ -949,7 +969,8 @@ def main():
                 method_status["cluster-ED+GW"]=dict(
                     status="converged",
                     seed_GW_converged=bool(gw.converged),
-                    seed_GW_residual=float(gw.final_error)
+                    seed_GW_residual=json_safe(float(gw.final_error)),
+                    seed_origin=str(gw.seed_origin)
                 )
         if cl is not None and cl.converged:
             green_by_method["cluster-ED+GW"]=project_k_green(cl.G,geom,K)
@@ -962,7 +983,8 @@ def main():
                 n_impurities=1,correlated_sites_per_impurity=6,
                 nbath=a.nbath,
                 seed_GW_converged=bool(gw.converged),
-                seed_GW_residual=float(gw.final_error),
+                seed_GW_residual=json_safe(float(gw.final_error)),
+                seed_origin=str(gw.seed_origin),
                 seed_dyson_rebuilt=bool(gw.seed_dyson_rebuilt))
             ecl=embedded_gm_energy(cl,geom,grid)
             energy["cluster"]=ecl
