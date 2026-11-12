@@ -111,3 +111,39 @@ def test_fractional_filling_cli_auto_grand_and_gw_only_noninteger(tmp_path):
     assert "not-defined" in lines
     # No single-N E0 and no erroneous zero-temperature error comparison.
     assert "energy_estimate_vs_ED_E0_diagnostic" not in lines
+
+
+def test_cluster_chi_warmstart_and_coldstart_agree_at_free_limit(tmp_path):
+    """Run real multi-impurity ±source solvers in both modes, compare χ.
+
+    A warm start is an optimization of the *same* nonlinear fixed-point
+    problem; it must not change the physical source derivative.
+    """
+    script=Path(__file__).resolve().parents[1]/"research"/"benchmark_three_tori.py"
+    def one_run(out,cold):
+        cmd=[
+            sys.executable,str(script),
+            "--geometry","3x1","--V","0","--filling",str(2/3),
+            "--K","0","0","--Q","0","0",
+            "--T",".4","--nw","3","--nomega","1",
+            "--methods","gw","cluster","--gw-channels","density",
+            "--channels","x_even",
+            "--gw-max-iter","8","--gw-tol","1e-6",
+            "--nbath","1","--cluster-max-iter","4",
+            "--cluster-tol","1e-4","--source-step",".01",
+            "--cluster-bath-fit-nfreq","2",
+            "--cluster-bath-max-nfev","35",
+            "--plot-tau-points","9","--out",str(out)
+        ]
+        if cold:
+            cmd.append("--cluster-chi-coldstart")
+        result=subprocess.run(cmd,capture_output=True,text=True,timeout=180)
+        assert result.returncode==0,result.stdout+"\\n"+result.stderr
+        summary=json.loads((out/"summary.json").read_text())
+        diag=summary["diagnostics"]["cluster_source_chi"]["x_even"]
+        assert diag["status"]=="converged",diag
+        assert summary["diagnostics"]["cluster_source_chi"]["warmstart_used"]!=cold
+        return float(summary["computed_chi"]["cluster-ED+GW"]["x_even"])
+    warm=one_run(tmp_path/"warm",False)
+    cold=one_run(tmp_path/"cold",True)
+    np.testing.assert_allclose(warm,cold,atol=2e-4,rtol=1e-3)
