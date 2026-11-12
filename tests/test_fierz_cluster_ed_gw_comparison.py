@@ -160,3 +160,35 @@ def test_fierz_compare_cli_nonzero_V_distinct_dynamic_skeleton(tmp_path):
     # Same HF, different resummed dynamical diagrams at O(V^2)
     assert np.linalg.norm(vals[0]-vals[1])>1.e-9
     assert np.linalg.norm(vals[0]-vals[2])>1.e-9
+
+
+
+def test_weak_interaction_three_mode_cluster_fixed_points(tmp_path):
+    """Nonzero V exercises each Fierz lattice/local GW subtraction in Dyson."""
+    output=tmp_path/"weak"
+    script=Path(__file__).resolve().parents[1]/"research"/"compare_fierz_cluster_ed_gw.py"
+    cmd=[
+        sys.executable,str(script),"--V",".015",
+        "--n",str(2/3),"--T",".4",
+        "--K","0","0","--Q","0","0",
+        "--nw","3","--nomega","1","--nbath","1",
+        "--bath-fit-nfreq","2","--bath-max-nfev","70",
+        "--ed-sector-padding","1","--ed-thermal-eigs","1",
+        "--ed-krylov-steps","10","--tau-points","9",
+        "--uniform-max-iter","35","--uniform-tol","1e-5",
+        "--baseline-max-iter","35","--baseline-tol","1e-5",
+        "--skip-chi","--out",str(output)
+    ]
+    p=subprocess.run(cmd,capture_output=True,text=True,timeout=240)
+    assert p.returncode==0,p.stdout+"\n"+p.stderr
+    with (output/"green_comparison.csv").open(encoding="utf-8",newline="") as f:
+        rows=list(csv.DictReader(f))
+    assert len(rows)==4
+    for mode in ("density","bj","pseudospin"):
+        x=next(v for v in rows if v["method"]=="cluster-"+mode)
+        assert x["status"]=="converged",(mode,p.stdout)
+        assert np.isfinite(float(x["relative_Frobenius_K"]))
+    diag=json.loads((output/"diagnostics.json").read_text())
+    assert all(diag["methods"][mode]["gw_mode"]==mode for mode in (
+        "density","bj","pseudospin"
+    ))
