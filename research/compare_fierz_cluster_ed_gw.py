@@ -6,19 +6,18 @@ ED impurity: the SAME two 3-site triangle density-density V Hamiltonian.
 Embedding GW: density, pseudospin A1+E, or symmetric bond+current (BJ).
 The matching *cluster GW subtraction* is recomputed in the SAME Fierz mode.
 
-Static LC/CO cluster chi defaults to the analytic derivative of the
-entire Fierz-matched multi-impurity finite-bath fixed point for density,
-pseudospin and BJ. This is NOT a GG bubble. Use
---cluster-chi-finite-source to opt into the original fully converged
-+/- source calculation.
+Static LC/CO cluster chi defaults to the full self-consistent +/- source
+derivative on the Fierz-matched multi-impurity finite-bath fixed point.
+To opt into the analytic fixed-point derivative (NOT a GG bubble),
+add --cluster-chi-analytic.
 
 Example (PowerShell from repository root):
     python research/compare_fierz_cluster_ed_gw.py --V 0.2 --n 2 --nbath 2 --nw 9 --nomega 3 --out results/test_fierz_cluster
 
-For the full physical comparison increase nbath/nw and verify the
-analytic linear residual and bath stationarity. For finite-source
-cross-checks, scan --source-step and --source-tol. The default nbath=6
-can be expensive.
+For the full physical comparison increase nbath/nw and check the
+finite-source field-step and self-consistency convergence. Analytic
+GMRES response can be slower than finite-source at these parameters;
+it remains available as an optional cross-check.
 """
 from __future__ import annotations
 
@@ -97,12 +96,16 @@ def parse_args(argv=None):
     p.add_argument("--baseline-tol",type=float,default=3e-6)
     p.add_argument("--baseline-mixing",type=float,default=.45)
     p.add_argument("--cluster-chi-method",choices=("analytic","finite-source"),
-                   default="analytic",
-                   help="analytic (default): full fixed-point linear response; finite-source: self-consistent +/-h derivative")
+                   default="finite-source",
+                   help="finite-source (default): self-consistent +/-h derivative; analytic: full fixed-point linear response")
+    p.add_argument("--cluster-chi-analytic",
+                   action="store_const",dest="cluster_chi_method",
+                   const="analytic",
+                   help="opt in to the analytic fixed-point cluster chi")
     p.add_argument("--cluster-chi-finite-source",
                    action="store_const",dest="cluster_chi_method",
                    const="finite-source",
-                   help="use the old +/-h cluster chi instead of analytic chi")
+                   help="explicitly choose the default +/-h source method (compatibility alias)")
     p.add_argument("--analytic-tol",type=float,default=1e-5,
                    help="relative GMRES tolerance for analytic cluster chi")
     p.add_argument("--analytic-maxiter",type=int,default=12)
