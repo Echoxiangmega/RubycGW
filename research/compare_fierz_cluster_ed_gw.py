@@ -121,10 +121,10 @@ def _json(x):
         return _json(x.tolist())
     if isinstance(x,(np.floating,float)):
         return float(x) if np.isfinite(x) else None
-    if isinstance(x,(np.integer,int)):
-        return int(x)
     if isinstance(x,(np.bool_,bool)):
         return bool(x)
+    if isinstance(x,(np.integer,int)):
+        return int(x)
     if isinstance(x,(complex,np.complexfloating)):
         return dict(real=float(x.real),imag=float(x.imag))
     return x
