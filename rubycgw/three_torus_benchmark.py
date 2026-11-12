@@ -382,6 +382,7 @@ def uniform_primitive_cluster_ed_gw(
         G=G,mu=float(mu),Sigma_H=sigma_h,Sigma_emb=sigma_emb,
         Sigma_ED_cluster=sigma_imp,Sigma_GW_lattice=sigma_gw,
         bath_fit_error=bath_err,impurity_mismatch=mismatch,
+        bath=bath,
         iterations=it,final_error=err,converged=converged
     )
 
