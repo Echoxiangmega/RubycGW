@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import comb
 from types import SimpleNamespace
+from time import perf_counter
 import numpy as np
 
 from .model import NSUB, RubyParameters, build_h0, build_interaction
@@ -327,6 +328,8 @@ def uniform_primitive_cluster_ed_gw(
     This is a Q=0 / primitive-translation-invariant Ansatz. For Q!=0
     susceptibility use the separate multi-impurity finite-source solver.
     """
+    t_start=perf_counter()
+    time_lattice=time_bath=time_imp=time_dyson=0.0
     G=np.array(background.G,copy=True)
     mu=float(background.mu)
     sigma_h=np.array(background.Sigma_H,copy=True)
@@ -354,6 +357,7 @@ def uniform_primitive_cluster_ed_gw(
     converged=False
     sigma_gw=np.array(background.Sigma_GW,copy=True)
     for it in range(1,int(max_iter)+1):
+        t_lattice=perf_counter()
         rho=one_body_density_matrix_tail(G,grid,geom.h0,mu,sigma_h)
         n=np.diagonal(rho[0,0]).real
         sh_new=hartree_self_energy_matrix(n,geom.vq[0,0])
@@ -369,11 +373,15 @@ def uniform_primitive_cluster_ed_gw(
         raw=(1j*grid.omega[:,None,None]+mu)*one[None]-hloc[None]-g0inv
         static,delta=split_static_hybridization(raw,grid.omega)
         himp=hloc+static
+        time_lattice+=perf_counter()-t_lattice
+        t_fit=perf_counter()
         bath=fit_finite_bath(
             delta,grid.omega,mu,nbath=int(nbath),nfit=int(bath_nfit),
             max_nfev=int(bath_max_nfev),initial=bath,
             metric="delta",one_body=himp
         )
+        time_bath+=perf_counter()-t_fit
+        t_imp=perf_counter()
         solver=FiniteBathImpurityED(
             build_impurity_one_body(himp,bath),ints,
             correlated_orbitals=tuple(range(6))
@@ -381,6 +389,7 @@ def uniform_primitive_cluster_ed_gw(
         solver.diagonalize()
         Gimp,_=solver.green_iomega(1j*grid.omega,mu,grid.T,
                                    discard_weight_tol=1e-11)
+        time_imp+=perf_counter()-t_imp
         deltafit=bath_hybridization(
             grid.omega,mu,bath.energies,bath.couplings
         )
@@ -401,18 +410,27 @@ def uniform_primitive_cluster_ed_gw(
         sigma_h=sigma_h+a*(sh_new-sigma_h)
         sigma_emb=sigma_emb+a*(emb_new-sigma_emb)
         sigma_imp=sigma_imp+a*(sigma_new-sigma_imp)
+        t_dyson=perf_counter()
         mu,G,_,_=_solve_mu_matrix_fast(
             geom.h0,sigma_h,sigma_emb,grid,
             filling_target,mu,1e-10,100
         )
+        time_dyson+=perf_counter()-t_dyson
         if err<tol:
             converged=True
             break
+    total_wall=perf_counter()-t_start
+    time_other=max(0.,total_wall-time_lattice-time_bath-time_imp-time_dyson)
     return SimpleNamespace(
         G=G,mu=float(mu),Sigma_H=sigma_h,Sigma_emb=sigma_emb,
         Sigma_ED_cluster=sigma_imp,Sigma_GW_lattice=sigma_gw,
         bath_fit_error=bath_err,impurity_mismatch=mismatch,
         bath=bath,
+        timing_seconds={
+            "lattice":float(time_lattice),"bath_fit":float(time_bath),
+            "impurity_ed":float(time_imp),"dyson":float(time_dyson),
+            "other":float(time_other),"total":float(total_wall)
+        },
         iterations=it,final_error=err,converged=converged
     )
 
