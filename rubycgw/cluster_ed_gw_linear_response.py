@@ -28,6 +28,12 @@ from .cluster_bath_linear_response import (
     bath_delta_tangent,complex_bath_fit_tangent
 )
 from .grids import MatsubaraGrid,frequency_shift_slices
+from .fierz_cluster_embedding import build_embedding_channels
+from .fierz_channel_gw import (
+    _pair_polarization, _channel_sigma_from_boson,
+    channel_static_parts, compute_channel_polarization,
+    compute_channel_screened_interaction,
+)
 from .impurity_ed import FiniteBathImpurityED
 from .impurity_linear_response import impurity_green_tangent
 from .model import RubyParameters
@@ -100,6 +106,42 @@ def _gw_tangent(G,dG,rho,dRho,W,Vq,grid):
     return dyn+dF[None,None,None],dP,dW
 
 
+def _channel_gw_tangent(G,dG,W,definition,grid):
+    """Exact tangent of the Fierz-channel polarization, W and dynamic GW.
+
+    The bare channel coupling is fixed, and the frequency convolution uses
+    precisely the src/dst windows of compute_channel_correlation_self_energy.
+    """
+    A=np.asarray(G,complex)[:,0,0]
+    B=np.asarray(dG,complex)[:,0,0]
+    W=np.asarray(W,complex)
+    dp=np.zeros_like(W)
+    for im,m in enumerate(grid.m_values):
+        src,dst=frequency_shift_slices(grid.nf,int(m))
+        if src.stop==src.start:
+            continue
+        dp[im]=(
+            _pair_polarization(B[src],A[dst],definition.vertices,grid.T)
+            +_pair_polarization(A[src],B[dst],definition.vertices,grid.T)
+        )
+    dw=np.matmul(np.matmul(W,dp),W)
+    sigma=np.zeros_like(A)
+    coupling=np.asarray(definition.coupling,complex)
+    for im,m in enumerate(grid.m_values):
+        src,dst=frequency_shift_slices(grid.nf,int(m))
+        if src.stop==src.start:
+            continue
+        sigma[dst]+=(
+            _channel_sigma_from_boson(
+                B[src],W[im]-coupling,definition.vertices,grid.T
+            )+
+            _channel_sigma_from_boson(
+                A[src],dw[im],definition.vertices,grid.T
+            )
+        )
+    return sigma[:,None,None],dp,dw
+
+
 def _static_hermitian_freq(z,grid):
     """Project numerical noise onto Sigma(-iw)=Sigma(iw)^dagger."""
     a=np.asarray(z,complex).copy()
@@ -131,12 +173,9 @@ class StaticClusterEDGWLinearizer:
                  bath_stationarity_tol=2.e-5):
         if not reference.converged:
             raise ValueError("analytic chi requires a converged zero-source multi-ED+GW")
-        if str(getattr(reference,"gw_mode","density"))!="density":
-            raise NotImplementedError(
-                "analytic cluster susceptibility has only been derived and "
-                "validated for density GW; use the Fierz-matched full "
-                "finite-source response for pseudospin/BJ"
-            )
+        self.mode=str(getattr(reference,"gw_mode","density"))
+        if self.mode not in ("density","pseudospin","bj"):
+            raise ValueError("analytic cluster chi requires density/pseudospin/bj GW")
         self.geom=geom
         self.params=params
         self.grid=grid
@@ -158,6 +197,9 @@ class StaticClusterEDGWLinearizer:
         self.tail=_density_tangent_cache(self.h0,self.mu,self.sh,self.g,grid)
         self.ints=ruby_cluster_interactions(params)
         self.vc=cluster_interaction_matrix(self.ints,6)
+        self.channels=build_embedding_channels(
+            self.ints,self.ncell,self.mode,self.vq
+        )
         self.cg=MatsubaraGrid(nk1=1,nk2=1,nw=grid.nw,
                               nOmega=grid.nOmega,T=grid.T)
         self.cells=[]
@@ -181,8 +223,18 @@ class StaticClusterEDGWLinearizer:
                 discard_weight_tol=self.discard_tol
             )
             Gc=self.g[:,0,0,sl,sl]
-            pc=compute_polarization_matrix(Gc[:,None,None],self.cg)
-            wc=compute_screened_interaction_matrix(pc,self.vc[None,None])
+            if self.mode=="density":
+                pc=compute_polarization_matrix(Gc[:,None,None],self.cg)
+                wc=compute_screened_interaction_matrix(
+                    pc,self.vc[None,None]
+                )
+            else:
+                pc=compute_channel_polarization(
+                    Gc[:,None,None],self.channels.cluster,self.cg
+                )
+                wc=compute_channel_screened_interaction(
+                    pc,self.channels.cluster
+                )
             invGc=np.linalg.inv(Gc)
             # Differentiate the exact normal-equation/Hessian of the
             # finite bath fitting ONCE, not on each GMRES matvec.
@@ -206,9 +258,20 @@ class StaticClusterEDGWLinearizer:
             ))
 
     def _pack(self,dh,dSigma,dImp):
-        """Real map coordinates: diagonal Hartree, positive-iw complex Sigma."""
-        dhdiag=np.asarray(np.diag(dh).real,float)
-        out=[dhdiag]
+        """Real map coordinates: static Hermitian HF and positive-iw Sigma.
+
+        Density mode needs only diagonal Hartree. Fierz modes retain the
+        off-diagonal HF variation (otherwise bond/current vertices are lost).
+        """
+        dh=np.asarray(dh,complex)
+        if self.mode=="density":
+            static=np.asarray(np.diag(dh).real,float)
+        else:
+            upper=np.triu_indices(self.norb,1)
+            static=np.concatenate((
+                np.diag(dh).real,dh[upper].real,dh[upper].imag
+            ))
+        out=[static]
         for value in (dSigma,dImp):
             z=np.asarray(value,complex)[self.grid.nw:].ravel()
             out.append(z.real)
@@ -219,8 +282,19 @@ class StaticClusterEDGWLinearizer:
         x=np.asarray(vec,float).reshape(-1)
         nf,norb,ncell=self.grid.nf,self.norb,self.ncell
         nw=self.grid.nw
-        hdiag=x[:norb]
-        pos=norb
+        if self.mode=="density":
+            dh=np.diag(x[:norb].astype(complex))
+            pos=norb
+        else:
+            nupper=norb*(norb-1)//2
+            diag=x[:norb]
+            upper_real=x[norb:norb+nupper]
+            upper_imag=x[norb+nupper:norb+2*nupper]
+            upper=np.triu_indices(norb,1)
+            dh=np.diag(diag.astype(complex))
+            dh[upper]=upper_real+1j*upper_imag
+            dh[(upper[1],upper[0])]=np.conj(dh[upper])
+            pos=norb+2*nupper
         def one(shape):
             nonlocal pos
             n=int(np.prod(shape))
@@ -235,11 +309,12 @@ class StaticClusterEDGWLinearizer:
         di=one((nw,ncell,6,6))
         if pos!=len(x):
             raise ValueError("linearized response vector size mismatch")
-        return np.diag(hdiag.astype(complex)),ds,di
+        return dh,ds,di
 
     @property
     def dimension(self):
-        return self.norb+2*self.grid.nw*(
+        static=(self.norb if self.mode=="density" else self.norb*self.norb)
+        return static+2*self.grid.nw*(
             self.norb*self.norb+self.ncell*36
         )
 
@@ -267,9 +342,14 @@ class StaticClusterEDGWLinearizer:
         """Differentiated fixed-point output for a source and input tangent."""
         dsh,dse,di=self._unpack(packed)
         dg,drho,dmu=self.lattice_direction(dh,dsh,dse)
-        dout_h=hartree_self_energy_matrix(
-            np.diag(drho).real,self.vq[0,0]
-        )
+        if self.mode=="density":
+            dout_h=hartree_self_energy_matrix(
+                np.diag(drho).real,self.vq[0,0]
+            )
+        else:
+            dout_h=channel_static_parts(
+                drho,self.channels.lattice
+            )[0]
         # V=0 has exactly zero GW, local DC and impurity self-energy
         # derivatives. Bypass the redundant finite-bath parameter tangent
         # (which has gauge zero-modes at zero interaction).
@@ -277,9 +357,14 @@ class StaticClusterEDGWLinearizer:
             return self._pack(
                 np.zeros_like(dsh),np.zeros_like(dse),np.zeros_like(di)
             )
-        dgw,_,_=_gw_tangent(
-            self.g,dg,drho,drho,self.w,self.vq,self.grid
-        )
+        if self.mode=="density":
+            dgw,_,_=_gw_tangent(
+                self.g,dg,drho,drho,self.w,self.vq,self.grid
+            )
+        else:
+            dgw,_,_=_channel_gw_tangent(
+                self.g,dg,self.w,self.channels.lattice,self.grid
+            )
         dout_emb=np.asarray(dgw,complex).copy()
         dout_imp=np.zeros_like(di)
         bstation=0.
@@ -290,13 +375,21 @@ class StaticClusterEDGWLinearizer:
             drc=drho[sl,sl]
             gC=part["Gc"][:,None,None]
             dgC=dgc[:,None,None]
-            dsc,_,_=_gw_tangent(
-                gC,dgC,drc,drc,part["wc"],self.vc[None,None],
-                self.cg
-            )
-            dshc=hartree_self_energy_matrix(
-                np.diag(drc).real,self.vc
-            )
+            if self.mode=="density":
+                dsc,_,_=_gw_tangent(
+                    gC,dgC,drc,drc,part["wc"],self.vc[None,None],
+                    self.cg
+                )
+                dshc=hartree_self_energy_matrix(
+                    np.diag(drc).real,self.vc
+                )
+            else:
+                dsc,_,_=_channel_gw_tangent(
+                    gC,dgC,part["wc"],self.channels.cluster,self.cg
+                )
+                dshc=channel_static_parts(
+                    drc,self.channels.cluster
+                )[0]
             dsc=dsc[:,0,0]+dshc[None]
             # Differentiate the actual Weiss target used in the code.
             inv=part["invGc"]
