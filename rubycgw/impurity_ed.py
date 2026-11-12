@@ -13,6 +13,7 @@ keeps the impurity Green function numerically exact for the chosen finite bath.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 
@@ -44,6 +45,48 @@ def _fermion_signs(states: np.ndarray, orbital: int) -> np.ndarray:
     mask = np.uint64((1 << orbital) - 1)
     parity = _parity_u64(np.asarray(states, dtype=np.uint64) & mask)
     return np.where(parity == 0, 1.0, -1.0)
+
+
+@lru_cache(maxsize=32)
+def _cached_fock_geometry(norb: int, N: int):
+    """Reusable bit-basis, diagonal occupations and hopping topology.
+
+    Bath energies, bath couplings and interaction strengths change on every
+    cluster iteration, but fixed-N Fock states and fermion signs do not.
+    Cache only the typical <=12-orbital ED clusters so caching never grows
+    to the large 16-orbital combinatorial transition structures.
+    """
+    norb,N=int(norb),int(N)
+    if not 0 <= N <= norb or norb > 12:
+        raise ValueError("Fock template cache is limited to <=12 orbitals")
+    basis=fixed_popcount_basis(norb,N)
+    lookup=np.full(1<<norb,-1,dtype=np.int32)
+    lookup[basis.astype(np.int64)]=np.arange(len(basis),dtype=np.int32)
+    occ=np.asarray([
+        (basis>>np.uint64(i)) & np.uint64(1)
+        for i in range(norb)
+    ],dtype=np.uint8)
+    hops={}
+    for i in range(norb):
+        for j in range(i+1,norb):
+            src=np.flatnonzero(np.asarray(occ[i]^occ[j],dtype=bool))
+            states=basis[src]
+            dst=lookup[(states ^ np.uint64((1<<i)|(1<<j))).astype(np.int64)]
+            if len(src) and np.any(dst<0):
+                raise RuntimeError("invalid Fock template state lookup")
+            if j==i+1:
+                parity=np.zeros(len(src),dtype=np.uint8)
+            else:
+                mask=np.uint64(((1<<j)-1)^((1<<(i+1))-1))
+                parity=_parity_u64(states&mask)
+            sign=np.where(parity==0,1.,-1.)
+            j_occ=np.asarray(occ[j,src],dtype=bool)
+            for item in (src,dst,sign,j_occ):
+                item.flags.writeable=False
+            hops[(i,j)]=(src,dst,sign,j_occ)
+    for item in (basis,lookup,occ):
+        item.flags.writeable=False
+    return basis,lookup,occ,hops
 
 
 class FiniteBathImpurityED:
@@ -91,9 +134,12 @@ class FiniteBathImpurityED:
         cached = self._basis_cache.get(N)
         if cached is not None:
             return cached
-        basis = fixed_popcount_basis(self.n_orbitals, N)
-        lookup = np.full(1 << self.n_orbitals, -1, dtype=np.int32)
-        lookup[basis.astype(np.int64)] = np.arange(len(basis), dtype=np.int32)
+        if self.n_orbitals <= 12:
+            basis,lookup,_,_=_cached_fock_geometry(self.n_orbitals,N)
+        else:
+            basis=fixed_popcount_basis(self.n_orbitals,N)
+            lookup=np.full(1<<self.n_orbitals,-1,dtype=np.int32)
+            lookup[basis.astype(np.int64)]=np.arange(len(basis),dtype=np.int32)
         self._basis_cache[N] = (basis, lookup)
         return basis, lookup
 
@@ -103,14 +149,25 @@ class FiniteBathImpurityED:
         H = np.zeros((dim, dim), dtype=complex)
 
         diag = np.zeros(dim, dtype=complex)
+        template = (
+            _cached_fock_geometry(self.n_orbitals,N)
+            if self.n_orbitals <= 12 else None
+        )
         onsite = np.diag(self.one_body)
-        for i in np.flatnonzero(np.abs(onsite) > 1e-14):
-            occ = ((basis >> np.uint64(int(i))) & np.uint64(1)).astype(float)
-            diag += onsite[int(i)] * occ
-        for i, j, u in self.interaction_terms:
-            oi = (basis >> np.uint64(i)) & np.uint64(1)
-            oj = (basis >> np.uint64(j)) & np.uint64(1)
-            diag += float(u) * (oi & oj).astype(float)
+        if template is not None:
+            occupations=template[2]
+            for i in np.flatnonzero(np.abs(onsite) > 1e-14):
+                diag += onsite[int(i)] * occupations[int(i)]
+            for i,j,u in self.interaction_terms:
+                diag += float(u) * (occupations[i]&occupations[j])
+        else:
+            for i in np.flatnonzero(np.abs(onsite) > 1e-14):
+                occ = ((basis >> np.uint64(int(i))) & np.uint64(1)).astype(float)
+                diag += onsite[int(i)] * occ
+            for i,j,u in self.interaction_terms:
+                oi = (basis >> np.uint64(i)) & np.uint64(1)
+                oj = (basis >> np.uint64(j)) & np.uint64(1)
+                diag += float(u) * (oi & oj).astype(float)
         H[np.diag_indices(dim)] = diag
 
         for i in range(self.n_orbitals):
@@ -119,25 +176,27 @@ class FiniteBathImpurityED:
                 aji = complex(self.one_body[j, i])
                 if abs(aij) <= 1e-14 and abs(aji) <= 1e-14:
                     continue
-                bi = (basis >> np.uint64(i)) & np.uint64(1)
-                bj = (basis >> np.uint64(j)) & np.uint64(1)
-                src = np.flatnonzero(np.asarray(bi ^ bj, dtype=bool))
-                if src.size == 0:
-                    continue
-                states = basis[src]
-                dst_states = states ^ np.uint64((1 << i) | (1 << j))
-                dst = lookup[dst_states.astype(np.int64)]
-                if np.any(dst < 0):
-                    raise RuntimeError("fixed-N state lookup failed")
-                if j <= i + 1:
-                    parity = np.zeros(src.size, dtype=np.uint8)
+                if template is not None:
+                    src,dst,sign,j_occ=template[3][(i,j)]
                 else:
-                    between = np.uint64(((1 << j) - 1) ^ ((1 << (i + 1)) - 1))
-                    parity = _parity_u64(states & between)
-                sign = np.where(parity == 0, 1.0, -1.0)
-                j_occ = ((states >> np.uint64(j)) & np.uint64(1)).astype(bool)
-                amp = np.where(j_occ, aij, aji)
-                H[dst, src] += sign * amp
+                    bi = (basis >> np.uint64(i)) & np.uint64(1)
+                    bj = (basis >> np.uint64(j)) & np.uint64(1)
+                    src = np.flatnonzero(np.asarray(bi ^ bj, dtype=bool))
+                    states = basis[src]
+                    dst_states = states ^ np.uint64((1 << i) | (1 << j))
+                    dst = lookup[dst_states.astype(np.int64)]
+                    if np.any(dst < 0):
+                        raise RuntimeError("fixed-N state lookup failed")
+                    if j <= i + 1:
+                        parity = np.zeros(src.size, dtype=np.uint8)
+                    else:
+                        between = np.uint64(((1 << j) - 1) ^ ((1 << (i + 1)) - 1))
+                        parity = _parity_u64(states & between)
+                    sign = np.where(parity == 0, 1.0, -1.0)
+                    j_occ = ((states >> np.uint64(j)) & np.uint64(1)).astype(bool)
+                if src.size:
+                    amp = np.where(j_occ, aij, aji)
+                    H[dst, src] += sign * amp
 
         herr = float(np.max(np.abs(H - H.conj().T), initial=0.0))
         if herr > 1e-10:
@@ -155,7 +214,15 @@ class FiniteBathImpurityED:
                 e = np.asarray([float(H[0, 0].real)])
                 U = np.ones((1, 1), dtype=complex)
             else:
-                e, U = np.linalg.eigh(H)
+                # A real Hermitian bath Hamiltonian has a real-symmetric
+                # Fock-space representation. LAPACK dsyevd is materially
+                # cheaper than the complex zheevd on the large central
+                # particle-number blocks. Keep the complex path for
+                # magnetic/loop-current or complex-bath source fields.
+                if np.max(np.abs(H.imag), initial=0.0) <= 1e-14:
+                    e, U = np.linalg.eigh(H.real)
+                else:
+                    e, U = np.linalg.eigh(H)
             sectors.append(
                 ImpuritySector(
                     n_particles=N,
