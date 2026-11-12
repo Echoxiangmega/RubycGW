@@ -491,6 +491,41 @@ Smaller h is not always better because noise in bath fitting
 and residual errors is divided by h. Testing 0.0005, 0.001,
 0.002 is a sensible finite-difference convergence check.
 
+## Optional fast cluster-only initialization
+
+The cluster embedding self-consistency recomputes lattice GW screening and
+cluster corrections every iteration. Its preliminary lattice-GW solve is
+therefore only an initial guess, not a required separate fixed point.
+
+For a fast exploratory cluster-only run, use:
+
+    python research/benchmark_three_tori.py --geometry hex18 --V 5 \
+      --filling 2 --T 0.125 --methods ed cluster \
+      --cluster-initial-state free --cluster-max-iter 60 \
+      --skip-cluster-chi --out results/hex18_cluster_free
+
+With `--cluster-initial-state free`, a fixed-filling noninteracting
+Dyson G with zero self-energy initializes the embedding; when no
+standalone GW/cGW/post-GW method is selected, **no preliminary GW
+self-consistency is run at all**. The same full embedding loop and
+final convergence residual still apply. Default `gw` retains the
+existing preliminary density-GW initializer, whether converged or
+not, with a consistent Dyson reconstruction when necessary.
+An initially noninteracting seed can cost fewer setup operations
+but may require more cluster iterations or reach a different branch
+in a multistable strong-coupling regime. Check both initializations
+when studying phase competition.
+
+The two largest safe numerical speedups in the current code are
+(1) warm-starting every cos/sin, +h/-h multicell susceptibility
+calculation from the converged uniform cluster state, and
+(2) analytic Jacobians of real and complex bath fits.
+They do NOT remove the essential impurity exact diagonalizations
+at every embedding iteration. An increased bath size still raises
+the impurity Fock-space cost rapidly; a full cluster susceptibility
+at nonzero Q remains substantially more expensive than its
+unperturbed Green function.
+
 ## Outputs
 
 - comparison.csv: method, observable, value, ED reference, relative
