@@ -125,6 +125,53 @@ def _bath_from_arrays(energies, couplings, cell, fit_error=np.nan):
     )
 
 
+def restart_from_uniform_cluster(uniform, ncell: int) -> MultiCellRestart:
+    """Replicate a converged primitive-cell ED+GW fixed point for finite-Q chi.
+
+    The unperturbed lattice G and Sigma remain on the full folded supercell,
+    while impurity Sigma and bath parameters are replicated one per cell.
+    This eliminates the expensive independent folded-GW cold start for every
+    +h/-h source and starts the complex-bath fits near their final minimum.
+
+    All source solves start from a COPY of the same zero-field restart
+    (rather than warm-starting -h from +h, which could bias a hysteretic
+    branch). Every source still solves its own full nonlinear embedding map.
+    """
+    if not bool(uniform.converged):
+        raise ValueError("uniform cluster must converge before source restart")
+    ncell=int(ncell)
+    if ncell<1:
+        raise ValueError("ncell must be positive")
+    bath=getattr(uniform,"bath",None)
+    if bath is None:
+        raise ValueError("uniform cluster result must expose fitted bath")
+    g=np.asarray(uniform.G,dtype=complex)
+    h=np.asarray(uniform.Sigma_H,dtype=complex)
+    emb=np.asarray(uniform.Sigma_emb,dtype=complex)
+    impurity=np.asarray(uniform.Sigma_ED_cluster,dtype=complex)
+    energies=np.asarray(bath.energies,dtype=float)
+    couplings=np.asarray(bath.couplings,dtype=complex)
+    if g.ndim!=5 or g.shape[1:3]!=(1,1):
+        raise ValueError("uniform cluster Green has invalid folded shape")
+    norb=6*ncell
+    if g.shape[-2:]!=(norb,norb) or h.shape!=(norb,norb) or emb.shape!=g.shape:
+        raise ValueError("uniform cluster lattice dimensions mismatch")
+    if impurity.shape!=(g.shape[0],6,6):
+        raise ValueError("uniform cluster impurity self-energy dimension mismatch")
+    if energies.ndim!=1 or couplings.shape!=(6,len(energies)):
+        raise ValueError("uniform bath parameters dimension mismatch")
+    for a in (g,h,emb,impurity,energies,couplings):
+        if not np.all(np.isfinite(a)):
+            raise ValueError("nonfinite uniform cluster restart data")
+    return MultiCellRestart(
+        Sigma_H=h.copy(),Sigma_emb=emb.copy(),
+        Sigma_imp=np.repeat(impurity[None,:,:,:],ncell,axis=0),
+        G=g.copy(),mu=float(uniform.mu),
+        bath_energies=np.tile(energies[None,:],(ncell,1)),
+        bath_couplings=np.repeat(couplings[None,:,:],ncell,axis=0),
+    )
+
+
 def solve_multicell_cluster_ed_gw(
     h0: np.ndarray,
     Vq: np.ndarray,
@@ -202,6 +249,12 @@ def solve_multicell_cluster_ed_gw(
             raise ValueError("restart Sigma_emb shape mismatch")
         if sigma_imp.shape != (ncell, grid.nf, NSUB, NSUB):
             raise ValueError("restart Sigma_imp shape mismatch")
+        if G.shape != (grid.nf,1,1,norb,norb):
+            raise ValueError("restart G shape mismatch")
+        if not all(np.all(np.isfinite(x)) for x in
+                   (sigma_h,sigma_emb,sigma_imp,G,restart.bath_energies,
+                    restart.bath_couplings)) or not np.isfinite(mu):
+            raise ValueError("nonfinite multi-cell ED+GW restart")
         baths = [
             _bath_from_arrays(
                 restart.bath_energies,
@@ -427,6 +480,7 @@ def _cluster_matrix(interactions):
 __all__ = [
     "MultiCellEDGWOptions",
     "MultiCellRestart",
+    "restart_from_uniform_cluster",
     "MultiCellEDGWResult",
     "solve_multicell_cluster_ed_gw",
 ]
