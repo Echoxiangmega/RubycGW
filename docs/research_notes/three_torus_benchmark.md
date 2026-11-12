@@ -396,6 +396,136 @@ inter-triangle susceptibility, the physical current vertices and the
 lattice symmetry at Q before asserting that the method selects the
 right current ground state.
 
+## Fractional finite-temperature ED filling
+
+The old benchmark required `Ncell*filling` to be an integer **even
+when ED was not requested**. This restriction was only necessary for
+canonical fixed-particle ED, and has been removed for GW and the
+cluster embedding.
+
+With `--ed-ensemble auto` (default):
+- If `Ncell*filling` is integer, the existing **canonical** ED
+  ground E0 and static thermal susceptibility remain unchanged.
+- Otherwise, finite-temperature **grand-canonical** ED uses several
+  adjacent integer particle sectors, estimates each sector's
+  canonical partition function and connected C_N(Q,tau), and solves
+  for the chemical potential reproducing the requested noninteger
+  total mean particle number. The grand-canonical connected
+  correlation includes the extra inter-sector covariance of <O>_N,
+  not just a weighted average of connected canonical χ_N.
+- The Green's function already uses a separate low-energy
+  sector-truncated grand-canonical thermal Lanczos treatment, and
+  can represent fractional target <N>. Its spectral-state
+  truncation is not identical to the thermal trace used for χ.
+
+The grand-canonical result is a **selected-charge-sector and
+stochastic thermal trace approximation** to the exact finite-T ED
+thermal sum, not an exact full Fock-space trace. The CLI option
+`--ed-charge-sector-padding 1` includes one extra integer sector
+on both sides of floor/ceil(Ntarget) (default 1); 0 uses only the
+two adjacent sectors and can be useful for a fast diagnostic.
+Increase padding and `--ed-samples` and check the recorded
+`grand_edge_probability` before treating the result as converged.
+The grand-canonical calculation can cost several times the
+canonical fixed-N ED susceptibility.
+
+For instance, hex18 has 3 primitive cells. Filling = 5/3 implies
+fixed Ntotal=5, so canonical ED is valid even though the per-cell
+filling is fractional. Filling = 1.5 implies target <Ntotal>=4.5,
+so the default switches to grand canonical. Use
+`--ed-ensemble canonical` to demand strict fixed-N (and produce
+a clear error if total N is noninteger), or `--ed-ensemble grand`
+to explicitly demand the grand-canonical ensemble even at integer
+mean filling (requires >=2 charge sectors).
+
+At fractional mean filling there is **no unique canonical T=0
+ground energy E0** for that noninteger N. Thus the benchmark
+does not fabricate an ED E0 or a GW-vs-ED E0-relative error.
+It does report the ED thermal chemical potential and mean N.
+
+## Faster cluster ED and finite-Q cluster susceptibility
+
+When `--skip-cluster-chi` is omitted, the code computes the
+full finite-source derivative of the *multicell* cluster-ED+GW
+fixed point using two Hermitian source components cos/sin and
+positive/negative fields. It still requires
+`2 * Nchannels * N_HermitianComponents` fully self-consistent
+source calculations.
+
+The old implementation **cold-started each source from a new
+folded-lattice GW solve**, which itself could take >=200 iterations
+or fail at large V. By default, the new implementation converts the
+already converged unperturbed one-impurity cluster-ED+GW state into
+a multicell restart: replicate its 6-orbital impurity self-energy
+and converged finite-bath energies/couplings to every cell, and
+reuse the converged full-lattice G, Sigma_emb and mu. The +h and -h
+source solves each receive independent copies of this SAME
+zero-field state. They still solve their own full nonlinear
+multicell embedding including feedback from the perturbation.
+The old cold path is retained as a diagnostic via
+`--cluster-chi-coldstart`.
+
+The uniform real-bath fit and the multicell complex-bath
+fit now use **analytic Jacobians** by default for the nonlinear
+least-squares bath optimization. This replaces the numerical
+finite-difference Jacobian which required O(n_bath*n_orb)
+extra residual evaluations per Jacobian. Both preserve the
+same bath-fit loss, fit parameter constraints and self-consistency
+conditions. The old numerical Jacobians can still be selected by
+calling the fit routines with `jacobian="2-point"` for a direct
+research comparison.
+
+Each physical channel's cluster susceptibility is saved as soon
+as its field solves converge. If another channel fails, it is
+marked failed without discarding already completed channels.
+The new `summary.json` cluster_source_chi diagnostics contain
+per-channel maximum residual, bath error, source count, wall time,
+and the warm/cold initial-state selection.
+
+Unperturbed uniform cluster-ED+GW and the source calculation use
+different symmetry Ansätze (one equivalent impurity vs one
+impurity per physical primitive cell). Warm-started finite
+differences must still be checked for h -> 0, bath discretization,
+convergence thresholds and possible branch/hysteresis effects.
+Smaller h is not always better because noise in bath fitting
+and residual errors is divided by h. Testing 0.0005, 0.001,
+0.002 is a sensible finite-difference convergence check.
+
+## Optional fast cluster-only initialization
+
+The cluster embedding self-consistency recomputes lattice GW screening and
+cluster corrections every iteration. Its preliminary lattice-GW solve is
+therefore only an initial guess, not a required separate fixed point.
+
+For a fast exploratory cluster-only run, use:
+
+    python research/benchmark_three_tori.py --geometry hex18 --V 5 \
+      --filling 2 --T 0.125 --methods ed cluster \
+      --cluster-initial-state free --cluster-max-iter 60 \
+      --skip-cluster-chi --out results/hex18_cluster_free
+
+With `--cluster-initial-state free`, a fixed-filling noninteracting
+Dyson G with zero self-energy initializes the embedding; when no
+standalone GW/cGW/post-GW method is selected, **no preliminary GW
+self-consistency is run at all**. The same full embedding loop and
+final convergence residual still apply. Default `gw` retains the
+existing preliminary density-GW initializer, whether converged or
+not, with a consistent Dyson reconstruction when necessary.
+An initially noninteracting seed can cost fewer setup operations
+but may require more cluster iterations or reach a different branch
+in a multistable strong-coupling regime. Check both initializations
+when studying phase competition.
+
+The two largest safe numerical speedups in the current code are
+(1) warm-starting every cos/sin, +h/-h multicell susceptibility
+calculation from the converged uniform cluster state, and
+(2) analytic Jacobians of real and complex bath fits.
+They do NOT remove the essential impurity exact diagonalizations
+at every embedding iteration. An increased bath size still raises
+the impurity Fock-space cost rapidly; a full cluster susceptibility
+at nonzero Q remains substantially more expensive than its
+unperturbed Green function.
+
 ## Outputs
 
 - comparison.csv: method, observable, value, ED reference, relative

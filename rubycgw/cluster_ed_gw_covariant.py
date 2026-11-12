@@ -154,6 +154,47 @@ def _initial_complex_bath_guess(
     return eps, hyb
 
 
+def _complex_bath_residual_jacobian(
+    wfit: np.ndarray, mu: float, eps: np.ndarray,
+    hyb: np.ndarray, weights: np.ndarray,
+) -> np.ndarray:
+    """Analytic real Jacobian of the weighted complex hybridization residual.
+
+    Delta_ab(iw)=sum_p V_ap conj(V_bp)/(iw+mu-eps_p).
+    Parameters are ordered [eps_p, Re V_ap (row-major), Im V_ap].
+    This replaces 1+2*norb*nbath finite-difference residual evaluations
+    per trust-region Jacobian, without changing the fitted objective.
+    """
+    w=np.asarray(wfit,dtype=float).reshape(-1)
+    e=np.asarray(eps,dtype=float).reshape(-1)
+    v=np.asarray(hyb,dtype=complex)
+    weights=np.asarray(weights,dtype=float).reshape(-1)
+    norb,nbath=v.shape
+    nw=len(w)
+    if len(e)!=nbath or len(weights)!=nw:
+        raise ValueError("bath Jacobian shape mismatch")
+    nvc=norb*nbath
+    jac=np.zeros((nw,norb,norb,nbath+2*nvc),dtype=complex)
+    denom=1.0/(1j*w[:,None]+float(mu)-e[None,:])
+    for p in range(nbath):
+        val=v[:,p]
+        conj=val.conj()
+        D=denom[:,p]
+        jac[:,:,:,p]=(D*D)[:,None,None]*np.outer(val,conj)[None]
+        for a in range(norb):
+            jre=nbath+a*nbath+p
+            jim=nbath+nvc+a*nbath+p
+            jac[:,a,:,jre]+=D[:,None]*conj[None,:]
+            jac[:,:,a,jre]+=D[:,None]*val[None,:]
+            jac[:,a,:,jim]+=1j*D[:,None]*conj[None,:]
+            jac[:,:,a,jim]-=1j*D[:,None]*val[None,:]
+    jac*=weights[:,None,None,None]
+    return np.concatenate([
+        jac.real.reshape(nw*norb*norb,-1),
+        jac.imag.reshape(nw*norb*norb,-1)
+    ],axis=0)
+
+
 def fit_finite_bath_complex(
     target_delta: np.ndarray,
     omega: np.ndarray,
@@ -168,8 +209,13 @@ def fit_finite_bath_complex(
     initial: BathParameters | None = None,
     metric: str = "delta",
     one_body: np.ndarray | None = None,
+    jacobian: str = "analytic",
 ) -> BathParameters:
-    """Fit Delta(iw) with real bath energies and complex bath couplings."""
+    """Fit Delta(iw) with real bath energies and complex bath couplings.
+
+    jacobian="analytic" (default) avoids finite-differencing each bath
+    parameter; jacobian="2-point" retains the old numerical fit for checks.
+    """
     if str(metric).lower() != "delta":
         raise ValueError("complex bath fitter currently supports metric='delta' only")
     delta = np.asarray(target_delta, dtype=complex)
@@ -229,9 +275,16 @@ def fit_finite_bath_complex(
         diff = (model - dfit) * weights[:, None, None]
         return np.concatenate([diff.real.ravel(), diff.imag.ravel()])
 
+    if jacobian not in ("analytic","2-point"):
+        raise ValueError("complex bath Jacobian must be 'analytic' or '2-point'")
+    def analytic_jacobian(x: np.ndarray) -> np.ndarray:
+        eps,hyb=unpack(x)
+        return _complex_bath_residual_jacobian(wfit,mu,eps,hyb,weights)
+
     opt = least_squares(
         residual,
         x0,
+        jac=analytic_jacobian if jacobian=="analytic" else "2-point",
         bounds=(lower, upper),
         max_nfev=int(max_nfev),
         xtol=float(xtol),

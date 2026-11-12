@@ -203,6 +203,33 @@ def _initial_bath_guess(
     return eps, bath_hyb
 
 
+def _real_bath_hybridization_jacobian(
+    wfit: np.ndarray, mu: float, eps: np.ndarray,
+    couplings: np.ndarray,
+) -> np.ndarray:
+    """Derivative d Delta_ab(iw) / d [eps_p, V_ap] for a real finite bath.
+
+    Returns shape (nw,norb,norb, nbath+norb*nbath), with real parameter
+    ordering identical to fit_finite_bath.
+    """
+    w=np.asarray(wfit,dtype=float).reshape(-1)
+    e=np.asarray(eps,dtype=float).reshape(-1)
+    v=np.asarray(couplings,dtype=float)
+    norb,nbath=v.shape
+    if len(e)!=nbath:
+        raise ValueError("real bath Jacobian shape mismatch")
+    jac=np.zeros((len(w),norb,norb,nbath+norb*nbath),dtype=complex)
+    D=1/(1j*w[:,None]+float(mu)-e[None,:])
+    for p in range(nbath):
+        val=v[:,p]
+        jac[:,:,:,p]=(D[:,p]**2)[:,None,None]*np.outer(val,val)[None]
+        for a in range(norb):
+            col=nbath+a*nbath+p
+            jac[:,a,:,col]+=D[:,p,None]*val[None,:]
+            jac[:,:,a,col]+=D[:,p,None]*val[None,:]
+    return jac
+
+
 def fit_finite_bath(
     target_delta: np.ndarray,
     omega: np.ndarray,
@@ -217,6 +244,7 @@ def fit_finite_bath(
     initial: BathParameters | None = None,
     metric: str = "delta",
     one_body: np.ndarray | None = None,
+    jacobian: str = "analytic",
 ) -> BathParameters:
     """Fit a finite real bath using Delta or Weiss-Green-function distance.
 
@@ -308,9 +336,29 @@ def fit_finite_bath(
             diff = (model - dfit) * weights[:, None, None]
         return np.concatenate([diff.real.ravel(), diff.imag.ravel()])
 
+    if jacobian not in ("analytic","2-point"):
+        raise ValueError("real bath Jacobian must be 'analytic' or '2-point'")
+    def analytic_jacobian(x):
+        eps,bath_hyb=unpack(x)
+        J=_real_bath_hybridization_jacobian(wfit,mu,eps,bath_hyb)
+        if metric=="g0":
+            model=bath_hybridization(wfit,mu,eps,bath_hyb)
+            model_g0=np.linalg.inv(
+                (1j*wfit[:,None,None]+float(mu))*eye[None]
+                -hfit[None]-model
+            )
+            J=np.einsum("wab,wbcj,wcd->wadj",
+                        model_g0,J,model_g0,optimize=True)
+        J=J*weights[:,None,None,None]
+        npar=J.shape[-1]
+        return np.concatenate(
+            (J.real.reshape(-1,npar),J.imag.reshape(-1,npar)),axis=0
+        )
+
     opt = least_squares(
         residual,
         x0,
+        jac=analytic_jacobian if jacobian=="analytic" else "2-point",
         bounds=(lower, upper),
         max_nfev=int(max_nfev),
         xtol=float(xtol),
