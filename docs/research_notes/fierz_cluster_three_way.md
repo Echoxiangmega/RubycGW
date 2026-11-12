@@ -10,27 +10,33 @@ python research/compare_fierz_cluster_ed_gw.py `
   --Q 0.333333333333 0.333333333333 `
   --modes density pseudospin bj `
   --channels x_even y_even z_same z_opposite `
+  --source-workers 2 `
   --out results/hex18_fierz_cluster_V0p5_n2
 ```
 
-The default cluster susceptibility is **analytic**, with no +/-h
-self-consistency. It differentiates the full finite-bath Fierz-matched
-fixed-point map for all three modes, including the static HF matrix,
-channel polarization, screening, local GW subtraction, bath fit and
-impurity ED Green function. It is **not** a bare GG bubble.
+The default cluster susceptibility is **finite-source**, with full
+self-consistent +/-h solves for each Fierz-matched embedding. No extra
+method flag is required. At finite Q this uses two Hermitian cos/sin
+source components and both signs; four channels and three embeddings
+can require up to **48** complete three-impurity source self-consistencies.
+Control the field strength using `--source-step` (default 0.001),
+the convergence tolerance using `--source-tol`, and optional
+parallelism using `--source-workers`.
 
-For the original finite-source calculation, add
-`--cluster-chi-finite-source --source-step 0.001 --source-workers 2`.
-At finite Q, this uses two Hermitian cos/sin source components and
-both signs; four channels and three embeddings can trigger up to
-**48** complete three-impurity source self-consistencies.
+To explicitly request the analytic method, add
+`--cluster-chi-analytic` (equivalently `--cluster-chi-method analytic`).
+It differentiates the complete zero-source finite-bath Fierz-matched
+fixed-point map, including static HF, channel polarization, screening,
+local GW subtraction, bath fitting and impurity ED response; it is **not**
+a bare GG bubble. GMRES can require many expensive linear-map evaluations
+and can therefore be slower than finite-source in this model.
 
-Increase `--nbath 6 --nw 49 --nomega 10` for main numerical
-results only after checking bath-size and frequency-grid dependence,
-bath stationarity and the analytic GMRES residual. Cross-check
-representative points with the finite-source route, including a
-scan of field step and source tolerance. For a quick Green-only check,
-use `--skip-chi`; start with only `--channels z_same z_opposite`.
+Increase `--nbath 6 --nw 49 --nomega 10` for main numerical results
+after checking bath size, Matsubara-grid convergence, field-step and
+source self-consistency. Cross-check selected points with analytic chi
+and monitor bath stationarity and GMRES residuals there. For a quick
+Green-only check use `--skip-chi`; start with
+`--channels z_same z_opposite`.
 
 The benchmark's exact 18-site ED reference is computed **once** for
 all Fierz choices. Exact PBC geometry, the physical Hamiltonian,
@@ -92,14 +98,13 @@ For each Fierz channel:
    zero-source **complex**-bath three-impurity fixed point in that
    same Fierz mode.
 4. Save that converged zero-source `G(K,iw)` as the cluster reference.
-   By default, build the exact linear response of the same finite-bath
-   self-consistency equations and solve the matrix-free GMRES response
-   for each physical cos/sin component. The static HF response includes
-   the off-diagonal elements in the pseudospin and BJ modes.
-5. With `--cluster-chi-finite-source`, instead run separate
-   fully self-consistent `+h/-h` sources from identical copies of
-   that mode's converged zero-source restart. All impurity baths are
-   reoptimized. Failed source or analytic solves are reported, with
+   By default, run fully self-consistent `+h/-h` sources from identical
+   copies of the converged zero-field restart, independently reoptimizing
+   all impurity baths.
+5. With `--cluster-chi-analytic`, instead compute the full fixed-point
+   derivative by matrix-free GMRES for each physical cos/sin component.
+   The static HF response includes off-diagonal matrix elements for
+   pseudospin and BJ. Failed source or analytic solves are reported, with
    **no** fallback to a bare bubble or another approximation.
 
 The analytic response assumes a smooth interior stationary complex-bath

@@ -106,7 +106,7 @@ def test_no_silent_unmatched_Fierz_interactions(bad):
 
 
 def test_fierz_compare_cli_three_modes_green_and_chi_at_V0(tmp_path):
-    """Default analytic chi runs for all three Fierz-matched embeddings."""
+    """Default full finite-source chi runs for all three embeddings."""
     out=tmp_path/"fierz"
     script=Path(__file__).resolve().parents[1]/"research"/"compare_fierz_cluster_ed_gw.py"
     cmd=[
@@ -138,8 +138,9 @@ def test_fierz_compare_cli_three_modes_green_and_chi_at_V0(tmp_path):
         chi=next(x for x in cs if x["method"]=="cluster-"+mode)
         assert green["status"]=="converged",(mode,r.stdout)
         assert chi["status"]=="ok",(mode,r.stdout)
-        assert chi["chi_method"]=="analytic"
-        assert int(chi["linear_iterations"])>=0
+        assert chi["chi_method"]=="finite-source"
+        assert chi["analytic_wall_seconds"]==""
+        assert float(chi["finite_source_wall_seconds"])>=0.
         # The ED thermal Green reference is intentionally retained with
         # only ONE state per charge/momentum sector, and is not converged at
         # T=.4. Its 16% relative error is a thermal Lanczos TRUNCATION,
@@ -154,7 +155,7 @@ def test_fierz_compare_cli_three_modes_green_and_chi_at_V0(tmp_path):
             arrays["Giw_cluster_density"],atol=3e-6,rtol=3e-6
         )
     d=json.loads((out/"diagnostics.json").read_text())
-    assert d["cluster_chi_method"]=="analytic"
+    assert d["cluster_chi_method"]=="finite-source"
     assert all(d["methods"][mode]["gw_mode"]==mode
                for mode in ("density","pseudospin","bj"))
 
@@ -208,7 +209,7 @@ def test_weak_interaction_three_mode_cluster_fixed_points(tmp_path):
     for mode in ("density","bj","pseudospin"):
         item=next(x for x in chi_rows if x["method"]=="cluster-"+mode)
         assert item["status"]=="ok",(mode,p.stdout)
-        assert item["chi_method"]=="analytic"
+        assert item["chi_method"]=="finite-source"
         assert np.isfinite(float(item["chi"]))
     diag=json.loads((output/"diagnostics.json").read_text())
     assert all(diag["methods"][mode]["gw_mode"]==mode for mode in (
@@ -262,9 +263,9 @@ def test_fierz_channel_dynamic_GW_tangent_matches_central_difference(mode):
     np.testing.assert_allclose(static,numeric,atol=1e-9,rtol=1e-8)
 
 
-def test_fierz_compare_cli_opt_in_finite_source(tmp_path):
-    """The old self-consistent +/-h path remains an explicit opt-in."""
-    out=tmp_path/"finite"
+def test_fierz_compare_cli_opt_in_analytic(tmp_path):
+    """The analytic fixed-point response remains an explicit opt-in."""
+    out=tmp_path/"analytic"
     script=Path(__file__).resolve().parents[1]/"research"/"compare_fierz_cluster_ed_gw.py"
     cmd=[
         sys.executable,str(script),"--V","0","--n",str(2/3),
@@ -278,7 +279,7 @@ def test_fierz_compare_cli_opt_in_finite_source(tmp_path):
         "--uniform-max-iter","6","--uniform-tol","1e-4",
         "--baseline-max-iter","6","--baseline-tol","1e-4",
         "--source-max-iter","6","--source-tol","1e-4",
-        "--source-step",".01","--cluster-chi-finite-source",
+        "--source-step",".01","--cluster-chi-analytic",
         "--out",str(out)
     ]
     p=subprocess.run(cmd,capture_output=True,text=True,timeout=180)
@@ -287,9 +288,9 @@ def test_fierz_compare_cli_opt_in_finite_source(tmp_path):
         rows=list(csv.DictReader(f))
     cluster=next(x for x in rows if x["method"]=="cluster-density")
     assert cluster["status"]=="ok",p.stdout
-    assert cluster["chi_method"]=="finite-source"
-    assert int(float(cluster["finite_source_wall_seconds"])>=0)==1
-    assert cluster["analytic_wall_seconds"]==""
+    assert cluster["chi_method"]=="analytic"
+    assert float(cluster["analytic_wall_seconds"])>=0
+    assert cluster["finite_source_wall_seconds"]==""
     diag=json.loads((out/"diagnostics.json").read_text())
-    assert diag["cluster_chi_method"]=="finite-source"
-    assert diag["methods"]["density"]["source"]["x_even"]["n_source_solves"]==2
+    assert diag["cluster_chi_method"]=="analytic"
+    assert diag["methods"]["density"]["analytic"]["x_even"]["n_source_solves"]==0
