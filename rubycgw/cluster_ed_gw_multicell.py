@@ -63,6 +63,7 @@ class MultiCellEDGWOptions:
     mu_tol: float = 1e-11
     mu_max_iter: int = 80
     verbose: bool = True
+    gw_mode: str = "density"
 
 
 @dataclass
@@ -101,6 +102,7 @@ class MultiCellEDGWResult:
     residual_history: np.ndarray
     elapsed_history: np.ndarray
     timing_seconds: dict[str, float] | None = None
+    gw_mode: str = "density"
 
 
 def _maxabs(a):
@@ -194,6 +196,12 @@ def solve_multicell_cluster_ed_gw(
     if norb % NSUB != 0:
         raise ValueError("folded orbital dimension must be a multiple of six")
     ncell = norb // NSUB
+    from .fierz_cluster_embedding import (
+        build_embedding_channels,lattice_gw_map,cluster_gw_map
+    )
+    channel=build_embedding_channels(
+        cluster_interactions,ncell,opts.gw_mode,Vq
+    )
     if not (0.0 < float(opts.mixing) <= 1.0):
         raise ValueError("mixing must lie in (0,1]")
     if not (0.0 < float(opts.impurity_mixing) <= 1.0):
@@ -201,28 +209,30 @@ def solve_multicell_cluster_ed_gw(
 
     if restart is None:
         from .gw import GWOptions
-        bg = solve_matrix_gw_fast(
-            h0,
-            Vq,
-            grid,
-            opts=GWOptions(
-                target_filling=float(target_particles),
-                max_iter=max(200, int(opts.max_iter)),
-                tol=min(float(opts.tol), 1e-8),
-                mixing=0.25,
-                mixing_method="pulay",
-                verbose=bool(opts.verbose),
-                momentum_backend="fft",
-                mu_tol=float(opts.mu_tol),
-                mu_max_iter=int(opts.mu_max_iter),
-            ),
+        gw_options=GWOptions(
+            target_filling=float(target_particles),
+            max_iter=max(200, int(opts.max_iter)),
+            tol=min(float(opts.tol), 1e-8),
+            mixing=0.25,mixing_method="pulay",
+            verbose=bool(opts.verbose),momentum_backend="fft",
+            mu_tol=float(opts.mu_tol),mu_max_iter=int(opts.mu_max_iter),
         )
+        if channel.mode=="density":
+            bg=solve_matrix_gw_fast(h0,Vq,grid,opts=gw_options)
+            sh0,sc0=bg.Sigma_H,bg.Sigma_GW
+        else:
+            from .fierz_channel_gw import solve_channel_gw_same_torus
+            bg=solve_channel_gw_same_torus(
+                h0,channel.lattice,grid,opts=gw_options
+            )
+            sh0,sc0=bg.Sigma_static,bg.Sigma_c
         if not bg.converged:
             raise RuntimeError(
-                f"initial folded GW background did not converge: {bg.final_error:.3e}"
+                f"initial {channel.mode} GW background did not converge: "
+                f"{bg.final_error:.3e}"
             )
-        sigma_h = np.asarray(bg.Sigma_H, dtype=complex).copy()
-        sigma_emb = np.asarray(bg.Sigma_GW, dtype=complex).copy()
+        sigma_h = np.asarray(sh0, dtype=complex).copy()
+        sigma_emb = np.asarray(sc0, dtype=complex).copy()
         G = np.asarray(bg.G, dtype=complex).copy()
         mu = float(bg.mu)
         rho = one_body_density_matrix_tail(G, grid, h0, mu, sigma_h)
@@ -232,11 +242,9 @@ def solve_multicell_cluster_ed_gw(
             sl = _block_slice(c)
             Gc = G[:, 0, 0, sl, sl]
             rhoc = rho[0, 0, sl, sl]
-            sigma_imp[c], _, _ = cluster_gw_self_energy(
-                Gc,
-                rhoc,
-                _cluster_matrix(cluster_interactions),
-                grid,
+            sigma_imp[c], _, _ = cluster_gw_map(
+                Gc,rhoc,cluster_interactions,grid,channel,
+                Vc=_cluster_matrix(cluster_interactions)
             )
     else:
         sigma_h = np.asarray(restart.Sigma_H, dtype=complex).copy()
@@ -292,19 +300,9 @@ def solve_multicell_cluster_ed_gw(
     for it in range(1, int(opts.max_iter) + 1):
         t0 = perf_counter()
         rho = one_body_density_matrix_tail(G, grid, h0, mu, sigma_h)
-        density = np.diagonal(rho[0, 0], axis1=-2, axis2=-1).real
-        sigma_h_out = hartree_self_energy_matrix(density, Vq[0, 0])
-        P = compute_polarization_matrix(G, grid, backend="fft")
-        W = compute_screened_interaction_matrix(P, Vq)
-        sigma_gw_lattice = compute_sigma_gw_split_matrix(
-            G,
-            W,
-            Vq,
-            grid,
-            h0,
-            mu,
-            sigma_h,
-            backend="fft",
+        sigma_h_out,sigma_gw_lattice,P,W=lattice_gw_map(
+            G,rho,h0,Vq,grid,channel,mu,
+            static_reference=sigma_h
         )
         sigma_emb_out = np.asarray(sigma_gw_lattice, dtype=complex).copy()
         time_lattice += perf_counter()-t0
@@ -314,7 +312,9 @@ def solve_multicell_cluster_ed_gw(
             Gc = np.asarray(G[:, 0, 0, sl, sl], dtype=complex)
             rhoc = np.asarray(rho[0, 0, sl, sl], dtype=complex)
             Gc_all[c] = Gc
-            sigma_cgw, _, _ = cluster_gw_self_energy(Gc, rhoc, Vc, grid)
+            sigma_cgw, _, _ = cluster_gw_map(
+                Gc,rhoc,cluster_interactions,grid,channel,Vc=Vc
+            )
             sigma_cgw_all[c] = sigma_cgw
 
             g0_inv = np.linalg.inv(Gc) + sigma_imp[c]
@@ -437,26 +437,17 @@ def solve_multicell_cluster_ed_gw(
     # smaller than the absolute self-consistency tolerance.
     rho = one_body_density_matrix_tail(G, grid, h0, mu, sigma_h)
     density = np.diagonal(rho[0, 0], axis1=-2, axis2=-1).real
-    P = compute_polarization_matrix(G, grid, backend="fft")
-    W = compute_screened_interaction_matrix(P, Vq)
-    sigma_gw_lattice = compute_sigma_gw_split_matrix(
-        G,
-        W,
-        Vq,
-        grid,
-        h0,
-        mu,
-        sigma_h,
-        backend="fft",
+    _,sigma_gw_lattice,P,W=lattice_gw_map(
+        G,rho,h0,Vq,grid,channel,mu,
+        static_reference=sigma_h
     )
     for c in range(ncell):
         sl = _block_slice(c)
         Gc_all[c] = np.asarray(G[:, 0, 0, sl, sl], dtype=complex)
-        sigma_cgw_all[c], _, _ = cluster_gw_self_energy(
+        sigma_cgw_all[c], _, _ = cluster_gw_map(
             Gc_all[c],
             np.asarray(rho[0, 0, sl, sl], dtype=complex),
-            Vc,
-            grid,
+            cluster_interactions,grid,channel,Vc=Vc
         )
 
     bath_energies = np.stack([np.asarray(b.energies, dtype=float) for b in baths])
@@ -496,6 +487,7 @@ def solve_multicell_cluster_ed_gw(
             "other":float(other),
             "total":float(total_wall),
         },
+        gw_mode=channel.mode,
     )
 
 
