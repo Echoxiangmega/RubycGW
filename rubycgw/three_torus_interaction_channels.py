@@ -75,6 +75,8 @@ def solve_interaction_channel_response(
     background: ChannelGWResult, definition: ChannelDefinition,
     geometry, grid: MatsubaraGrid, Q, channels,
     opts: SupercellVertexOptions, *, strict=True,
+    initial_vertices: dict | None = None,
+    output_vertices: dict | None = None,
 ):
     """Static bare bubble and conserving (within chosen skeleton) vertex.
 
@@ -90,15 +92,27 @@ def solve_interaction_channel_response(
         val_gg=0.0
         val_cov=0.0
         ok=True
-        for K in hermitian_source_components(geometry,ch,Q):
+        for component_index,K in enumerate(
+            hermitian_source_components(geometry,ch,Q)
+        ):
+            key=(str(ch),int(component_index))
             kk=np.asarray(K)[None]
             val_gg+=float(static_gg_tail_completed(
                 background.G,kk,grid,hstatic,background.mu
             )["completed"][0,0].real)
+            guess=(
+                initial_vertices.get(key) if initial_vertices is not None
+                else None
+            )
             result=solve_channel_vertex_transfer(
-                background,definition,K,h0,grid,0,opts=opts
+                background,definition,K,h0,grid,0,opts=opts,
+                initial_gamma=guess,
             )
             ok=ok and bool(result.converged)
+            if result.converged and output_vertices is not None:
+                # Only a certified converged linear response may become
+                # the starting vertex at the next interaction strength.
+                output_vertices[key]=np.asarray(result.Gamma).copy()
             if strict and not result.converged:
                 raise RuntimeError(
                     f"{definition.mode} covariant {ch} did not converge: "
