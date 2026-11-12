@@ -23,6 +23,8 @@ import csv
 import json
 import math
 from pathlib import Path
+from types import SimpleNamespace
+import numpy as np
 
 from benchmark_three_tori import main as benchmark_main, parse_args as benchmark_args
 
@@ -49,6 +51,76 @@ def _write_csv(path,rows,cols):
         for row in rows:
             wr.writerow({col:row.get(col) for col in cols})
     tmp.replace(path)
+
+
+def _fingerprint(args):
+    """Require the same physical model, grid and solver knobs on resume."""
+    settings=dict(vars(args))
+    settings.pop("V",None)
+    settings.pop("out",None)
+    return json.dumps(settings,sort_keys=True,default=str)
+
+
+def _save_seeds(directory,gw_memory,vertex_memory,fingerprint):
+    """Atomic pickle-free NPZ for converged cross-V self-energies and vertices."""
+    arrays={}
+    meta=dict(fingerprint=fingerprint,gw=[],vertex=[])
+    for mode,(V,state) in sorted(gw_memory.items()):
+        if not bool(state.converged):
+            continue
+        prefix=f"gw_{mode}"
+        arrays[prefix+"_static"]=np.asarray(state.Sigma_static,complex)
+        arrays[prefix+"_dynamic"]=np.asarray(state.Sigma_c,complex)
+        meta["gw"].append(dict(
+            mode=mode,V=float(V),mu=float(state.mu),
+            static=prefix+"_static",dynamic=prefix+"_dynamic"
+        ))
+    for mode,(V,gammas) in sorted(vertex_memory.items()):
+        for (channel,index),gamma in sorted(gammas.items()):
+            key=f"vertex_{len(meta['vertex'])}"
+            arrays[key]=np.asarray(gamma,complex)
+            meta["vertex"].append(dict(
+                mode=mode,V=float(V),channel=str(channel),
+                component=int(index),key=key
+            ))
+    arrays["metadata"]=np.asarray(json.dumps(meta,sort_keys=True))
+    temp=directory/"warm_seeds.npz.tmp"
+    with temp.open("wb") as fh:
+        np.savez_compressed(fh,**arrays)
+    temp.replace(directory/"warm_seeds.npz")
+
+
+def _load_seeds(directory,fingerprint):
+    """Reject stale/unsafe checkpoint metadata; never use pickle."""
+    with np.load(directory/"warm_seeds.npz",allow_pickle=False) as z:
+        meta=json.loads(str(z["metadata"].item()))
+        if meta.get("fingerprint")!=fingerprint:
+            raise ValueError("warm-state fingerprint differs from current scan")
+        gw={}
+        chi={}
+        for item in meta["gw"]:
+            mode=str(item["mode"])
+            static=np.asarray(z[item["static"]],complex).copy()
+            dynamic=np.asarray(z[item["dynamic"]],complex).copy()
+            mu=float(item["mu"])
+            if not np.isfinite(mu) or not all(
+                    np.all(np.isfinite(a)) for a in (static,dynamic)):
+                raise ValueError("checkpoint GW state is nonfinite")
+            gw[mode]=(float(item["V"]),SimpleNamespace(
+                mode=mode,converged=True,mu=mu,
+                Sigma_static=static,Sigma_c=dynamic
+            ))
+        for item in meta["vertex"]:
+            mode=str(item["mode"])
+            data=np.asarray(z[item["key"]],complex).copy()
+            if not np.all(np.isfinite(data)):
+                raise ValueError("checkpoint cGW vertex nonfinite")
+            if mode not in chi:
+                chi[mode]=(float(item["V"]),{})
+            if chi[mode][0]!=float(item["V"]):
+                raise ValueError("same-mode cGW vertices belong to different V")
+            chi[mode][1][(str(item["channel"]),int(item["component"]))]=data
+    return gw,chi
 
 
 def _point_tables(v,out,info):
@@ -134,21 +206,31 @@ def run_scan(argv=None):
     p.add_argument("--out",type=Path,required=True)
     p.add_argument("--cold-each-point",action="store_true")
     p.add_argument("--cold-vertex-each-point",action="store_true")
+    p.add_argument("--resume",action="store_true",
+                   help="reuse complete V points and certified GW/Gamma NPZ restart states")
     scan,other=p.parse_known_args(argv)
     values=sorted(scan.V_values)
     if len(set(values))!=len(values) or not all(map(math.isfinite,values)):
         p.error("V must consist of distinct finite numbers")
     if any(x in ("--V","--V-values","--out") for x in other):
-        p.error("use only --V-values for interaction values and --out for output")
+        p.error("use --V-values for interactions and --out for output")
     if not other:
-        p.error("supply common benchmark flags such as --geometry and --filling")
+        p.error("supply common flags such as --geometry and --filling")
     out=scan.out.resolve()
     out.mkdir(parents=True,exist_ok=True)
     probe=benchmark_args(["--V",str(values[0]),"--out",str(out/"check"),*other])
     if probe.gw_ramp_steps:
-        p.error("do not set --gw-ramp-steps: this scan already warm-starts from previous V")
+        p.error("omit --gw-ramp-steps: the scanner already uses previous-V warm starts")
     if probe.strict_method_failures:
-        p.error("omit --strict-method-failures: scanning records failures per V")
+        p.error("omit --strict-method-failures: the scan records per-point failures")
+    fingerprint=_fingerprint(probe)
+    old_points={}
+    manifest_path=out/"scan_manifest.json"
+    if scan.resume and manifest_path.is_file():
+        prior=json.loads(manifest_path.read_text(encoding="utf-8"))
+        if prior.get("fingerprint")!=fingerprint or prior.get("V_sorted")!=values:
+            p.error("resume manifest incompatible with this parameter set or V list")
+        old_points={float(item["V"]):item for item in prior.get("points",[])}
     print("[V-scan] V sorted ascending:",values,flush=True)
     gw_memory={}
     vertex_memory={}
@@ -159,37 +241,64 @@ def run_scan(argv=None):
         directory=out/f"V_{i:03d}_{_tag(V)}"
         args=benchmark_args(["--V",str(V),"--out",str(directory),*other])
         print(f"[V-scan] point {i+1}/{len(values)}: V={V:g}",flush=True)
-        try:
-            result=benchmark_main(
-                args,
-                initial_gw={} if scan.cold_each_point else gw_memory,
-                initial_vertices={} if scan.cold_vertex_each_point else vertex_memory,
-                return_scan_state=True,
-            )
-            for mode,pair in result["converged_GW"].items():
-                gw_memory[mode]=pair
-            for mode,pair in result["converged_vertices"].items():
-                vertex_memory[mode]=pair
-            info=result["summary"]
-            table,chis=_point_tables(V,directory,info)
-            all_rows.extend(table)
-            all_chi.extend(chis)
-            manifest.append(dict(
-                V=float(V),status="complete",
-                GW_last_converged={mode:float(x[0]) for mode,x in gw_memory.items()},
-                cGW_last_converged={mode:float(x[0]) for mode,x in vertex_memory.items()},
-                method_status=info.get("method_status",{}),
-                directory=str(directory),
-            ))
-        except Exception as exc:
-            why=f"{type(exc).__name__}: {exc}"
-            print(f"[V-scan] V={V:g} ERROR: {why}",flush=True)
-            manifest.append(dict(V=float(V),status="failed",
-                                 error=why,directory=str(directory)))
-            all_rows.append(dict(
-                V=float(V),method="scan_point",status="failed",
-                notes=why,output_dir=str(directory)
-            ))
+        recovered=False
+        old=old_points.get(float(V))
+        if (old and old.get("status")=="complete"
+                and (directory/"comparison.csv").is_file()
+                and (directory/"summary.json").is_file()
+                and (directory/"warm_seeds.npz").is_file()):
+            try:
+                oldgw,oldchi=_load_seeds(directory,fingerprint)
+                old_info=json.loads(
+                    (directory/"summary.json").read_text(encoding="utf-8")
+                )
+                table,chis=_point_tables(V,directory,old_info)
+                gw_memory=oldgw
+                vertex_memory=oldchi
+                all_rows.extend(table)
+                all_chi.extend(chis)
+                manifest.append(dict(old,resumed=True))
+                recovered=True
+                print(f"[V-scan] resumed V={V:g} from saved certified state",flush=True)
+            except (OSError,ValueError,KeyError,TypeError) as exc:
+                print(f"[V-scan] restart failed; recomputing V={V:g}: {exc}",flush=True)
+        if not recovered:
+            try:
+                result=benchmark_main(
+                    args,
+                    initial_gw={} if scan.cold_each_point else gw_memory,
+                    initial_vertices={} if scan.cold_vertex_each_point else vertex_memory,
+                    return_scan_state=True,
+                )
+                for mode,pair in result["converged_GW"].items():
+                    gw_memory[mode]=pair
+                for mode,pair in result["converged_vertices"].items():
+                    vertex_memory[mode]=pair
+                info=result["summary"]
+                table,chis=_point_tables(V,directory,info)
+                all_rows.extend(table)
+                all_chi.extend(chis)
+                _save_seeds(directory,gw_memory,vertex_memory,fingerprint)
+                manifest.append(dict(
+                    V=float(V),status="complete",
+                    GW_last_converged={
+                        mode:float(x[0]) for mode,x in gw_memory.items()
+                    },
+                    cGW_last_converged={
+                        mode:float(x[0]) for mode,x in vertex_memory.items()
+                    },
+                    method_status=info.get("method_status",{}),
+                    directory=str(directory),
+                ))
+            except Exception as exc:
+                why=f"{type(exc).__name__}: {exc}"
+                print(f"[V-scan] V={V:g} ERROR: {why}",flush=True)
+                manifest.append(dict(V=float(V),status="failed",
+                                     error=why,directory=str(directory)))
+                all_rows.append(dict(
+                    V=float(V),method="scan_point",status="failed",
+                    notes=why,output_dir=str(directory)
+                ))
         _write_csv(out/"scan_results.csv",all_rows,[
             "V","method","status","previous_GW_V","previous_cGW_V",
             "residual","screening_smin","G_iomega_error","G_tau_error",
@@ -203,6 +312,7 @@ def run_scan(argv=None):
             T=float(probe.T),K=list(map(float,probe.K)),
             Q=list(map(float,probe.Q)) if probe.Q is not None else None,
             gw_channels=list(probe.gw_channels),V_sorted=values,
+            fingerprint=fingerprint,
             points=manifest,
             cold_each_point=bool(scan.cold_each_point),
             cold_vertex_each_point=bool(scan.cold_vertex_each_point),
