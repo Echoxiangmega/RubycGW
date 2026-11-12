@@ -214,7 +214,15 @@ class FiniteBathImpurityED:
                 e = np.asarray([float(H[0, 0].real)])
                 U = np.ones((1, 1), dtype=complex)
             else:
-                e, U = np.linalg.eigh(H)
+                # A real Hermitian bath Hamiltonian has a real-symmetric
+                # Fock-space representation. LAPACK dsyevd is materially
+                # cheaper than the complex zheevd on the large central
+                # particle-number blocks. Keep the complex path for
+                # magnetic/loop-current or complex-bath source fields.
+                if np.max(np.abs(H.imag), initial=0.0) <= 1e-14:
+                    e, U = np.linalg.eigh(H.real)
+                else:
+                    e, U = np.linalg.eigh(H)
             sectors.append(
                 ImpuritySector(
                     n_particles=N,
