@@ -6,16 +6,19 @@ ED impurity: the SAME two 3-site triangle density-density V Hamiltonian.
 Embedding GW: density, pseudospin A1+E, or symmetric bond+current (BJ).
 The matching *cluster GW subtraction* is recomputed in the SAME Fierz mode.
 
-The static LC/CO susceptibility is obtained from full +/- source
-multi-impurity cluster self-consistency, NOT from a GG bubble. The analytic
-cluster derivative currently supports density only and is deliberately not
-substituted for this three-channel comparison.
+Static LC/CO cluster chi defaults to the analytic derivative of the
+entire Fierz-matched multi-impurity finite-bath fixed point for density,
+pseudospin and BJ. This is NOT a GG bubble. Use
+--cluster-chi-finite-source to opt into the original fully converged
++/- source calculation.
 
 Example (PowerShell from repository root):
     python research/compare_fierz_cluster_ed_gw.py --V 0.2 --n 2 --nbath 2 --nw 9 --nomega 3 --out results/test_fierz_cluster
 
-For the full physical comparison increase nbath/nw, and use the source
-tolerance and source-step scan; the default nbath=6 can be expensive.
+For the full physical comparison increase nbath/nw and verify the
+analytic linear residual and bath stationarity. For finite-source
+cross-checks, scan --source-step and --source-tol. The default nbath=6
+can be expensive.
 """
 from __future__ import annotations
 
@@ -45,6 +48,7 @@ from rubycgw.thermal_lanczos_green import ThermalLanczosOptions
 from rubycgw.fierz_channel_gw import solve_channel_gw_same_torus
 from rubycgw.fierz_cluster_embedding import build_embedding_channels
 from rubycgw.cluster_ed_gw import ruby_cluster_interactions
+from rubycgw.cluster_ed_gw_linear_response import StaticClusterEDGWLinearizer
 from rubycgw.cluster_ed_gw_multicell import (
     MultiCellEDGWOptions,MultiCellRestart,solve_multicell_cluster_ed_gw,
     restart_from_uniform_cluster,
@@ -92,6 +96,19 @@ def parse_args(argv=None):
     p.add_argument("--baseline-max-iter",type=int,default=80)
     p.add_argument("--baseline-tol",type=float,default=3e-6)
     p.add_argument("--baseline-mixing",type=float,default=.45)
+    p.add_argument("--cluster-chi-method",choices=("analytic","finite-source"),
+                   default="analytic",
+                   help="analytic (default): full fixed-point linear response; finite-source: self-consistent +/-h derivative")
+    p.add_argument("--cluster-chi-finite-source",
+                   action="store_const",dest="cluster_chi_method",
+                   const="finite-source",
+                   help="use the old +/-h cluster chi instead of analytic chi")
+    p.add_argument("--analytic-tol",type=float,default=1e-5,
+                   help="relative GMRES tolerance for analytic cluster chi")
+    p.add_argument("--analytic-maxiter",type=int,default=12)
+    p.add_argument("--analytic-restart",type=int,default=8)
+    p.add_argument("--bath-stationarity-tol",type=float,default=2e-5,
+                   help="maximum stationarity error of complex bath fit for analytic response")
     p.add_argument("--source-max-iter",type=int,default=100)
     p.add_argument("--source-tol",type=float,default=1e-6)
     p.add_argument("--source-mixing",type=float,default=.45)
@@ -210,8 +227,15 @@ def main(argv=None):
     a=parse_args(argv)
     if not 0<a.filling<6:
         raise ValueError("filling must be between 0 and 6 spinless fermions per primitive cell")
-    if a.nbath<1 or a.source_workers<1 or a.source_step<=0:
-        raise ValueError("nbath/workers/source-step must be positive")
+    if a.nbath<1:
+        raise ValueError("--nbath must be positive")
+    if a.cluster_chi_method=="finite-source" and not a.skip_chi:
+        if a.source_workers<1 or a.source_step<=0:
+            raise ValueError("finite-source workers and source-step must be positive")
+    if a.cluster_chi_method=="analytic" and not a.skip_chi:
+        if (a.analytic_tol<=0 or a.analytic_maxiter<1 or
+                a.analytic_restart<1 or a.bath_stationarity_tol<=0):
+            raise ValueError("invalid analytic cluster chi solver parameters")
     params=RubyParameters(ti=a.t,t1=a.t1,t2=a.t2,V=a.V)
     geom=build_torus_geometry("hex18",params)
     K=geom.validate_momentum(a.K)
@@ -228,6 +252,7 @@ def main(argv=None):
         "target_particles":target,"T":a.T,"K":list(K),"Q":list(Q),
         "modes":modes,"channels":channels,"nbath":a.nbath,
         "initial_state":a.initial_state,
+        "cluster_chi_method":a.cluster_chi_method,
         "note":"The ED impurity is always the original six intra-triangle density interactions; only the matched lattice-GW and cluster-GW subtraction vary.",
         "stages":{},"errors":{},"methods":{}
     }
@@ -264,6 +289,8 @@ def main(argv=None):
         ])
         _save_csv(out/"chi_comparison.csv",chi_rows,[
             "method","channel","status","chi","ED_chi","relative_error_ED",
+            "chi_method","chi_wall_seconds","analytic_wall_seconds",
+            "max_linear_residual","linear_iterations",
             "finite_source_wall_seconds","source_residual"
         ])
         with (out/"diagnostics.json").open("w",encoding="utf-8") as f:
@@ -485,41 +512,102 @@ def main(argv=None):
 
         if a.skip_chi:
             continue
-        restart=_multi_restart(base)
-        source_opts=MultiCellEDGWOptions(
-            max_iter=a.source_max_iter,tol=a.source_tol,
-            mixing=a.source_mixing,nbath=a.nbath,
-            bath_fit_nfreq=a.bath_fit_nfreq,
-            bath_fit_max_nfev=a.bath_max_nfev,
-            complex_bath=True,verbose=a.verbose,gw_mode=mode
-        )
-        for channel in channels:
-            components=hermitian_source_components(geom,channel,Q)
-            result=record_stage(
-                mode+"_chi_"+channel,
-                lambda: _sources(
-                    geom,grid,ints,restart,source_opts,target,
-                    components,float(a.source_step),a.source_workers
+        group["chi_method"]=a.cluster_chi_method
+        kernel=None
+        restart=None
+        source_opts=None
+        if a.cluster_chi_method=="analytic":
+            kernel=record_stage(
+                mode+"_analytic_kernel",
+                lambda: StaticClusterEDGWLinearizer(
+                    geom,params,grid,base,bath_nfit=a.bath_fit_nfreq,
+                    bath_stationarity_tol=a.bath_stationarity_tol
                 )
             )
+            if kernel is None:
+                for channel in channels:
+                    chi_rows.append(dict(
+                        method="cluster-"+mode,channel=channel,
+                        status="analytic-kernel-failed",chi_method="analytic"
+                    ))
+                save()
+                continue
+        else:
+            restart=_multi_restart(base)
+            source_opts=MultiCellEDGWOptions(
+                max_iter=a.source_max_iter,tol=a.source_tol,
+                mixing=a.source_mixing,nbath=a.nbath,
+                bath_fit_nfreq=a.bath_fit_nfreq,
+                bath_fit_max_nfev=a.bath_max_nfev,
+                complex_bath=True,verbose=a.verbose,gw_mode=mode
+            )
+        for channel in channels:
+            components=hermitian_source_components(geom,channel,Q)
+            if a.cluster_chi_method=="analytic":
+                def analytic_channel():
+                    start=time.perf_counter()
+                    answers=[
+                        kernel.response(
+                            component,rtol=a.analytic_tol,
+                            maxiter=a.analytic_maxiter,
+                            restart=a.analytic_restart,
+                        )
+                        for component in components
+                    ]
+                    return float(sum(item.chi for item in answers)),dict(
+                        wall_seconds=float(time.perf_counter()-start),
+                        max_linear_residual=max(item.residual for item in answers),
+                        linear_iterations=sum(item.iterations for item in answers),
+                        n_source_solves=0,
+                        components=[dict(item.__dict__) for item in answers],
+                        bath_stationarity=float(kernel.bath_stationarity_max),
+                        bath_linear_error=float(kernel.bath_linear_max),
+                    )
+                result=record_stage(mode+"_chi_"+channel,analytic_channel)
+            else:
+                result=record_stage(
+                    mode+"_chi_"+channel,
+                    lambda: _sources(
+                        geom,grid,ints,restart,source_opts,target,
+                        components,float(a.source_step),a.source_workers
+                    )
+                )
             if result is None:
                 chi_rows.append(dict(
-                    method="cluster-"+mode,channel=channel,status="failed"
+                    method="cluster-"+mode,channel=channel,status="failed",
+                    chi_method=a.cluster_chi_method
                 ))
             else:
                 value,details=result
                 ref=ed_chi.get(channel)
+                is_analytic=a.cluster_chi_method=="analytic"
                 chi_rows.append(dict(
                     method="cluster-"+mode,channel=channel,status="ok",
-                    chi=value,ED_chi=ref,
+                    chi=value,ED_chi=ref,chi_method=a.cluster_chi_method,
                     relative_error_ED=(
                         abs(value-ref)/max(abs(ref),1e-12)
                         if ref is not None else None
                     ),
-                    finite_source_wall_seconds=details["wall_seconds"],
-                    source_residual=details["source_residual"]
+                    chi_wall_seconds=details["wall_seconds"],
+                    analytic_wall_seconds=(
+                        details["wall_seconds"] if is_analytic else None
+                    ),
+                    max_linear_residual=(
+                        details["max_linear_residual"] if is_analytic else None
+                    ),
+                    linear_iterations=(
+                        details["linear_iterations"] if is_analytic else None
+                    ),
+                    finite_source_wall_seconds=(
+                        None if is_analytic else details["wall_seconds"]
+                    ),
+                    source_residual=(
+                        None if is_analytic else details["source_residual"]
+                    )
                 ))
-                group.setdefault("source",{})[channel]=details
+                group.setdefault("analytic" if is_analytic else "source",{})[
+                    channel
+                ]=details
             save()
 
     save()
