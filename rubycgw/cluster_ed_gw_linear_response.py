@@ -131,6 +131,12 @@ class StaticClusterEDGWLinearizer:
                  bath_stationarity_tol=2.e-5):
         if not reference.converged:
             raise ValueError("analytic chi requires a converged zero-source multi-ED+GW")
+        if str(getattr(reference,"gw_mode","density"))!="density":
+            raise NotImplementedError(
+                "analytic cluster susceptibility has only been derived and "
+                "validated for density GW; use the Fierz-matched full "
+                "finite-source response for pseudospin/BJ"
+            )
         self.geom=geom
         self.params=params
         self.grid=grid
