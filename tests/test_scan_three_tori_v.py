@@ -61,6 +61,18 @@ def test_sorted_v_scan_warm_starts_each_GW_and_cGW_and_saves_tables(tmp_path):
     assert len([x for x in ch if x["method"]=="cGW[density]" and
                x["channel"]=="z_same"])==3
 
+    # A long scan can resume without rerunning the already completed costly
+    # ED/GW/cGW points. The certified Gamma/GW seeds are saved without pickle.
+    last=out/"V_002_0p1"/"summary.json"
+    before=last.stat().st_mtime_ns
+    resumed=subprocess.run(
+        command+["--resume"],capture_output=True,text=True,timeout=180
+    )
+    assert resumed.returncode==0,resumed.stdout+"\\n"+resumed.stderr
+    assert "resumed V=" in resumed.stdout
+    assert last.stat().st_mtime_ns==before
+    assert (out/"V_002_0p1"/"warm_seeds.npz").is_file()
+
     # Same model and fixed point: warmed V=.1 must agree with direct cold solve.
     cold=tmp_path/"cold"
     cmd=[
@@ -117,3 +129,28 @@ def test_scan_rejects_redundant_zero_to_target_ramp(tmp_path):
     out=subprocess.run(cmd,capture_output=True,text=True,timeout=60)
     assert out.returncode!=0
     assert "gw-ramp-steps" in out.stderr
+
+
+def test_scan_failed_V_keeps_last_certified_GW_seed(tmp_path):
+    out=tmp_path/"nonconv"
+    cmd=[
+        sys.executable,str(_script("scan_three_tori_v.py")),
+        "--V-values",".1",".2","0",
+        "--geometry","3x1","--filling",str(2./3.),
+        "--K","0","0","--Q","0","0",
+        "--T",".4","--nw","3","--nomega","1",
+        "--methods","gw","--gw-channels","density",
+        "--gw-max-iter","1","--gw-tol","1e-14",
+        "--channels","z_same","--plot-tau-points","9",
+        "--out",str(out)
+    ]
+    res=subprocess.run(cmd,capture_output=True,text=True,timeout=180)
+    assert res.returncode==0,res.stdout+"\\n"+res.stderr
+    data=json.loads((out/"scan_manifest.json").read_text())
+    assert data["V_sorted"]==[0.,.1,.2]
+    for item in data["points"]:
+        assert item["status"]=="complete"
+        assert item["GW_last_converged"]["density"]==0.
+    assert json.loads(
+        (out/"V_002_0p2"/"summary.json").read_text()
+    )["diagnostics"]["GW[density]"]["warm_started_from_V"]==0.
