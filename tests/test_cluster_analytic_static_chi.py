@@ -123,3 +123,35 @@ def test_hex18_three_methods_cli_noninteracting(tmp_path):
         )
     diag=json.loads((out/"diagnostics.json").read_text())
     assert diag["stage"]["zero_field_complex_bath"]["status"]=="ok"
+
+
+def test_three_method_cli_weakly_interacting_cluster_finite_source_agreement(tmp_path):
+    """V>0 exercises nonzero GW, double-counting, bath Hessian and ED response."""
+    out=tmp_path/"weak"
+    script=Path(__file__).resolve().parents[1]/"research"/"compare_ed_cluster_chi_analytic.py"
+    cmd=[
+        sys.executable,str(script),"--V",".015","--n",str(2/3),
+        "--T",".4","--nw","3","--nomega","1","--nbath","1",
+        "--bath-fit-nfreq","2","--bath-max-nfev","120",
+        "--channels","z_same","--ed-samples","1","--ed-tau-points","3",
+        "--cluster-max-iter","35","--cluster-tol","1e-6",
+        "--baseline-max-iter","35","--baseline-tol","1e-6",
+        "--source-max-iter","40","--source-tol","1e-6",
+        "--source-step",".002",
+        "--analytic-tol","3e-5","--analytic-maxiter","7",
+        "--analytic-restart","8",
+        "--out",str(out),
+    ]
+    r=subprocess.run(cmd,capture_output=True,text=True,timeout=240)
+    assert r.returncode==0,r.stdout+"\\n"+r.stderr
+    with (out/"chi_comparison.csv").open(newline="",encoding="utf-8") as f:
+        rows=list(csv.DictReader(f))
+    a=next(row for row in rows if row["method"]=="cluster_analytic")
+    b=next(row for row in rows if row["method"]=="cluster_finite_source")
+    assert a["status"]=="ok",(r.stdout,r.stderr)
+    assert b["status"]=="ok",(r.stdout,r.stderr)
+    np.testing.assert_allclose(
+        float(a["chi"]),float(b["chi"]),rtol=4e-2,atol=4e-3
+    )
+    diag=json.loads((out/"diagnostics.json").read_text())
+    assert diag["stage"]["zero_field_complex_bath"]["status"]=="ok"
