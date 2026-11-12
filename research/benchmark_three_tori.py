@@ -88,7 +88,7 @@ from rubycgw.cluster_ed_gw_multicell import (
 from rubycgw.cluster_ed_gw import ruby_cluster_interactions
 
 
-def parse_args():
+def parse_args(argv=None):
     p=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--geometry",required=True,choices=["3x1","2x2","hex18","hex","ring3"])
     p.add_argument("--V",type=float,required=True)
@@ -184,7 +184,7 @@ def parse_args():
                    help="deprecated: unconverged results are never used as a reference")
     p.add_argument("--verbose",action="store_true")
     p.add_argument("--out",type=Path,default=Path("results/three_torus_benchmark"))
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def onebody_channel_expectation(state, H0, K, grid):
@@ -422,8 +422,19 @@ def save_plot(out, tau, curves, K, V, filling, beta):
     plt.close(fig)
 
 
-def main():
-    a=parse_args()
+def main(a=None, *, initial_gw=None, initial_vertices=None,
+         return_scan_state=False):
+    """Run one V point, optionally reusing certified states from a V scan.
+
+    initial_gw maps mode -> (prior_V, converged ChannelGWResult).
+    initial_vertices maps mode -> (prior_V, {(channel,component):Gamma}).
+    No numerical state from a nonconverged GW/cGW may be propagated.
+    """
+    a=parse_args() if a is None else a
+    initial_gw={} if initial_gw is None else dict(initial_gw)
+    initial_vertices={} if initial_vertices is None else dict(initial_vertices)
+    next_gw={}
+    next_vertices={}
     if a.T<=0:
         raise ValueError("require T>0")
     if a.nw<3 or a.nomega<1:
@@ -543,6 +554,12 @@ def main():
     times={}; energy={}; ed_scalar=None; ed_full=None; ed_chi={}
     method_mu={}; total_times={}; channel_states={}
     method_status={}
+    info["warm_start"]=dict(
+        enabled=bool(initial_gw or initial_vertices),
+        mode="across_user_V_values" if initial_gw or initial_vertices else "cold",
+        previous_GW_V={key:float(val[0]) for key,val in initial_gw.items()},
+        previous_cGW_V={key:float(val[0]) for key,val in initial_vertices.items()},
+    )
     def mark_method(method, status, reason="", *, dependent=()):
         """Persist explicit method status and a readable CSV row."""
         method_status[method]=dict(status=str(status),reason=str(reason))
@@ -825,6 +842,13 @@ def main():
             label_gw=f"GW[{mode}]"
             label_cgw=f"cGW[{mode}]"
             label_post=f"post-GW[{mode}]"
+            prev=initial_gw.get(mode)
+            previous_V=float(prev[0]) if prev is not None else None
+            previous_state=prev[1] if prev is not None else None
+            if previous_state is not None and not previous_state.converged:
+                # Never continue from a non-fixed-point GW state.
+                previous_state=None
+                previous_V=None
             if a.gw_ramp_steps > 0:
                 ramp=run(label_gw,lambda mode=mode:
                     solve_channel_gw_v_ramp(
@@ -871,7 +895,8 @@ def main():
             else:
                 scheme=run(label_gw,lambda definition=definition:
                     solve_channel_gw_same_torus(
-                        geom.h0,definition,grid,opts=opts_gw
+                        geom.h0,definition,grid,opts=opts_gw,
+                        initial=previous_state,
                     )
                 )
             if scheme is None:
@@ -886,7 +911,13 @@ def main():
                 exact_triangle_A1E=(mode=="pseudospin"),
                 residual_A1E_density_retained=(mode=="pseudospin"),
                 exact_Fierz_identity=True,
-                screening_smin=scheme.min_screening_singular_value
+                screening_smin=scheme.min_screening_singular_value,
+                warm_started=previous_state is not None,
+                warm_started_from_V=previous_V,
+                warm_seed_was_converged=(
+                    bool(previous_state.converged)
+                    if previous_state is not None else None
+                ),
             )
             # A separate cluster-ED+GW fixed point does NOT require that the
             # *initial* density GW map has already converged. For a finite but
@@ -948,6 +979,7 @@ def main():
                     raise RuntimeError(f"{label_gw} did not converge: {why}")
                 continue
             channel_states[mode]=scheme
+            next_gw[mode]=(float(a.V),scheme)
             method_status[label_gw]=dict(status="converged",
                                          residual=float(scheme.final_error))
             green_by_method[label_gw]=project_k_green(scheme.G,geom,K)
@@ -962,10 +994,18 @@ def main():
                 row(label_gw,"energy_estimate_vs_ED_E0_diagnostic",energy[label_gw],
                     ref=energy["ED"],status="mixed-temperature",
                     notes="finite-T estimate compared numerically against zero-T E0; not a controlled E0 error")
+            prev_vertex=initial_vertices.get(mode)
+            vertex_last_V=(
+                float(prev_vertex[0]) if prev_vertex is not None else None
+            )
+            vertex_seed=prev_vertex[1] if prev_vertex is not None else None
+            finished_vertices={}
             scheme_chi=run(label_cgw,lambda scheme=scheme,definition=definition:
                 solve_interaction_channel_response(
                     scheme,definition,geom,grid,Q,channels,vertex_opts,
-                    strict=True
+                    strict=True,
+                    initial_vertices=vertex_seed,
+                    output_vertices=finished_vertices,
                 )
             ) if "cgw" in methods else None
             if "cgw" in methods and scheme_chi is None:
@@ -978,7 +1018,14 @@ def main():
                 chi_by_method[label_cgw]={
                     ch:cov[ch] for ch in channels if valid.get(ch,False)
                 }
-                info["diagnostics"][label_cgw]=dict(vertex_converged=valid)
+                info["diagnostics"][label_cgw]=dict(
+                    vertex_converged=valid,
+                    warm_started=vertex_seed is not None,
+                    warm_started_from_V=vertex_last_V,
+                    certified_vertices=len(finished_vertices),
+                )
+                if all(valid.values()) and finished_vertices:
+                    next_vertices[mode]=(float(a.V),finished_vertices)
                 method_status[label_cgw]=dict(
                     status="converged" if all(valid.values()) else "unconverged",
                     channel_status=valid
@@ -1196,6 +1243,14 @@ def main():
     print(f"[benchmark] saved {out/'comparison.csv'}, comparison_wide.csv, ranking_green.csv, ranking_susceptibility.csv, summary.json, raw_arrays.npz",flush=True)
     if curves: print(f"[benchmark] saved {out/'green_tau.png'} and .pdf",flush=True)
     if info["errors"]: print("[benchmark] partial failures:",info["errors"],flush=True)
+    if return_scan_state:
+        return {
+            "converged_GW":next_gw,
+            "converged_vertices":next_vertices,
+            "summary":info,
+            "output":out,
+        }
+    return None
 
 
 if __name__=="__main__":
