@@ -186,7 +186,9 @@ def test_weak_interaction_three_mode_cluster_fixed_points(tmp_path):
         "--ed-krylov-steps","10","--tau-points","9",
         "--uniform-max-iter","35","--uniform-tol","1e-5",
         "--baseline-max-iter","35","--baseline-tol","1e-5",
-        "--skip-chi","--out",str(output)
+        "--source-max-iter","40","--source-tol","1e-5",
+        "--source-step",".005","--channels","z_same",
+        "--out",str(output)
     ]
     p=subprocess.run(cmd,capture_output=True,text=True,timeout=240)
     assert p.returncode==0,p.stdout+"\n"+p.stderr
@@ -197,6 +199,13 @@ def test_weak_interaction_three_mode_cluster_fixed_points(tmp_path):
         x=next(v for v in rows if v["method"]=="cluster-"+mode)
         assert x["status"]=="converged",(mode,p.stdout)
         assert np.isfinite(float(x["relative_Frobenius_K"]))
+    with (output/"chi_comparison.csv").open(encoding="utf-8",newline="") as f:
+        chi_rows=list(csv.DictReader(f))
+    assert len(chi_rows)==4
+    for mode in ("density","bj","pseudospin"):
+        item=next(x for x in chi_rows if x["method"]=="cluster-"+mode)
+        assert item["status"]=="ok",(mode,p.stdout)
+        assert np.isfinite(float(item["chi"]))
     diag=json.loads((output/"diagnostics.json").read_text())
     assert all(diag["methods"][mode]["gw_mode"]==mode for mode in (
         "density","bj","pseudospin"
