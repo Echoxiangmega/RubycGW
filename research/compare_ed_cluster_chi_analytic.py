@@ -31,6 +31,12 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+# Make the repository importable when called directly without pip install -e.
+if __package__ in (None,""):
+    root=str(Path(__file__).resolve().parent.parent)
+    if root not in sys.path:
+        sys.path.insert(0,root)
+
 import numpy as np
 
 from rubycgw.cluster_ed_gw import (
