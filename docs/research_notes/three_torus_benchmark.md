@@ -526,6 +526,61 @@ the impurity Fock-space cost rapidly; a full cluster susceptibility
 at nonzero Q remains substantially more expensive than its
 unperturbed Green function.
 
+## Second audit: exact-physics cluster speedups and extreme ED filling
+
+The `FinBathImpurityED` constructor is recreated on every bath update,
+but its fixed-particle-number Fock basis, occupation masks, and hopping
+destination/sign topology depend ONLY on orbitals and N, not the fitted
+bath energies, hybridization or V. Those combinatorial arrays are now
+reused from a small read-only LRU cache for the typical 6 correlated +
+up to 6 bath orbitals. Larger 13-16 orbital ED clusters retain the
+uncached implementation to avoid large resident topology arrays.
+The Hamiltonian's coefficients are still rebuilt for each new bath,
+and the physical finite-bath eigensystem is still freshly diagonalized.
+A real-symmetric impurity Hamiltonian now uses the cheaper real LAPACK
+eigensolver. A complex bond/current field or complex bath still uses
+the full complex Hermitian solver. Tests reconstruct the Fock Hamiltonian
+independently with fermion operator signs and compare eigenvalues.
+
+Cluster finite-Q `chi` source solves (cos/sin and +h/-h) are mutually
+independent once the zero-field uniform cluster seed has been copied.
+Use `--cluster-chi-workers 2` (or 3-4 with ample RAM) to run them in
+separate Windows-safe Python worker processes. Default is 1 worker.
+The workers request a single BLAS thread using threadpoolctl when
+available, avoiding CPU oversubscription. Multiple processes can use
+substantial memory because each impurity holds dense many-body
+Hamiltonians/eigenvectors; for the 12-orbital 6+6 impurity, start with
+2 workers and monitor RAM before increasing. Each source restarts from
+the same zero-field state and performs the same complete finite-field
+self-consistency; parallel execution does not share mutable baths.
+
+The benchmark saves more useful timings:
+- `diagnostics.cluster-ED+GW.timing_seconds`: unperturbed lattice,
+  bath_fit, impurity_ed, Dyson, other and total time.
+- `diagnostics.cluster_source_chi._execution`: number of source jobs,
+  worker count, elapsed wall time and aggregate source work.
+- Each physical channel's source `phase_seconds` combines time spent
+  inside the source lattice, bath-fit, ED and Dyson stages.
+  `work_seconds` is the sum of individual source runtimes and must NOT
+  be confused with the concurrently elapsed wall time.
+
+The grand-canonical ED charge-sector audit also includes N=0 and
+N=Nsites, which are exact one-state sectors. Their connected canonical
+response is zero, but their particle-number weights are essential near
+vacuum or full filling. The momentum-resolved ED Green now skips the
+nonexistent removal transition below N=0 and addition transition above
+N=Nsites. This fixes prior selected-sector bracketing failures for
+0 < mean total N < 1 and Nsites-1 < mean N < Nsites. In these extreme
+regimes, use `--ed-green-symmetry momentum`; legacy full-sector
+thermal Lanczos still has stricter interior-sector limits.
+
+None of these changes removes the physical cost of diagonalizing each
+new impurity Hamiltonian or the O(h^2) finite-field differentiation
+error in static chi. A small `--source-step` also amplifies source
+solver residuals by 1/h; always compare source steps and convergence
+tolerances. Wall-time improvements depend on bath size, CPU BLAS
+configuration, worker count and whether EVD or bath fitting dominates.
+
 ## Outputs
 
 - comparison.csv: method, observable, value, ED reference, relative
