@@ -230,10 +230,67 @@ def embedded_gm_energy(state, geom: TorusGeometry, grid: MatsubaraGrid):
     return float(kinetic+static+corr)
 
 
+def cluster_seed_from_density_gw(
+    background, geom: TorusGeometry, grid: MatsubaraGrid,
+    target_particles: float, *, mu_tol: float = 1e-10,
+):
+    """Turn a density-channel GW iterate into a valid embedding *initial guess*.
+
+    A preliminary lattice GW fixed point is not required for convergence of
+    the subsequent coupled cluster-ED+GW equations: every embedding iteration
+    rebuilds lattice P, W and Sigma_GW from the current embedded G.
+
+    The channel GW result reports freshly evaluated output self-energies, which
+    can differ from the Dyson self-energies behind its G when the preliminary
+    fixed point was NOT reached. Re-solve the *one-body Dyson equation only*
+    in that case to make G, Sigma_H, Sigma_GW and filling consistent before
+    passing them into the embedding. This is not another GW iteration.
+    """
+    h=np.asarray(background.Sigma_tadpole,dtype=complex)
+    f=np.asarray(background.Sigma_exchange,dtype=complex)
+    sc=np.asarray(background.Sigma_c,dtype=complex)
+    norb=int(geom.nsites)
+    expected=(grid.nf,1,1,norb,norb)
+    if h.shape!=(norb,norb) or f.shape!=(norb,norb) or sc.shape!=expected:
+        raise ValueError("density-GW seed self-energy shape does not match torus")
+    if any(not np.all(np.isfinite(v)) for v in (h,f,sc,background.G)):
+        raise ValueError("density-GW seed contains nonfinite self-energy or G")
+    sigma_gw=f[None,None,None,:,:]+sc
+    if background.converged:
+        G=np.asarray(background.G,dtype=complex).copy()
+        mu=float(background.mu)
+        rebuilt=False
+    else:
+        # The state returned after max_iter may contain Sigma[updated] but
+        # G[mixed]. A single Dyson solve reconciles this harmlessly.
+        mu,G,_,_=_solve_mu_matrix_fast(
+            geom.h0,h,sigma_gw,grid,float(target_particles),
+            float(background.mu),float(mu_tol),100
+        )
+        rebuilt=True
+    if not np.isfinite(mu) or not np.all(np.isfinite(G)):
+        raise ValueError("density-GW seed Dyson solve produced nonfinite G/mu")
+    rho=one_body_density_matrix_tail(G,grid,geom.h0,mu,h)
+    density=np.asarray(np.diag(rho[0,0]).real,dtype=float)
+    if not np.all(np.isfinite(density)):
+        raise ValueError("density-GW seed density is nonfinite")
+    return SimpleNamespace(
+        G=np.asarray(G),mu=float(mu),
+        Sigma_H=h.copy(),Sigma_GW=sigma_gw.copy(),density=density,
+        converged=bool(background.converged),
+        final_error=float(background.final_error),
+        seed_dyson_rebuilt=rebuilt,
+        seed_origin="density-GW-preiterate" if not background.converged
+                    else "density-GW-converged",
+        seed_density_error=float(np.sum(density)-float(target_particles)),
+    )
+
+
 def uniform_primitive_cluster_ed_gw(
     geom: TorusGeometry, grid: MatsubaraGrid, background, *,
     nbath=6, max_iter=45, tol=3e-5, mixing=.35,
     bath_nfit=12, bath_max_nfev=200, verbose=False,
+    target_particles: float | None = None,
 ):
     """One equivalent six-site impurity replicated over an arbitrary torus.
 
@@ -245,6 +302,10 @@ def uniform_primitive_cluster_ed_gw(
     sigma_h=np.array(background.Sigma_H,copy=True)
     sigma_emb=np.array(background.Sigma_GW,copy=True)
     ncell=geom.ncell
+    filling_target=(float(np.sum(background.density)) if target_particles is None
+                    else float(target_particles))
+    if not np.isfinite(filling_target):
+        raise ValueError("cluster-ED+GW target filling must be finite")
     chunks=[slice(6*c,6*(c+1)) for c in range(ncell)]
     one=np.eye(6,dtype=complex)
     hloc=np.mean([geom.h0[0,0,sl,sl] for sl in chunks],axis=0)
@@ -312,7 +373,7 @@ def uniform_primitive_cluster_ed_gw(
         sigma_imp=sigma_imp+a*(sigma_new-sigma_imp)
         mu,G,_,_=_solve_mu_matrix_fast(
             geom.h0,sigma_h,sigma_emb,grid,
-            float(np.sum(background.density)),mu,1e-10,100
+            filling_target,mu,1e-10,100
         )
         if err<tol:
             converged=True
