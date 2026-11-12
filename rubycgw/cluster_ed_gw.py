@@ -446,8 +446,15 @@ def solve_cluster_ed_gw(
     gw_opts: GWOptions = GWOptions(),
     embed_opts: ClusterEDGWOptions = ClusterEDGWOptions(),
     background: GWResult | None = None,
+    require_converged_background: bool = False,
 ) -> ClusterEDGWResult:
-    """Solve the coupled lattice-GW / 6-site finite-bath ED fixed point."""
+    """Solve the coupled lattice-GW / 6-site finite-bath ED fixed point.
+
+    The optional preliminary lattice GW fixed point is used only to seed the
+    embedding loop. Unless require_converged_background=True, a finite
+    nonconverged GW iterate is accepted as an initial guess and a consistent
+    Dyson G is rebuilt. The *embedding* convergence test remains unchanged.
+    """
     backend = _check_backend(gw_opts.momentum_backend)
     h0 = np.asarray(h0, dtype=complex)
     Vq = np.asarray(Vq, dtype=complex)
@@ -464,7 +471,7 @@ def solve_cluster_ed_gw(
         if embed_opts.verbose:
             print("[cluster-ED+GW] solving initial lattice GW background ...", flush=True)
         background = solve_matrix_gw_fast(h0, Vq, grid, opts=gw_opts)
-    if not background.converged:
+    if not background.converged and require_converged_background:
         raise RuntimeError(f"initial lattice GW background is not converged: {background.final_error:.3e}")
 
     # The impurity one-body block must be the local block of the *actual finite
@@ -492,6 +499,29 @@ def solve_cluster_ed_gw(
     sigma_emb = np.asarray(background.Sigma_GW, dtype=complex).copy()
     mu = float(background.mu)
     G = np.asarray(background.G, dtype=complex).copy()
+    if not background.converged:
+        if embed_opts.verbose:
+            print(
+                f"[cluster-ED+GW] using unconverged preliminary GW seed: "
+                f"residual={background.final_error:.3e}; "
+                "embedding convergence will be tested independently",
+                flush=True,
+            )
+        if not (np.all(np.isfinite(sigma_h)) and
+                np.all(np.isfinite(sigma_emb)) and
+                np.all(np.isfinite(G)) and np.isfinite(mu)):
+            raise ValueError("unconverged preliminary GW seed is nonfinite")
+        if gw_opts.target_filling is None:
+            from .supercell_gw import dyson_from_sigma_matrix
+            G = dyson_from_sigma_matrix(h0,grid,mu,sigma_h,sigma_emb)
+        else:
+            mu,G,_,_ = _solve_mu_matrix_fast(
+                h0,sigma_h,sigma_emb,grid,
+                float(gw_opts.target_filling),mu,
+                float(gw_opts.mu_tol),int(gw_opts.mu_max_iter)
+            )
+        if not np.all(np.isfinite(G)):
+            raise ValueError("Dyson-rebuilt cluster seed has nonfinite G")
     bath = None
 
     rho_k = one_body_density_matrix_tail(G, grid, h0, mu, sigma_h)
