@@ -28,6 +28,8 @@ from math import comb
 from pathlib import Path
 from time import perf_counter
 import traceback
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import nullcontext
 import sys
 
 # Support direct execution: "python research/benchmark_three_tori.py".
@@ -147,6 +149,8 @@ def parse_args():
     p.add_argument("--cluster-bath-fit-nfreq",type=int,default=12)
     p.add_argument("--cluster-bath-max-nfev",type=int,default=200)
     p.add_argument("--source-step",type=float,default=1e-3)
+    p.add_argument("--cluster-chi-workers",type=int,default=1,
+                   help="number of independent +h/-h source processes (1=serial; 2-4 on CPU with enough RAM)")
     p.add_argument("--cluster-chi-coldstart",action="store_true",
                    help="diagnostic only: recompute a separate initial GW at every source; default reuses uniform converged cluster")
     p.add_argument("--skip-cluster-chi",action="store_true",
@@ -184,15 +188,60 @@ def onebody_channel_expectation(state, H0, K, grid):
     return float(np.einsum("ab,ba->",K,rho[0,0]).real)
 
 
+def _cluster_source_solve(job):
+    """One independent signed source, safe to execute in Windows spawned process.
+
+    Worker arguments contain immutable physical matrices and a zero-field
+    restart. The solver copies its restart on entry. No source shares
+    the mutable bath state with any other signed field.
+    """
+    Hsrc,Vq,interactions,grid,K,sign,h,target,opts,restart=job
+    t0=perf_counter()
+    try:
+        # Each Python worker may otherwise start a large multithreaded BLAS
+        # eigensolver, leading to severe oversubscription with 2-4 workers.
+        try:
+            from threadpoolctl import threadpool_limits
+            context=threadpool_limits(limits=1)
+        except ImportError:
+            from contextlib import nullcontext
+            context=nullcontext()
+        with context:
+            solved=solve_multicell_cluster_ed_gw(
+                Hsrc,Vq,interactions,grid,target_particles=target,
+                opts=opts,restart=restart
+            )
+            if not solved.converged:
+                raise RuntimeError(
+                    f"nonconverged finite-source embedding: "
+                    f"residual={solved.final_error:.3e}, "
+                    f"iterations={solved.iterations}"
+                )
+            val=onebody_channel_expectation(solved,Hsrc,K,grid)
+        if not np.isfinite(val):
+            raise ValueError("nonfinite onebody susceptibility expectation")
+        return dict(
+            ok=True,value=float(val),residual=float(solved.final_error),
+            bath_error=float(np.max(solved.bath_fit_error)),
+            iterations=int(solved.iterations),
+            elapsed=float(perf_counter()-t0),
+            substage_seconds=getattr(solved,"timing_seconds",None),
+        )
+    except Exception as exc:
+        return dict(
+            ok=False,error=f"{type(exc).__name__}: {exc}",
+            value=None,elapsed=float(perf_counter()-t0)
+        )
+
+
 def solve_cluster_source_response(geom, params, grid, channels, Q, args, *,
                                   uniform=None):
-    """Full finite-source derivative of the *multi-impurity* ED+GW fixed point.
+    """Full finite-source multi-impurity derivative, optional source parallelism.
 
-    Default warm start: replicate a converged unperturbed six-orbital
-    impurity Sigma and fitted bath over the physical cells. This avoids
-    a new 200-iteration folded-GW initializer for each of the ±h cos/sin
-    sources and greatly reduces the initial bath-fit distance.
-    Cold starts remain available for numerical cross-checks.
+    The same physical source field, bath fitting, and self-consistency map
+    are used in serial and parallel paths. The only new approximation
+    control is the pre-existing finite source step h. Source failures are
+    kept separate; a bad sign/component never contributes to a fake chi.
     """
     out={}; times={}; diagnostics={}
     interactions=ruby_cluster_interactions(params)
@@ -206,58 +255,100 @@ def solve_cluster_source_response(geom, params, grid, channels, Q, args, *,
     h=abs(float(args.source_step))
     if h==0:
         raise ValueError("--source-step must be nonzero")
+    workers=int(args.cluster_chi_workers)
+    if workers < 1:
+        raise ValueError("--cluster-chi-workers must be >=1")
     use_warm=not bool(args.cluster_chi_coldstart)
-    restart=(
-        restart_from_uniform_cluster(uniform,geom.ncell)
-        if use_warm else None
-    )
+    restart=restart_from_uniform_cluster(uniform,geom.ncell) if use_warm else None
+    spec=[]
+    jobs=[]
+    target=float(args.filling*geom.ncell)
     for ch in channels:
-        t0=perf_counter()
-        response=0.
+        components=hermitian_source_components(geom,ch,Q)
+        for component_idx,K in enumerate(components):
+            for sign in (1.,-1.):
+                Hsrc=np.asarray(geom.h0,complex).copy()
+                Hsrc[0,0]-=sign*h*K
+                jobs.append((
+                    Hsrc,np.asarray(geom.vq,complex),interactions,grid,
+                    K,sign,h,target,opts,restart
+                ))
+                spec.append((ch,component_idx,sign))
+    t_begin=perf_counter()
+    if workers==1:
+        results=list(map(_cluster_source_solve,jobs))
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            results=list(pool.map(_cluster_source_solve,jobs,chunksize=1))
+    wall=float(perf_counter()-t_begin)
+
+    grouped={ch:{} for ch in channels}
+    for key,value in zip(spec,results):
+        ch,component_idx,sign=key
+        grouped[ch][(component_idx,sign)]=value
+
+    for ch in channels:
+        sources=grouped[ch]
+        parts=[]
+        expected=hermitian_source_components(geom,ch,Q)
+        problems=[]
         maxres=0.
         maxbath=0.
-        nsolves=0
-        try:
-            for K in hermitian_source_components(geom,ch,Q):
-                vals=[]
-                for sign in (1.,-1.):
-                    Hsrc=np.asarray(geom.h0,complex).copy()
-                    Hsrc[0,0]-=sign*h*K
-                    solved=solve_multicell_cluster_ed_gw(
-                        Hsrc,geom.vq,interactions,grid,
-                        target_particles=float(args.filling*geom.ncell),
-                        opts=opts,restart=restart,
-                    )
-                    nsolves+=1
-                    maxres=max(maxres,float(solved.final_error))
-                    maxbath=max(maxbath,float(np.max(solved.bath_fit_error)))
-                    if not solved.converged:
-                        raise RuntimeError(
-                            f"source clusterED+GW {ch}, sign={sign:+g} "
-                            f"unconverged, residual={solved.final_error:.3e}"
-                        )
-                    vals.append(onebody_channel_expectation(solved,Hsrc,K,grid))
-                response+=(vals[0]-vals[1])/(2*h)
-            if not np.isfinite(response):
-                raise ValueError("nonfinite cluster finite-source response")
-            out[ch]=float(response)
+        work=0.
+        phases={}
+        for comp_idx in range(len(expected)):
+            plus=sources[(comp_idx,1.)]
+            minus=sources[(comp_idx,-1.)]
+            for item in (plus,minus):
+                work+=float(item["elapsed"])
+                if item["ok"]:
+                    maxres=max(maxres,float(item["residual"]))
+                    maxbath=max(maxbath,float(item["bath_error"]))
+                    for k,v in (item.get("substage_seconds") or {}).items():
+                        phases[k]=phases.get(k,0.)+float(v)
+                else:
+                    problems.append(item["error"])
+            if plus["ok"] and minus["ok"]:
+                parts.append((plus["value"]-minus["value"])/(2*h))
+        if problems or len(parts)!=len(expected):
+            out[ch]=None
+            diagnostics[ch]=dict(
+                status="failed",error="; ".join(problems),
+                residual=maxres,bath_error=maxbath,
+                source_step=h,n_source_solves=2*len(expected),
+                work_seconds=work,wall_total_seconds=wall,
+                workers=workers,phase_seconds=phases,
+                initial_state="uniform-cluster-restart" if use_warm else "cold-GW"
+            )
+            if args.strict_method_failures:
+                raise RuntimeError(f"cluster-chi {ch}: {problems}")
+        else:
+            chi=float(sum(parts))
+            if not np.isfinite(chi):
+                raise ValueError(f"nonfinite susceptibility: {ch}")
+            out[ch]=chi
             diagnostics[ch]=dict(
                 status="converged",residual=maxres,bath_error=maxbath,
-                source_step=h,n_source_solves=nsolves,
+                source_step=h,n_source_solves=2*len(expected),
+                work_seconds=work,wall_total_seconds=wall,
+                workers=workers,phase_seconds=phases,
+                residual_over_h=maxres/h,
                 initial_state="uniform-cluster-restart" if use_warm else "cold-GW"
             )
-        except Exception as exc:
-            diagnostics[ch]=dict(
-                status="failed",error=f"{type(exc).__name__}: {exc}",
-                residual=maxres,source_step=h,n_source_solves=nsolves,
-                initial_state="uniform-cluster-restart" if use_warm else "cold-GW"
-            )
-            out[ch]=None
-            if args.strict_method_failures:
-                raise
-        times[ch]=float(perf_counter()-t0)
-        print(f"[cluster-chi] {ch}: {diagnostics[ch]['status']} "
-              f"({times[ch]:.2f}s, warm={use_warm})",flush=True)
+        # Aggregate independent source compute time, not the wall-clock of
+        # concurrent tasks. The overall cluster_chi stage timer is the real
+        # elapsed wall time and can be compared to other stages.
+        times[ch]=work
+        print(
+            f"[cluster-chi] {ch}: {diagnostics[ch]['status']}; "
+            f"source-work={work:.2f}s, workers={workers}",
+            flush=True
+        )
+    diagnostics["_execution"]=dict(
+        workers=workers,source_count=len(jobs),wall_seconds=wall,
+        total_source_work_seconds=sum(times.values()),
+        warmstart_used=use_warm
+    )
     return out,times,diagnostics
 
 
