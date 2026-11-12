@@ -226,6 +226,57 @@ Krylov fallbacks, transfer_wall_seconds and phase_seconds split into
 covariant, screening, self-energy and Dyson stages.
 
 
+## Cluster-ED+GW can start from a nonconverged preliminary density-GW iterate
+
+The preliminary **density-channel GW** is used only as an *initial guess*
+for the six-site primitive-cell ED+GW embedding.  Unlike independent
+GW, cGW and post-GW comparisons, that preliminary GW need not have
+reached its own fixed point: every cluster embedding iteration
+recomputes lattice polarization P, screened W, lattice GW self-energy,
+cluster double counting, impurity ED self-energy, and the embedded
+Dyson Green function. The embedding has its *own* convergence residual.
+
+Default behavior now:
+
+* If preliminary GW[density] reaches its iteration cap but returns
+  finite Sigma_H, Sigma_GW, mu, G, run cluster-ED+GW anyway.
+* The GW[density] result retains status `unconverged`; it is not
+  reported as a valid standalone Green function or source for cGW
+  and post-GW.
+* Because the preliminary channel-GW solver returns its last
+  *evaluated* Sigma along with a Green function from the preceding
+  mixed Dyson step, a nonconverged seed is reconciled by **one
+  fixed-filling Dyson solve** (not another self-consistent GW loop).
+* The embedding receives the explicit target filling, rather than
+  silently using the preliminary GW iterate's approximate density.
+* Only the embedding's final convergence status determines whether
+  its Green function and energy proxy are reported. The convergence
+  flag of the preliminary GW is independent.
+* `summary.json` records `diagnostics.cluster_seed`, including
+  source residual, source convergence, Dyson rebuild and density error.
+  The CSV includes `initial_density_GW_residual` marked
+  `initial-only-unconverged` when relevant.
+
+To require an already converged density-GW initializer, pass
+`--cluster-require-converged-gw`. Without that flag the preliminary GW
+is only a seed and does *not* need to converge.
+
+If the preliminary GW solver raises an exception or returns nonfinite
+Sigma/G, there is no valid seed; cluster ED+GW is marked skipped.
+If a GW *continuation* stops at a V below the requested target, its
+lower-V state is not silently used as a target-V embedding seed.
+
+To save time on runs where the cluster embedding is the primary goal,
+one may set `--methods ed cluster --gw-max-iter 10` to limit
+preliminary density-GW iterations without altering the subsequent
+cluster embedding iteration limit `--cluster-max-iter`.
+The shorter preliminary solve can produce a less favorable seed and
+is not guaranteed to speed overall convergence.
+
+The separate primitive-basis `solve_cluster_ed_gw` function now also
+permits finite unconverged preliminary GW states by default, with a
+`require_converged_background=True` opt-in to enforce its former gate.
+
 ## Large-V GW convergence and ED checkpointing
 
 The original benchmark directly started each Fierz GW solver from zero
