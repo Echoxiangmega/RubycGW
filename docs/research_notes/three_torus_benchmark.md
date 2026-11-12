@@ -574,6 +574,17 @@ N=Nsites. This fixes prior selected-sector bracketing failures for
 regimes, use `--ed-green-symmetry momentum`; legacy full-sector
 thermal Lanczos still has stricter interior-sector limits.
 
+The finite-field sources also have optional **independent** convergence
+controls: `--cluster-chi-tol 1e-7` and
+`--cluster-chi-max-iter 100`. By default both inherit the ordinary
+uniform cluster `--cluster-tol` and `--cluster-max-iter`. A source
+solver residual divided by the small field h can be amplified in a
+susceptibility derivative, so the code reports `residual_over_h` and
+warns if it exceeds 0.01. This is a *diagnostic scale*, not a rigorous
+bound on the error in chi. For publication-quality static χ, check
+h, tolerances and bath convergence independently, rather than trusting
+a small unperturbed-cluster residual.
+
 None of these changes removes the physical cost of diagonalizing each
 new impurity Hamiltonian or the O(h^2) finite-field differentiation
 error in static chi. A small `--source-step` also amplifies source
