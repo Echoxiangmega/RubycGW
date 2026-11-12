@@ -322,6 +322,7 @@ def uniform_primitive_cluster_ed_gw(
     nbath=6, max_iter=45, tol=3e-5, mixing=.35,
     bath_nfit=12, bath_max_nfev=200, verbose=False,
     target_particles: float | None = None,
+    gw_mode: str = "density",
 ):
     """One equivalent six-site impurity replicated over an arbitrary torus.
 
@@ -345,12 +346,16 @@ def uniform_primitive_cluster_ed_gw(
     ints=ruby_cluster_interactions(
         RubyParameters(ti=1,t1=-.5,t2=.5,V=float(np.real(geom.vq[0,0,0,1])))
     )
+    from .fierz_cluster_embedding import (
+        build_embedding_channels,lattice_gw_map,cluster_gw_map
+    )
+    channel=build_embedding_channels(ints,ncell,gw_mode,geom.vq)
     Vc=cluster_interaction_matrix(ints,6)
     bath=None
     rho=one_body_density_matrix_tail(G,grid,geom.h0,mu,sigma_h)
     Gc=np.mean([G[:,0,0,sl,sl] for sl in chunks],axis=0)
     rhoc=np.mean([rho[0,0,sl,sl] for sl in chunks],axis=0)
-    sigma_imp=cluster_gw_self_energy(Gc,rhoc,Vc,grid)[0]
+    sigma_imp=cluster_gw_map(Gc,rhoc,ints,grid,channel,Vc=Vc)[0]
     err=float("inf")
     mismatch=float("inf")
     bath_err=float("inf")
@@ -359,16 +364,13 @@ def uniform_primitive_cluster_ed_gw(
     for it in range(1,int(max_iter)+1):
         t_lattice=perf_counter()
         rho=one_body_density_matrix_tail(G,grid,geom.h0,mu,sigma_h)
-        n=np.diagonal(rho[0,0]).real
-        sh_new=hartree_self_energy_matrix(n,geom.vq[0,0])
-        P=compute_polarization_matrix(G,grid)
-        W=compute_screened_interaction_matrix(P,geom.vq)
-        sigma_gw=compute_sigma_gw_split_matrix(
-            G,W,geom.vq,grid,geom.h0,mu,sigma_h,backend="fft"
+        sh_new,sigma_gw,P,W=lattice_gw_map(
+            G,rho,geom.h0,geom.vq,grid,channel,mu,
+            static_reference=sigma_h
         )
         Gc=np.mean([G[:,0,0,sl,sl] for sl in chunks],axis=0)
         rhoc=np.mean([rho[0,0,sl,sl] for sl in chunks],axis=0)
-        scgw,_,_=cluster_gw_self_energy(Gc,rhoc,Vc,grid)
+        scgw,_,_=cluster_gw_map(Gc,rhoc,ints,grid,channel,Vc=Vc)
         g0inv=np.linalg.inv(Gc)+sigma_imp
         raw=(1j*grid.omega[:,None,None]+mu)*one[None]-hloc[None]-g0inv
         static,delta=split_static_hybridization(raw,grid.omega)
@@ -431,7 +433,8 @@ def uniform_primitive_cluster_ed_gw(
             "impurity_ed":float(time_imp),"dyson":float(time_dyson),
             "other":float(time_other),"total":float(total_wall)
         },
-        iterations=it,final_error=err,converged=converged
+        iterations=it,final_error=err,converged=converged,
+        gw_mode=channel.mode
     )
 
 
