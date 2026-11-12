@@ -230,6 +230,36 @@ def embedded_gm_energy(state, geom: TorusGeometry, grid: MatsubaraGrid):
     return float(kinetic+static+corr)
 
 
+def noninteracting_cluster_seed(
+    geom: TorusGeometry, grid: MatsubaraGrid, target_particles: float,
+    *, mu_tol: float=1e-10,
+):
+    """Cheap optional cluster-ED+GW initialization without a preliminary GW.
+
+    The coupled embedding computes its own GW screening on every outer
+    iteration. Starting from the Fermi gas at the requested mean filling
+    is an alternative *initial condition*, NOT an approximation to the
+    fully converged embedded fixed point. Strong V may require more
+    embedding iterations or a symmetry-broken seed.
+    """
+    norb=geom.nsites
+    h=np.zeros((norb,norb),dtype=complex)
+    sigma=np.zeros((grid.nf,1,1,norb,norb),dtype=complex)
+    mu,G,_,_=_solve_mu_matrix_fast(
+        geom.h0,h,sigma,grid,float(target_particles),0.0,
+        float(mu_tol),100
+    )
+    rho=one_body_density_matrix_tail(G,grid,geom.h0,mu,h)
+    den=np.asarray(np.diag(rho[0,0]).real,dtype=float)
+    return SimpleNamespace(
+        G=np.asarray(G),Sigma_H=h,Sigma_GW=sigma,
+        mu=float(mu),density=den,converged=False,
+        final_error=float("nan"),seed_origin="noninteracting",
+        seed_dyson_rebuilt=True,
+        seed_density_error=float(np.sum(den)-float(target_particles)),
+    )
+
+
 def cluster_seed_from_density_gw(
     background, geom: TorusGeometry, grid: MatsubaraGrid,
     target_particles: float, *, mu_tol: float = 1e-10,
