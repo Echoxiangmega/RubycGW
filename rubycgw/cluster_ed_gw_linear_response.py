@@ -248,9 +248,14 @@ class StaticClusterEDGWLinearizer:
         dout_h=hartree_self_energy_matrix(
             np.diag(drho).real,self.vq[0,0]
         )
+        # V=0 has exactly zero GW, local DC and impurity self-energy
+        # derivatives. Bypass the redundant finite-bath parameter tangent
+        # (which has gauge zero-modes at zero interaction).
+        if np.max(abs(self.vq),initial=0.)<1.e-14:
+            return self._pack(
+                np.zeros_like(dsh),np.zeros_like(dse),np.zeros_like(di)
+            )
         dgw,_,_=_gw_tangent(
-            self.g,dg,drho,self.w,self.vq,self.grid
-        ) if False else _gw_tangent(
             self.g,dg,drho,drho,self.w,self.vq,self.grid
         )
         dout_emb=np.asarray(dgw,complex).copy()
