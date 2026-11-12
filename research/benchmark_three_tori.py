@@ -62,6 +62,7 @@ from rubycgw.three_torus_benchmark import (
     hermitian_source_components, channel_static_response,
     max_required_ed_dimension, uniform_primitive_cluster_ed_gw,
     SkewEDSectorAdapter, gw_energy_from_state, embedded_gm_energy,
+    cluster_seed_from_density_gw,
 )
 from rubycgw.benchmark_report import make_comparison_scorecards
 from rubycgw.fierz_channel_gw import solve_channel_gw_same_torus
@@ -135,6 +136,8 @@ def parse_args():
     p.add_argument("--cluster-max-iter",type=int,default=50)
     p.add_argument("--cluster-tol",type=float,default=3e-5)
     p.add_argument("--cluster-mixing",type=float,default=.35)
+    p.add_argument("--cluster-require-converged-gw",action="store_true",
+                   help="optional strict gate: do not initialize cluster ED+GW from a nonconverged density-GW iterate")
     p.add_argument("--cluster-bath-fit-nfreq",type=int,default=12)
     p.add_argument("--cluster-bath-max-nfev",type=int,default=200)
     p.add_argument("--source-step",type=float,default=1e-3)
@@ -659,6 +662,40 @@ def main():
                 exact_Fierz_identity=True,
                 screening_smin=scheme.min_screening_singular_value
             )
+            # A separate cluster-ED+GW fixed point does NOT require that the
+            # *initial* density GW map has already converged. For a finite but
+            # unconverged last GW iterate, rebuild one consistent Dyson G from
+            # its output Sigma_H/Sigma_GW, then let the embedding map update
+            # lattice W and Sigma on every outer iteration. The preliminary GW
+            # result remains "unconverged" for all independent comparisons.
+            if mode=="density" and "cluster" in methods:
+                if scheme.converged or not a.cluster_require_converged_gw:
+                    gw=run("cluster_seed",lambda:
+                        cluster_seed_from_density_gw(
+                            scheme,geom,grid,total,mu_tol=opts_gw.mu_tol
+                        )
+                    )
+                    if gw is not None:
+                        info["diagnostics"]["cluster_seed"]=dict(
+                            source_method=label_gw,
+                            source_converged=bool(scheme.converged),
+                            source_residual=float(scheme.final_error),
+                            source_iterations=int(scheme.iterations),
+                            seed_dyson_rebuilt=bool(gw.seed_dyson_rebuilt),
+                            seed_density_error=float(gw.seed_density_error),
+                            target_V=float(a.V),seed_mu=float(gw.mu),
+                        )
+                        seed_status=("initial-only" if scheme.converged
+                                     else "initial-only-unconverged")
+                        row("cluster-ED+GW","initial_density_GW_residual",
+                            float(scheme.final_error),status=seed_status,
+                            notes="GW used ONLY to initialize independent embedding fixed point")
+                else:
+                    info["diagnostics"]["cluster_seed"]=dict(
+                        source_method=label_gw,source_converged=False,
+                        source_residual=float(scheme.final_error),
+                        rejected_by_strict_option=True
+                    )
             if not scheme.converged:
                 failure=dict(method=label_gw,target_V=float(a.V),
                              residual=float(scheme.final_error),
@@ -779,28 +816,20 @@ def main():
                 total_times[label_cgw]=base+cstep
             if "postgw" in methods:
                 total_times[label_post]=base+cstep+pstep
-            if mode=="density":
-                # Adapt density-channel skeleton to the existing separated
-                # Hartree + Fock/correlation V-only cluster embedding API.
-                gw=SimpleNamespace(
-                    G=scheme.G,
-                    W=scheme.W[:,None,None,:,:],
-                    P=scheme.P[:,None,None,:,:],
-                    Sigma_H=scheme.Sigma_tadpole,
-                    Sigma_GW=(scheme.Sigma_exchange[None,None,None]+scheme.Sigma_c),
-                    mu=float(scheme.mu),density=scheme.density,
-                    converged=bool(scheme.converged),final_error=float(scheme.final_error)
-                )
+            # The density GW -> cluster embedding seed is prepared above,
+            # even when the density GW itself reached max_iter without
+            # converging. Never promote that GW result into GW/cGW/post tables.
     if gw is None and "cluster" in methods:
         mark_method("cluster-ED+GW","skipped",
-                    "no converged GW[density] lattice background")
+                    "no finite density-GW iterate at target V for embedding seed "
+                    "(or --cluster-require-converged-gw was set)")
     if gw is not None and "cluster" in methods:
         cl=run("cluster-ED+GW",lambda:uniform_primitive_cluster_ed_gw(
             geom,grid,gw,nbath=a.nbath,max_iter=a.cluster_max_iter,
             tol=a.cluster_tol,mixing=a.cluster_mixing,
             bath_nfit=a.cluster_bath_fit_nfreq,
             bath_max_nfev=a.cluster_bath_max_nfev,
-            verbose=a.verbose
+            verbose=a.verbose,target_particles=total
         ))
         if cl is not None:
             if not cl.converged:
@@ -816,7 +845,11 @@ def main():
                 if a.strict_method_failures:
                     raise RuntimeError(why)
             else:
-                method_status["cluster-ED+GW"]=dict(status="converged")
+                method_status["cluster-ED+GW"]=dict(
+                    status="converged",
+                    seed_GW_converged=bool(gw.converged),
+                    seed_GW_residual=float(gw.final_error)
+                )
         if cl is not None and cl.converged:
             green_by_method["cluster-ED+GW"]=project_k_green(cl.G,geom,K)
             method_mu["cluster-ED+GW"]=float(cl.mu)
@@ -826,7 +859,10 @@ def main():
                 bath_fit_error=cl.bath_fit_error,
                 impurity_mismatch=cl.impurity_mismatch,
                 n_impurities=1,correlated_sites_per_impurity=6,
-                nbath=a.nbath)
+                nbath=a.nbath,
+                seed_GW_converged=bool(gw.converged),
+                seed_GW_residual=float(gw.final_error),
+                seed_dyson_rebuilt=bool(gw.seed_dyson_rebuilt))
             ecl=embedded_gm_energy(cl,geom,grid)
             energy["cluster"]=ecl
             row("cluster-ED+GW","finite_T_GM_proxy",ecl,
@@ -886,8 +922,8 @@ def main():
         total_times["ED"]=times.get("ED",0.0)+times.get("ED_Green",0.0)
     if "cluster" in methods and "cluster-ED+GW" in times:
         total_times["cluster-ED+GW"]=(
-            times.get("GW[density]",0.0)+times.get("cluster-ED+GW",0.0)
-            +times.get("cluster_chi",0.0)
+            times.get("GW[density]",0.0)+times.get("cluster_seed",0.0)
+            +times.get("cluster-ED+GW",0.0)+times.get("cluster_chi",0.0)
         )
     for name,total_s in total_times.items():
         row(name,"total_method_runtime_seconds",float(total_s),
