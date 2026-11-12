@@ -153,8 +153,11 @@ def momentum_thermal_lanczos_green(
     kv=geom.validate_momentum(K)
     Nsite=geom.nsites
     Ncenter=int(round(float(target_particles)))
-    Nlo=max(1,Ncenter-int(opts.sector_padding))
-    Nhi=min(Nsite-1,Ncenter+int(opts.sector_padding))
+    # Vacuum and full states are legitimate thermal sectors. Their
+    # annihilation/addition transitions respectively vanish identically;
+    # never instantiate an invalid N=-1 or N=Nsite+1 sector.
+    Nlo=max(0,Ncenter-int(opts.sector_padding))
+    Nhi=min(Nsite,Ncenter+int(opts.sector_padding))
     Ns=list(range(Nlo,Nhi+1))
     spaces:dict[int,MomentumTorusED]={}
     def space(N:int):
@@ -214,35 +217,38 @@ def momentum_thermal_lanczos_green(
         E,ik,psi=levels[N][j]
         src=space(N)
         kold=np.asarray(src.k_values[ik],dtype=float)
-        ka=src.k_index(kold+kv)
-        kr=src.k_index(kold-kv)
-        plus=space(N+1)
-        minus=space(N-1)
-        Ha=plus.hamiltonian(V,ka)
-        Hr=minus.hamiltonian(V,kr)
-        va=_manybody_transition_vectors(
-            src,plus,ik,ka,psi,kv,creation=True
-        )
-        vr=_manybody_transition_vectors(
-            src,minus,ik,kr,psi,kv,creation=False
-        )
         if opts.verbose:
             print(f"[momentum G] source (N={N}, K={src.k_values[ik]},E={E:+.6g}) p={p:.3e}",flush=True)
-        for b in range(6):
-            a,st=_cross_resolvent(
-                Ha,va[:,b],va,zadd+E+mu,
-                max_steps=opts.krylov_dim,tol=opts.krylov_tol
+
+        if N<Nsite:
+            ka=src.k_index(kold+kv)
+            plus=space(N+1)
+            Ha=plus.hamiltonian(V,ka)
+            va=_manybody_transition_vectors(
+                src,plus,ik,ka,psi,kv,creation=True
             )
-            G[:,:,b]+=p*a
-            steps.append(st)
-            rem,st=_cross_resolvent(
-                Hr,vr[:,b],vr,E-mu-zadd,
-                max_steps=opts.krylov_dim,tol=opts.krylov_tol
+            for b in range(6):
+                a,st=_cross_resolvent(
+                    Ha,va[:,b],va,zadd+E+mu,
+                    max_steps=opts.krylov_dim,tol=opts.krylov_tol
+                )
+                G[:,:,b]+=p*a
+                steps.append(st)
+
+        if N>0:
+            kr=src.k_index(kold-kv)
+            minus=space(N-1)
+            Hr=minus.hamiltonian(V,kr)
+            vr=_manybody_transition_vectors(
+                src,minus,ik,kr,psi,kv,creation=False
             )
-            # Resolvent left column b gives G_{a,b} when right a:
-            # right b here and left a gives G_{b,a}.
-            G[:,b,:]-=p*rem
-            steps.append(st)
+            for b in range(6):
+                rem,st=_cross_resolvent(
+                    Hr,vr[:,b],vr,E-mu-zadd,
+                    max_steps=opts.krylov_dim,tol=opts.krylov_tol
+                )
+                G[:,b,:]-=p*rem
+                steps.append(st)
 
     st=np.asarray(steps,int)
     return MomentumGreenResult(
