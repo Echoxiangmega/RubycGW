@@ -166,9 +166,15 @@ def impurity_green_tangent(
                 g=A.T@ra
                 dterm=dA.T@ra+A.T@(r[:,None]*dA.conj())
                 # R(dxi_up-dK_low)R.
-                right=Ul@ra
-                left=Ul@(r.conj()[:,None]*A.conj())
-                dterm-=left.conj().T@(low["dH"]@right)
+                # Upper-source Lehmann term has A_a R A_b^*, i.e.
+                # a TRANSPOSED low-sector resolvent. The inserted dK
+                # must therefore be transposed too. Using dH without
+                # .T gives an incorrect imaginary off-diagonal response
+                # for complex loop-current sources, even though real
+                # hopping tests pass.
+                right=Ul.conj()@ra
+                left=Ul.conj()@(r.conj()[:,None]*A.conj())
+                dterm-=left.conj().T@(low["dH"].T@right)
                 dterm+=up["dE"][j]*(A.T@((r*r)[:,None]*A.conj()))
                 out[iw]+=p*dterm+pd*g
 
