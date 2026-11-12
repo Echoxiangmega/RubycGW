@@ -23,6 +23,46 @@ class BathTangentDiagnostics:
     active_bounds: bool
 
 
+@dataclass
+class PreparedComplexBathResponse:
+    """Cached exact implicit bath Hessian solve for repeated GMRES matvecs."""
+    indices: np.ndarray
+    weights: np.ndarray
+    linear_map: np.ndarray
+    J: np.ndarray
+    H: np.ndarray
+    nbath: int
+    norb: int
+    stationarity: float
+    least_squares_rank: int
+    condition: float
+
+    def apply(self,dtarget_delta):
+        delta=np.asarray(dtarget_delta,complex)
+        dw=delta[self.indices]*self.weights[:,None,None]
+        vec=np.r_[dw.real.ravel(),dw.imag.ravel()]
+        rhs=self.J.T@vec
+        sol=self.linear_map@vec
+        residual=float(np.linalg.norm(self.H@sol-rhs)/
+                       max(np.linalg.norm(rhs),1.e-30))
+        nvc=self.norb*self.nbath
+        return (
+            np.asarray(sol[:self.nbath],float),
+            np.asarray(sol[self.nbath:self.nbath+nvc].reshape(
+                self.norb,self.nbath
+            )+1j*sol[self.nbath+nvc:].reshape(
+                self.norb,self.nbath
+            ),complex),
+            BathTangentDiagnostics(
+                stationarity=self.stationarity,
+                least_squares_rank=self.least_squares_rank,
+                hessian_condition=self.condition,
+                linearized_residual=residual,
+                active_bounds=False,
+            )
+        )
+
+
 def _weights(omega,nfit):
     w=np.asarray(omega,float).reshape(-1)
     pos=np.flatnonzero(w>0)
@@ -44,6 +84,7 @@ def complex_bath_fit_tangent(
     energy_window: float=4.,coupling_bound: float=4.,
     svd_cutoff: float=1.e-9,
     stationarity_tol: float=2.e-5,
+    prepare_only: bool=False,
 ):
     """Derivative of a complex bath least-squares *stationary optimum*.
 
@@ -128,24 +169,26 @@ def complex_bath_fit_tangent(
     U,sv,Vh=np.linalg.svd(H)
     threshold=max(svd_cutoff*max(float(sv[0]),1.),1.e-12)
     keep=sv>threshold
-    solution=(Vh.T[:,keep]@(
-        (U.T@rhs)[keep]/sv[keep]
-    ) if np.any(keep) else np.zeros_like(rhs))
-    residual_linear=float(np.linalg.norm(H@solution-rhs)/
-                          max(float(np.linalg.norm(rhs)),1.e-30))
-    return (
-        np.asarray(solution[:nb],float),
-        np.asarray(solution[nb:nb+nvc].reshape(n,nb)
-                   +1j*solution[nb+nvc:].reshape(n,nb),complex),
-        BathTangentDiagnostics(
-            stationarity=stationarity,
-            least_squares_rank=int(np.sum(keep)),
-            hessian_condition=(float(sv[0]/sv[keep][-1])
-                               if np.any(keep) else float("inf")),
-            linearized_residual=residual_linear,
-            active_bounds=False,
-        ),
+    if np.any(keep):
+        linear_map=(
+            Vh.T[:,keep]/sv[keep][None,:]
+        )@(U.T[keep,:]@J.T)
+        cond=float(sv[0]/sv[keep][-1])
+    else:
+        linear_map=np.zeros((len(rhs),len(residual)),float)
+        cond=float("inf")
+    prepared=PreparedComplexBathResponse(
+        indices=np.asarray(pos,int).copy(),
+        weights=np.asarray(weights,float).copy(),
+        linear_map=np.asarray(linear_map,float),
+        J=np.asarray(J,float),
+        H=np.asarray(H,float),
+        nbath=int(nb),norb=int(n),
+        stationarity=stationarity,
+        least_squares_rank=int(np.sum(keep)),
+        condition=cond,
     )
+    return prepared if prepare_only else prepared.apply(dtarget)
 
 
 def bath_delta_tangent(omega,mu,bath,dxi,dv):
@@ -165,5 +208,6 @@ def bath_delta_tangent(omega,mu,bath,dxi,dv):
 
 
 __all__=[
-    "BathTangentDiagnostics","complex_bath_fit_tangent","bath_delta_tangent"
+    "BathTangentDiagnostics","PreparedComplexBathResponse",
+    "complex_bath_fit_tangent","bath_delta_tangent"
 ]
