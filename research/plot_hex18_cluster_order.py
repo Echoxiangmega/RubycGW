@@ -39,7 +39,7 @@ from matplotlib.cm import ScalarMappable
 
 from rubycgw.model import RubyParameters
 from rubycgw.supercell import SUPERCELL_MATRIX, SUPERCELL_REPRESENTATIVES
-from scan_true_hex18_v import RubyTorus
+from research.scan_true_hex18_v import RubyTorus
 
 # Explicitly verified in research/verify_hex18_equivalence.py:
 # drawing_primitive = U @ native_primitive + orbital_shift.
