@@ -113,6 +113,77 @@ the analytic method may fail its stationarity or GMRES checks.
 Its consistency with finite-source responses should be checked
 numerically at representative interacting points.
 
+
+## Direct strong-V convergence controls (no V continuation)
+
+The direct comparison keeps the requested physical V fixed. Strong V
+can make the coupled lattice GW / finite-bath ED map poorly conditioned
+even when the impurity solver itself is exact.
+
+The new controls are independent of the optional finite-source chi:
+
+- `--uniform-mixing-method pulay` (default) mixes all three self-energy
+  blocks, with bounded DIIS steps and automatic linear fallback.
+  `--uniform-mixing-method linear` reproduces the original mapping.
+  The multicell baseline and source stages have separate
+  `--baseline-mixing-method` and `--source-mixing-method` controls.
+- `--uniform-bath complex` uses a complex bath already in the uniform
+  zero-field stage; `real` preserves its previous bath manifold.
+  Complex bath does not automatically generate an ordered current state.
+- `--bath-energy-window 8` expands the bath pole fitting window relative
+  to the chemical potential (the old default is 4).
+  `--bath-fit-restarts 2` adds reproducible alternative bath starting
+  points only when the fit fails, reaches a parameter bound, or exceeds
+  `--bath-retry-error`. This can cost extra ED iteration time.
+- By default the uniform and baseline stages record the smallest singular
+  value of their actual Fierz screening matrix. Add
+  `--no-screening-monitor` to disable this diagnostic.
+- `--uniform-seed-channel z_opposite --uniform-seed-amplitude 0.002`
+  perturbs the **initial self-energy only**, then removes the perturbation
+  from the physical Hamiltonian during fixed-point iterations. Because
+  the uniform stage constrains primitive-cell translation, these seeds
+  represent only **Q=0 intra-cell** patterns, not the finite-Q mode
+  (1/3,1/3). The finite-Q state requires a multi-cell symmetry-breaking
+  seed in a separate calculation.
+
+For example, to diagnose the direct V=5 uniform fixed point first:
+
+```powershell
+python research/compare_fierz_cluster_ed_gw.py `
+  --V 5 --n 2 --T 0.125 `
+  --nbath 6 --nw 19 --nomega 10 `
+  --modes pseudospin `
+  --initial-state free `
+  --uniform-mixing-method pulay --uniform-mixing 0.2 `
+  --uniform-bath complex `
+  --bath-energy-window 8 --bath-fit-restarts 2 `
+  --uniform-max-iter 150 --baseline-max-iter 150 `
+  --skip-chi --verbose `
+  --out results/hex18_direct_V5_diagnostic
+```
+
+This does not guarantee convergence at V=5. A small screening singular
+value or a genuinely unstable translation-invariant solution cannot be
+fixed by more numerical damping alone.
+
+Every `--checkpoint-every` iterations (default 5), and at termination,
+the script atomically writes
+`uniform_cluster_<mode>_checkpoint.npz` or
+`baseline_cluster_<mode>_checkpoint.npz`. If the uniform stage reaches
+its iteration cap, run the same command with `--resume-uniform`; if
+the baseline stage fails, use `--resume-baseline`. The latter skips
+recomputing the uniform stage. Changing mixing or iteration limits is
+allowed, but model/grid/bath parameters must match the checkpoint.
+These flags restart the **same V**, with fresh Pulay history; they do not
+perform interaction continuation.
+
+`diagnostics.json` now records the decomposition of self-energy
+residuals, bath optimizer status and bound activity, and the screening
+singular-value history. An optimization that reaches its iteration cap
+is explicitly marked `success=false`, rather than being silently
+reported as an adequate bath fit. This diagnostic is not itself an
+assertion that a given finite-bath ED result is physically converged.
+
 ## ED Green reference and numerical reporting
 
 The finite-temperature ED susceptibility uses the thermal momentum
