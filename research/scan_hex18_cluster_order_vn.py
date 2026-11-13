@@ -55,7 +55,7 @@ from rubycgw.supercell_gw_fast import _solve_mu_matrix_fast
 from rubycgw.supercell_gw_split import one_body_density_matrix_tail
 from rubycgw.three_torus_benchmark import (
     build_torus_geometry,noninteracting_cluster_seed,
-    uniform_primitive_cluster_ed_gw,project_k_green,green_k_tau,
+    uniform_primitive_cluster_ed_gw,project_k_green,k_projector,
 )
 
 
@@ -326,14 +326,14 @@ def _fresh_bootstrap(geom,params,grid,target,mode,a):
     ),"free"
 
 
-def _save_state(path,state,meta,rho,Gk):
+def _save_state(path,state,meta,rho,Gk,Gmix):
     payload=dict(
         meta=json.dumps(meta,sort_keys=True),G=state.G,
         Sigma_H=state.Sigma_H,Sigma_emb=state.Sigma_emb,
         Sigma_imp=state.Sigma_ED_cluster,mu=float(state.mu),
         bath_energies=state.bath_energies,
         bath_couplings=state.bath_couplings,
-        rho=rho,Gk=Gk,
+        rho=rho,Gk=Gk,G_K_KplusQ=Gmix,
         residual_history=state.residual_history,
         final_error=float(state.final_error),converged=bool(state.converged),
         bath_fit_error=state.bath_fit_error,
@@ -673,7 +673,23 @@ def run(a):
                                 rho,geom,params,threshold=a.order_threshold
                             )
                             Gk=project_k_green(result.G,geom,K)
+                            # Nonzero at finite-Q order: the off-diagonal
+                            # primitive momentum Green block K -> K+Q.
+                            KplusQ=geom.validate_momentum(
+                                (np.asarray(K)+np.asarray(QK))%1.
+                            )
+                            UK=k_projector(geom,K)
+                            UQ=k_projector(geom,KplusQ)
+                            Gmix=np.einsum(
+                                "ia,nij,jb->nab",UK.conj(),
+                                result.G[:,0,0],UQ,optimize=True
+                            )
+                            Gmix_norm=float(
+                                np.linalg.norm(Gmix)/
+                                max(float(np.linalg.norm(Gk)),1e-30)
+                            )
                             errors=_green_errors(Gk,Gref,grid.omega)
+                            row["G_K_KplusQ_norm"]=Gmix_norm
                             row.update(errors)
                             # Duplicate seeds may converge to the same ordered
                             # endpoint; compare normal density matrices, not
@@ -719,7 +735,7 @@ def run(a):
                                 statefile,result,
                                 dict(mode=mode,candidate=key,V=V,
                                      filling=n,source=origin_type),
-                                rho,Gk,
+                                rho,Gk,Gmix,
                             )
                             np.savez_compressed(
                                 point_dir/f"{mode}__{key}_orders.npz",
@@ -728,7 +744,9 @@ def run(a):
                                 bond_j=[x["j"] for x in obs["bond_rows"]],
                                 bond_current=[x["current"] for x in obs["bond_rows"]],
                                 bond_real=[x["real_bond"] for x in obs["bond_rows"]],
-                                Gk=Gk,omega=grid.omega,
+                                Gk=Gk,G_K_KplusQ=Gmix,
+                                K=np.asarray(K),KplusQ=np.asarray(KplusQ),
+                                omega=grid.omega,
                             )
                             _write_csv(
                                 point_dir/f"{mode}__{key}_bonds.csv",
@@ -775,7 +793,8 @@ BRANCH_COLS=[
     "V","filling","mode","candidate","seed_family","seed_amplitude",
     "status","phase_family","dominant_channel","dominant_amplitude",
     "co_amplitude","lc_amplitude","bond_anisotropy","density_range",
-    "g_error","g_low_error","mu","F_per_pc","free_energy_reliable",
+    "g_error","g_low_error","G_K_KplusQ_norm",
+    "mu","F_per_pc","free_energy_reliable",
     "final_error","bath_fit_max","gimp_gc_max","iterations","seconds",
     "warm_source","warm_from_V","warm_from_n","ed_status","error",
 ]
