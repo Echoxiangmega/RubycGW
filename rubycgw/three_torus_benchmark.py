@@ -377,8 +377,9 @@ def uniform_primitive_cluster_ed_gw(
             sl=slice(6*cell,6*(cell+1))
             sigma_emb[:,0,0,sl,sl]+=float(initial_amplitude)*K[None]
         mu,G,_,_=_solve_mu_matrix_fast(
-            geom.h0,sigma_h,sigma_emb,grid,filling_target
-            if target_particles is not None else float(np.sum(background.density)),
+            geom.h0,sigma_h,sigma_emb,grid,
+            float(target_particles) if target_particles is not None
+            else float(np.sum(background.density)),
             mu,1e-10,100
         )
     filling_target=(float(np.sum(background.density)) if target_particles is None
