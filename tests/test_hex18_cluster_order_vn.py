@@ -147,3 +147,38 @@ def test_hex18_order_cli_2d_warm_without_chi(tmp_path):
     ) as handle:
         resumed=list(csv.DictReader(handle))
     assert len(resumed)==8
+
+
+def test_hex18_order_cli_ed_green_compared_once_per_point(tmp_path):
+    """At zero V, ED reference is computed and shared by the candidate solve."""
+    script=(Path(__file__).resolve().parents[1]/
+            "research"/"scan_hex18_cluster_order_vn.py")
+    cmd=[
+        sys.executable,str(script),
+        "--V-scan","0","--fillings",str(2/3),
+        "--T",".4","--K","0","0",
+        "--modes","density","--candidates","symmetric",
+        "--nbath","1","--nw","3","--nomega","1",
+        "--bath-fit-nfreq","2","--bath-max-nfev","40",
+        "--bath-fit-restarts","0",
+        "--bootstrap","free","--max-iter","8","--tol","1e-4",
+        "--ed-sector-padding","1","--ed-thermal-eigs","1",
+        "--ed-krylov-steps","12",
+        "--no-free-energy","--out",str(tmp_path)
+    ]
+    r=subprocess.run(cmd,capture_output=True,text=True,timeout=240)
+    assert r.returncode==0,r.stdout+"\n"+r.stderr
+    folder=tmp_path/"n_0p6666666666666666"/"V_0"
+    assert (folder/"ed_Gk.npz").exists(),r.stdout
+    with (folder/"ed_Gk.npz").open("rb") as handle:
+        with np.load(handle,allow_pickle=False) as ed:
+            assert ed["Gk"].shape==(6,6,6)
+    with (tmp_path/"branches.csv").open(
+        newline="",encoding="utf-8"
+    ) as handle:
+        rows=list(csv.DictReader(handle))
+    assert len(rows)==1
+    assert rows[0]["status"]=="converged",r.stdout
+    assert rows[0]["ed_status"]=="ok",r.stdout
+    assert np.isfinite(float(rows[0]["g_error"]))
+    assert float(rows[0]["g_error"])>=0
