@@ -17,6 +17,7 @@ QK = (1. / 3., 1. / 3.)
 Q0 = (0., 0.)
 FAMILIES = ("symmetric", "co_q0_A0", "co_qK_A0",
             "co_qK_A1", "co_qK_A2", "co_qK_odd_A0",
+    "co_qK_sin_A0", "co_qK_odd_sin_A0",
             "lc_q0_same", "lc_q0_opposite",
             "lc_qK_same_cos", "lc_qK_opposite_cos",
             "lc_qK_same_sin", "lc_qK_opposite_sin",
@@ -49,11 +50,11 @@ def _hermitian_normalize(a):
     return a/scale
 
 
-def _diag_co(geom, *, q=Q0, parity=1., orient=0):
+def _diag_co(geom, *, q=Q0, parity=1., orient=0,harmonic="cos"):
     mat=np.zeros((geom.nsites,geom.nsites),complex)
     pattern=np.roll(np.asarray([2.,-1.,-1.]),int(orient))
     for cell in range(geom.ncell):
-        w=_phase(geom,cell,q)
+        w=_phase(geom,cell,q,harmonic)
         for side in (0,1):
             sign=(1. if side==0 else float(parity))
             for j in range(3):
@@ -123,8 +124,10 @@ def seed_matrix(geom,params,name,*,random_seed=1):
         q=QK if "_qK_" in name else Q0
         parity=-1. if "_odd_" in name else 1.
         orient=int(name.rsplit("_A",1)[-1]) if "_A" in name else 0
+        harmonic="sin" if "_sin_" in name else "cos"
         return _hermitian_normalize(
-            _diag_co(geom,q=q,parity=parity,orient=orient)
+            _diag_co(geom,q=q,parity=parity,
+                     orient=orient,harmonic=harmonic)
         )
     if name.startswith("lc_"):
         parts=name.split("_")
