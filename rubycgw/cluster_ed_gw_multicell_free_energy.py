@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .cluster_ed_gw import BathParameters, cluster_interaction_matrix
+from .fierz_cluster_embedding import triangle_cluster_interactions
 from .cluster_ed_gw_free_energy import _gw_phi_from_G, _impurity_phi
 from .free_energy import _fermionic_lw_term, noninteracting_grand_potential
 from .grids import MatsubaraGrid
@@ -64,6 +65,13 @@ def evaluate_multicell_free_energy(
     if norb % NSUB:
         raise ValueError("supercell dimension must be a multiple of six")
     ncell = norb // NSUB
+    cluster_size=int(np.asarray(state.G_cluster).shape[-1])
+    if cluster_size not in (3,6):
+        raise ValueError("free energy requires complete cell6 or triangle3 impurity partition")
+    nimp=norb//cluster_size
+    if (np.shape(state.G_cluster)!=(nimp,grid.nf,cluster_size,cluster_size)
+        or np.shape(state.bath_couplings)[0]!=nimp):
+        raise ValueError("state's impurity partition/bath shapes are inconsistent")
 
     rho = one_body_density_matrix_tail(G, grid, h0, mu, sigma_h)
     density = np.diagonal(rho[0, 0], axis1=-2, axis2=-1).real
@@ -76,7 +84,11 @@ def evaluate_multicell_free_energy(
     )
     phi_gw_lat = _gw_phi_from_G(G, P, rho, Vq, grid)
 
-    Vc = cluster_interaction_matrix(cluster_interactions, NSUB)
+    interactions_for_blocks=[
+        tuple(cluster_interactions) if cluster_size==6 else
+        triangle_cluster_interactions(cluster_interactions,c%2)
+        for c in range(nimp)
+    ]
     cgrid = MatsubaraGrid(
         nk1=1,
         nk2=1,
@@ -93,8 +105,10 @@ def evaluate_multicell_free_energy(
     g_mismatch = []
     reconstruct_mismatch = []
 
-    for c in range(ncell):
-        sl = slice(c * NSUB, (c + 1) * NSUB)
+    for c in range(nimp):
+        sl = slice(c * cluster_size, (c + 1) * cluster_size)
+        local_terms=interactions_for_blocks[c]
+        Vc=cluster_interaction_matrix(local_terms,cluster_size)
         Gc = np.asarray(state.G_cluster[c], dtype=complex)
         rhoc = np.asarray(rho[0, 0, sl, sl], dtype=complex)
         Gc5 = Gc[:, None, None, :, :]
@@ -119,11 +133,11 @@ def evaluate_multicell_free_energy(
         phi_ed, thermo, Gimp, _, rec = _impurity_phi(
             hcorr,
             bath,
-            cluster_interactions,
+            local_terms,
             grid.omega,
             mu,
             grid.T,
-            correlated_orbitals=tuple(range(NSUB)),
+            correlated_orbitals=tuple(range(cluster_size)),
             discard_weight_tol=float(discard_weight_tol),
         )
         phi_ed_cells.append(float(phi_ed))
