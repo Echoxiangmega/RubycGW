@@ -22,6 +22,7 @@ import numpy as np
 
 from .cluster_ed_gw import (
     BathParameters,
+    cluster_interaction_matrix,
     bath_hybridization,
     build_impurity_one_body,
     cluster_gw_self_energy,
@@ -53,6 +54,7 @@ class MultiCellEDGWOptions:
     mixing: float = 0.45
     impurity_mixing: float = 1.0
     nbath: int = 6
+    cluster_size: int = 6  # 6: one cell impurity; 3: separate A/B triangle impurities
     bath_fit_nfreq: int = 12
     bath_fit_max_nfev: int = 400
     bath_energy_window: float = 4.0
@@ -112,6 +114,7 @@ class MultiCellEDGWResult:
     elapsed_history: np.ndarray
     timing_seconds: dict[str, float] | None = None
     gw_mode: str = "density"
+    cluster_size: int = 6
     component_residual_history: np.ndarray | None = None
     bath_diagnostics: list | None = None
     screening_history: list | None = None
@@ -128,9 +131,9 @@ def _relative_error(a, b):
     return float(np.linalg.norm((np.asarray(a) - np.asarray(b)).ravel()) / den)
 
 
-def _block_slice(cell: int) -> slice:
-    i0 = int(cell) * NSUB
-    return slice(i0, i0 + NSUB)
+def _block_slice(cell: int, cluster_size: int = NSUB) -> slice:
+    i0 = int(cell) * int(cluster_size)
+    return slice(i0, i0 + int(cluster_size))
 
 
 def _bath_from_arrays(energies, couplings, cell, fit_error=np.nan):
@@ -216,12 +219,30 @@ def solve_multicell_cluster_ed_gw(
     if norb % NSUB != 0:
         raise ValueError("folded orbital dimension must be a multiple of six")
     ncell = norb // NSUB
+    cluster_size=int(opts.cluster_size)
+    if cluster_size not in (3,6):
+        raise ValueError("cluster_size must be 3 (triangles) or 6 (unit cells)")
+    nimp=norb//cluster_size
     from .fierz_cluster_embedding import (
-        build_embedding_channels,lattice_gw_map,cluster_gw_map
+        build_embedding_channels,lattice_gw_map,cluster_gw_map,
+        triangle_cluster_interactions,triangle_embedding_channel,
     )
     channel=build_embedding_channels(
         cluster_interactions,ncell,opts.gw_mode,Vq
     )
+    local_interactions=[
+        tuple(cluster_interactions) if cluster_size==6
+        else triangle_cluster_interactions(cluster_interactions,c%2)
+        for c in range(nimp)
+    ]
+    local_channels=[
+        channel if cluster_size==6 else triangle_embedding_channel(channel,c%2)
+        for c in range(nimp)
+    ]
+    local_vc=[
+        cluster_interaction_matrix(x,cluster_size)
+        for x in local_interactions
+    ]
     if not (0.0 < float(opts.mixing) <= 1.0):
         raise ValueError("mixing must lie in (0,1]")
     if not (0.0 < float(opts.impurity_mixing) <= 1.0):
@@ -256,15 +277,15 @@ def solve_multicell_cluster_ed_gw(
         G = np.asarray(bg.G, dtype=complex).copy()
         mu = float(bg.mu)
         rho = one_body_density_matrix_tail(G, grid, h0, mu, sigma_h)
-        sigma_imp = np.zeros((ncell, grid.nf, NSUB, NSUB), dtype=complex)
-        baths: list[BathParameters | None] = [None] * ncell
-        for c in range(ncell):
-            sl = _block_slice(c)
+        sigma_imp = np.zeros((nimp, grid.nf, cluster_size, cluster_size), dtype=complex)
+        baths: list[BathParameters | None] = [None] * nimp
+        for c in range(nimp):
+            sl = _block_slice(c,cluster_size)
             Gc = G[:, 0, 0, sl, sl]
             rhoc = rho[0, 0, sl, sl]
             sigma_imp[c], _, _ = cluster_gw_map(
-                Gc,rhoc,cluster_interactions,grid,channel,
-                Vc=_cluster_matrix(cluster_interactions)
+                Gc,rhoc,local_interactions[c],grid,local_channels[c],
+                Vc=local_vc[c]
             )
     else:
         sigma_h = np.asarray(restart.Sigma_H, dtype=complex).copy()
@@ -276,7 +297,7 @@ def solve_multicell_cluster_ed_gw(
             raise ValueError("restart Sigma_H shape mismatch")
         if sigma_emb.shape != (grid.nf, 1, 1, norb, norb):
             raise ValueError("restart Sigma_emb shape mismatch")
-        if sigma_imp.shape != (ncell, grid.nf, NSUB, NSUB):
+        if sigma_imp.shape != (nimp, grid.nf, cluster_size, cluster_size):
             raise ValueError("restart Sigma_imp shape mismatch")
         if G.shape != (grid.nf,1,1,norb,norb):
             raise ValueError("restart G shape mismatch")
@@ -290,20 +311,28 @@ def solve_multicell_cluster_ed_gw(
                 restart.bath_couplings,
                 c,
             )
-            for c in range(ncell)
+            for c in range(nimp)
         ]
+        expected_e=(nimp,int(opts.nbath))
+        expected_v=(nimp,cluster_size,int(opts.nbath))
+        if (np.shape(restart.bath_energies)!=expected_e or
+                np.shape(restart.bath_couplings)!=expected_v):
+            raise ValueError(
+                "restart bath partition shape mismatch; cannot reuse cell6 "
+                "restart directly as triangle3 or vice versa"
+            )
 
-    Vc = _cluster_matrix(cluster_interactions)
+    Vc = None  # local_vc[c] is strictly matched to the ED interaction block
     mixer=CoupledSelfEnergyMixer(
         method=str(opts.mixing_method),alpha=float(opts.mixing),
         history=int(opts.pulay_history),start=int(opts.pulay_start),
         regularization=float(opts.pulay_regularization),
         step_cap=float(opts.pulay_step_cap),
         reset_growth=float(opts.pulay_reset_growth),
-        impurity_weight=float(np.sqrt(ncell)),
+        impurity_weight=float(np.sqrt(nimp)),
     )
     fitter = fit_finite_bath_complex if bool(opts.complex_bath) else fit_finite_bath
-    eye6 = np.eye(NSUB, dtype=complex)
+    eye_local = np.eye(cluster_size, dtype=complex)
 
     wall_t0 = perf_counter()
     time_lattice = 0.0
@@ -322,11 +351,11 @@ def solve_multicell_cluster_ed_gw(
     sigma_gw_lattice = np.zeros_like(G)
     sigma_cgw_all = np.zeros_like(sigma_imp)
     sigma_ed_all = np.zeros_like(sigma_imp)
-    Gc_all = np.zeros((ncell, grid.nf, NSUB, NSUB), dtype=complex)
+    Gc_all = np.zeros((nimp, grid.nf, cluster_size, cluster_size), dtype=complex)
     Gimp_all = np.zeros_like(Gc_all)
-    static_shift_all = np.zeros((ncell, NSUB, NSUB), dtype=complex)
-    mismatch_all = np.full(ncell, np.inf)
-    bath_error_all = np.full(ncell, np.inf)
+    static_shift_all = np.zeros((nimp, cluster_size, cluster_size), dtype=complex)
+    mismatch_all = np.full(nimp, np.inf)
+    bath_error_all = np.full(nimp, np.inf)
 
     for it in range(1, int(opts.max_iter) + 1):
         t0 = perf_counter()
@@ -340,13 +369,14 @@ def solve_multicell_cluster_ed_gw(
         sigma_emb_out = np.asarray(sigma_gw_lattice, dtype=complex).copy()
         time_lattice += perf_counter()-t0
 
-        for c in range(ncell):
-            sl = _block_slice(c)
+        for c in range(nimp):
+            sl = _block_slice(c,cluster_size)
             Gc = np.asarray(G[:, 0, 0, sl, sl], dtype=complex)
             rhoc = np.asarray(rho[0, 0, sl, sl], dtype=complex)
             Gc_all[c] = Gc
             sigma_cgw, _, _ = cluster_gw_map(
-                Gc,rhoc,cluster_interactions,grid,channel,Vc=Vc
+                Gc,rhoc,local_interactions[c],grid,local_channels[c],
+                Vc=local_vc[c]
             )
             sigma_cgw_all[c] = sigma_cgw
 
@@ -354,7 +384,7 @@ def solve_multicell_cluster_ed_gw(
             hloc = np.asarray(h0[0, 0, sl, sl], dtype=complex)
             raw_delta = (
                 (1j * grid.omega[:, None, None] + float(mu))
-                * eye6[None, :, :]
+                * eye_local[None, :, :]
                 - hloc[None, :, :]
                 - g0_inv
             )
@@ -389,15 +419,15 @@ def solve_multicell_cluster_ed_gw(
             himp = build_impurity_one_body(himp_corr, bath)
             impurity = FiniteBathImpurityED(
                 himp,
-                cluster_interactions,
-                correlated_orbitals=tuple(range(NSUB)),
+                local_interactions[c],
+                correlated_orbitals=tuple(range(cluster_size)),
             )
             impurity.diagonalize()
             Gimp, _ = impurity.green_iomega(
                 1j * grid.omega,
                 mu,
                 grid.T,
-                orbitals=tuple(range(NSUB)),
+                orbitals=tuple(range(cluster_size)),
                 discard_weight_tol=float(opts.discard_weight_tol),
             )
             time_impurity+=perf_counter()-t_imp
@@ -407,7 +437,7 @@ def solve_multicell_cluster_ed_gw(
             )
             g0_fit_inv = (
                 (1j * grid.omega[:, None, None] + float(mu))
-                * eye6[None, :, :]
+                * eye_local[None, :, :]
                 - himp_corr[None, :, :]
                 - delta_fit
             )
@@ -431,7 +461,7 @@ def solve_multicell_cluster_ed_gw(
                 f"(H={res_h:.3e}, emb={res_emb:.3e}, imp={res_imp:.3e}), "
                 f"max Gimp/Gc={np.max(mismatch_all):.3e}, "
                 f"max bath={np.max(bath_error_all):.3e}, "
-                f"fit_ok={all(d['success'] for d in bath_diagnostics[-ncell:])}, "
+                f"fit_ok={all(d['success'] for d in bath_diagnostics[-nimp:])}, "
                 f"mu={mu:+.9f}, dt={elapsed_history[-1]:.1f}s",
                 flush=True,
             )
@@ -500,13 +530,13 @@ def solve_multicell_cluster_ed_gw(
         G,rho,h0,Vq,grid,channel,mu,
         static_reference=sigma_h
     )
-    for c in range(ncell):
-        sl = _block_slice(c)
+    for c in range(nimp):
+        sl = _block_slice(c,cluster_size)
         Gc_all[c] = np.asarray(G[:, 0, 0, sl, sl], dtype=complex)
         sigma_cgw_all[c], _, _ = cluster_gw_map(
             Gc_all[c],
             np.asarray(rho[0, 0, sl, sl], dtype=complex),
-            cluster_interactions,grid,channel,Vc=Vc
+            local_interactions[c],grid,local_channels[c],Vc=local_vc[c]
         )
 
     bath_energies = np.stack([np.asarray(b.energies, dtype=float) for b in baths])
@@ -547,6 +577,7 @@ def solve_multicell_cluster_ed_gw(
             "total":float(total_wall),
         },
         gw_mode=channel.mode,
+        cluster_size=cluster_size,
         component_residual_history=np.asarray(component_history),
         bath_diagnostics=bath_diagnostics,
         screening_history=screening_history,

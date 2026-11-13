@@ -155,7 +155,11 @@ def parse_args(argv=None):
     p.add_argument("--random-seed",type=int,default=27)
     p.add_argument("--nw",type=int,default=19)
     p.add_argument("--nomega",type=int,default=10)
-    p.add_argument("--nbath",type=int,default=6)
+    p.add_argument("--cluster-partition",choices=("cell6","triangle3"),
+                   default="cell6",
+                   help="cell6: 3 six-site impurities; triangle3: 6 independent three-site A/B impurities")
+    p.add_argument("--nbath",type=int,default=None,
+                   help="bath orbitals per impurity; default 6 for cell6, 3 for triangle3")
     p.add_argument("--max-iter",type=int,default=140)
     p.add_argument("--tol",type=float,default=3e-5)
     p.add_argument("--mixing",type=float,default=.25)
@@ -194,6 +198,8 @@ def parse_args(argv=None):
     p.add_argument("--verbose",action="store_true")
     p.add_argument("--out",type=Path,required=True)
     a=p.parse_args(argv)
+    if a.nbath is None:
+        a.nbath=3 if a.cluster_partition=="triangle3" else 6
     a.V_values=_grid_explicit_or_range(
         a.V_scan,a.V_start,a.V_stop,a.V_step,"V"
     )
@@ -237,7 +243,8 @@ def _variants(candidates,amps):
 def _run_signature(a):
     """Config affecting physical results and candidate branch identification."""
     return dict(
-        version=1,V=list(a.V_values),fillings=list(a.n_values),
+        version=2,V=list(a.V_values),fillings=list(a.n_values),
+        cluster_partition=a.cluster_partition,
         T=a.T,t=a.t,t1=a.t1,t2=a.t2,K=list(a.K),
         modes=list(a.modes),candidates=list(a.candidates),
         seed_amplitudes=list(a.seed_amplitudes),random_seed=a.random_seed,
@@ -287,7 +294,7 @@ def _inject_seed(restart,K,amplitude,h0,grid,target):
 def _fresh_bootstrap(geom,params,grid,target,mode,a):
     from rubycgw.fierz_cluster_embedding import build_embedding_channels,cluster_gw_map
     bg=noninteracting_cluster_seed(geom,grid,float(target))
-    if a.bootstrap=="uniform":
+    if a.bootstrap=="uniform" and a.cluster_partition=="cell6":
         u=uniform_primitive_cluster_ed_gw(
             geom,grid,bg,nbath=a.nbath,gw_mode=mode,
             max_iter=a.uniform_max_iter,tol=max(float(a.tol),1e-4),
@@ -307,7 +314,14 @@ def _fresh_bootstrap(geom,params,grid,target,mode,a):
             f"residual={u.final_error:.3e}; using free fixed-point initializer",
             flush=True
         )
-    # Cold fixed-point seed without standalone lattice GW or chi.
+    # Triangle3 uses six three-orbital impurity seeds from the same full
+    # 18-site free Green function. No six-site ED warm-up is needed.
+    from rubycgw.fierz_cluster_embedding import (
+        triangle_cluster_interactions,triangle_embedding_channel,
+    )
+    from rubycgw.cluster_ed_gw import cluster_interaction_matrix
+    cluster_size=3 if a.cluster_partition=="triangle3" else 6
+    nimp=geom.nsites//cluster_size
     rho=one_body_density_matrix_tail(
         bg.G,grid,geom.h0,bg.mu,bg.Sigma_H
     )
@@ -315,24 +329,30 @@ def _fresh_bootstrap(geom,params,grid,target,mode,a):
         ruby_cluster_interactions(params),geom.ncell,mode,geom.vq
     )
     sigma_imp=[]
-    for cell in range(geom.ncell):
-        sl=slice(6*cell,6*(cell+1))
+    interactions=ruby_cluster_interactions(params)
+    for cell in range(nimp):
+        sl=slice(cluster_size*cell,cluster_size*(cell+1))
+        terms=(interactions if cluster_size==6 else
+               triangle_cluster_interactions(interactions,cell%2))
+        local_def=(defs if cluster_size==6 else
+                   triangle_embedding_channel(defs,cell%2))
         sc,_,_=cluster_gw_map(
             bg.G[:,0,0,sl,sl],rho[0,0,sl,sl],
-            ruby_cluster_interactions(params),grid,defs
+            terms,grid,local_def,
+            Vc=cluster_interaction_matrix(terms,cluster_size)
         )
         sigma_imp.append(sc)
     energies=np.linspace(-a.bath_energy_window/2,
                          a.bath_energy_window/2,a.nbath)+bg.mu
-    couplings=np.zeros((geom.ncell,6,a.nbath),complex)
+    couplings=np.zeros((nimp,cluster_size,a.nbath),complex)
     for p in range(a.nbath):
-        couplings[:,p%6,p]=1e-3
+        couplings[:,p%cluster_size,p]=1e-3
     return MultiCellRestart(
         Sigma_H=np.asarray(bg.Sigma_H,complex).copy(),
         Sigma_emb=np.asarray(bg.Sigma_GW,complex).copy(),
         Sigma_imp=np.asarray(sigma_imp,complex),
         G=np.asarray(bg.G,complex).copy(),mu=float(bg.mu),
-        bath_energies=np.tile(energies[None],(geom.ncell,1)),
+        bath_energies=np.tile(energies[None],(nimp,1)),
         bath_couplings=couplings,
     ),"free"
 
@@ -357,11 +377,13 @@ def _save_state(path,state,meta,rho,Gk,Gmix):
     tmp.replace(path)
 
 
-def _load_state(path,mode,key,grid,geom,nbath,tol):
+def _load_state(path,mode,key,grid,geom,nbath,tol,cluster_size=6):
     with np.load(path,allow_pickle=False) as z:
         meta=json.loads(str(z["meta"].item()))
-        if meta["mode"]!=mode or meta["candidate"]!=key:
-            raise ValueError("wrong candidate/mode in saved ordered-state checkpoint")
+        if (meta["mode"]!=mode or meta["candidate"]!=key or
+                meta.get("cluster_partition","cell6")!=
+                ("triangle3" if cluster_size==3 else "cell6")):
+            raise ValueError("wrong candidate/mode/partition in saved ordered-state checkpoint")
         if (not bool(z["converged"].item()) or
                 float(z["final_error"].item())>=float(tol)):
             return None
@@ -372,11 +394,12 @@ def _load_state(path,mode,key,grid,geom,nbath,tol):
         energies=np.asarray(z["bath_energies"],float)
         couplings=np.asarray(z["bath_couplings"],complex)
         mu=float(z["mu"].item())
+    nimp=geom.nsites//int(cluster_size)
     if (G.shape!=(grid.nf,1,1,geom.nsites,geom.nsites) or
         emb.shape!=G.shape or sh.shape!=(geom.nsites,geom.nsites) or
-        imp.shape!=(geom.ncell,grid.nf,6,6) or
-        energies.shape!=(geom.ncell,nbath) or
-        couplings.shape!=(geom.ncell,6,nbath) or
+        imp.shape!=(nimp,grid.nf,cluster_size,cluster_size) or
+        energies.shape!=(nimp,nbath) or
+        couplings.shape!=(nimp,cluster_size,nbath) or
         not np.isfinite(mu) or
         not all(np.all(np.isfinite(x)) for x in
                 (G,sh,emb,imp,energies,couplings))):
@@ -567,7 +590,8 @@ def run(a):
             target=float(n*geom.ncell)
             point_dir=out/f"n_{_tag(n)}"/f"V_{_tag(V)}"
             point_dir.mkdir(parents=True,exist_ok=True)
-            print(f"[hex18-order] n={n:g} V={V:g}, "
+            print(f"[hex18-order] partition={a.cluster_partition} "
+                  f"n={n:g} V={V:g}, "
                   f"branches={len(variants)*len(a.modes)}",flush=True)
             edfile=point_dir/"ed_Gk.npz"
             try:
@@ -587,7 +611,8 @@ def run(a):
                     cached_state=None
                     if a.resume and statefile.exists() and rowfile.exists():
                         cached_state=_load_state(
-                            statefile,mode,key,grid,geom,a.nbath,a.tol
+                            statefile,mode,key,grid,geom,a.nbath,a.tol,
+                            cluster_size=(3 if a.cluster_partition=="triangle3" else 6)
                         )
                     if cached_state is not None:
                         row=json.loads(rowfile.read_text(encoding="utf-8"))
@@ -639,6 +664,7 @@ def run(a):
                     from_V=(a.V_values[origin[1]] if origin is not None else None)
                     row=dict(
                         V=float(V),filling=float(n),mode=mode,candidate=key,
+                        cluster_partition=a.cluster_partition,
                         seed_family=name,seed_amplitude=float(amplitude),
                         warm_source=origin_type,warm_from_V=from_V,
                         warm_from_n=from_n,status="failed",
@@ -669,7 +695,9 @@ def run(a):
                             pulay_history=a.pulay_history,
                             pulay_start=a.pulay_start,
                             pulay_step_cap=a.pulay_step_cap,
-                            nbath=a.nbath,bath_fit_nfreq=a.bath_fit_nfreq,
+                            nbath=a.nbath,
+                            cluster_size=(3 if a.cluster_partition=="triangle3" else 6),
+                            bath_fit_nfreq=a.bath_fit_nfreq,
                             bath_fit_max_nfev=a.bath_max_nfev,
                             bath_fit_restarts=a.bath_fit_restarts,
                             bath_energy_window=a.bath_energy_window,
@@ -705,6 +733,14 @@ def run(a):
                             obs=order_observables(
                                 rho,geom,params,threshold=a.order_threshold
                             )
+                            occupations=np.asarray(obs["density"],float).reshape(
+                                geom.ncell,2,3
+                            ).sum(axis=-1)
+                            total_filling=float(occupations.sum())
+                            row["N_lattice"]=total_filling
+                            row["filling_error"]=total_filling-target
+                            row["triangle_A_occupations"]=occupations[:,0].tolist()
+                            row["triangle_B_occupations"]=occupations[:,1].tolist()
                             Gk=project_k_green(result.G,geom,K)
                             # Nonzero at finite-Q order: the off-diagonal
                             # primitive momentum Green block K -> K+Q.
@@ -767,12 +803,16 @@ def run(a):
                             _save_state(
                                 statefile,result,
                                 dict(mode=mode,candidate=key,V=V,
-                                     filling=n,source=origin_type),
+                                     filling=n,source=origin_type,
+                                     cluster_partition=a.cluster_partition),
                                 rho,Gk,Gmix,
                             )
                             np.savez_compressed(
                                 point_dir/f"{mode}__{key}_orders.npz",
                                 rho=rho,density=obs["density"],
+                                triangle_occupations=occupations,
+                                total_particles=total_filling,
+                                target_particles=target,
                                 bond_i=[x["i"] for x in obs["bond_rows"]],
                                 bond_j=[x["j"] for x in obs["bond_rows"]],
                                 bond_current=[x["current"] for x in obs["bond_rows"]],
@@ -812,6 +852,7 @@ def run(a):
                 )
                 point_rows.append(dict(
                     V=float(V),filling=float(n),mode=mode,
+                    cluster_partition=a.cluster_partition,
                     ed_status=ed_status,
                     n_converged=sum(x["mode"]==mode and
                                     x["status"]=="converged"
@@ -827,16 +868,20 @@ def run(a):
 
 
 BRANCH_COLS=[
-    "V","filling","mode","candidate","seed_family","seed_amplitude",
+    "V","filling","mode","cluster_partition",
+    "candidate","seed_family","seed_amplitude",
     "status","phase_family","dominant_channel","dominant_amplitude",
     "co_amplitude","lc_amplitude","bond_anisotropy","density_range",
     "g_error","g_low_error","G_K_KplusQ_norm",
-    "mu","F_per_pc","free_energy_reliable",
+    "mu","N_lattice","filling_error",
+    "triangle_A_occupations","triangle_B_occupations",
+    "F_per_pc","free_energy_reliable",
     "final_error","bath_fit_max","gimp_gc_max","iterations","seconds",
     "warm_source","warm_from_V","warm_from_n","ed_status","error",
 ]
 PHASE_COLS=[
-    "V","filling","mode","phase","winner","F_min","F_second",
+    "V","filling","mode","cluster_partition",
+    "phase","winner","F_min","F_second",
     "free_energy_gap","near_degenerate","n_reliable",
     "n_converged","n_attempted","ed_status"
 ]
