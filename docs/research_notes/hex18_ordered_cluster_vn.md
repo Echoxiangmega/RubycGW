@@ -82,7 +82,8 @@ At the scan root:
 - `branches.csv`: one row per (V,n,Fierz mode,candidate,seed amplitude),
   containing convergence, inferred order family, dominant form factor,
   CO/LC/bond amplitudes, full-matrix iomega Green errors vs ED,
-  bath error, Gimp/Gc mismatch, mu, and any free-energy diagnostic;
+  bath error, Gimp/Gc mismatch, mu, the finite-Q momentum-mixing norm
+  ||G(K,K+Q;iomega)||/||G(K,K;iomega)||, and any free-energy diagnostic;
 - `phase_summary.csv`: a cautious per-(V,n,mode) phase choice, reliable
   minimum Helmholtz F, competing F and near-degeneracy label. If the
   supplied finite-bath approximation does not permit reliable ranking,
@@ -94,9 +95,10 @@ In each `n_<...>/V_<...>/` directory:
 - `ed_Gk.npz`: once-per-point ED matrix G(K,iw) and thermal weight data;
 - `<mode>__<candidate>.npz`: **only after convergence**, the full
   zero-source 18x18 matrix G(iw), self-energy and bath restart state,
-  rho and 6x6 G(K,iw), plus its fixed-point residual history;
+  rho, 6x6 G(K,K;iw), the off-diagonal 6x6 G(K,K+Q;iw)
+  and its fixed-point residual history;
 - `<mode>__<candidate>_orders.npz`: rho, 18 site densities, all
-  36 bond currents and real bond expectation values;
+  36 bond currents, real bond expectation values and G(K,K+Q;iw);
 - `<mode>__<candidate>_bonds.csv`: physically oriented bond observables;
 - `<mode>__<candidate>.json`: per-branch status and all projected
   order parameters for q=0 and q=K, including failed branches.
