@@ -298,7 +298,15 @@ def fit_finite_bath_complex(
     fit = bath_hybridization(wfit, mu, eps, hyb)
     den = max(float(np.linalg.norm(dfit.ravel())), 1.0e-300)
     err = float(np.linalg.norm((fit - dfit).ravel()) / den)
-    return BathParameters(eps, hyb, err, int(opt.nfev))
+    at_bound=bool(np.any(
+        np.isclose(opt.x,lower,rtol=0.,atol=1e-6) |
+        np.isclose(opt.x,upper,rtol=0.,atol=1e-6)
+    ))
+    return BathParameters(
+        eps,hyb,err,int(opt.nfev),
+        success=bool(opt.success),active_bounds=at_bound,
+        fit_message=str(opt.message)
+    )
 
 
 def onebody_expectation_from_lattice_G(

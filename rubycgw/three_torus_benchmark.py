@@ -323,19 +323,65 @@ def uniform_primitive_cluster_ed_gw(
     bath_nfit=12, bath_max_nfev=200, verbose=False,
     target_particles: float | None = None,
     gw_mode: str = "density",
+    mixing_method="linear",pulay_history=6,pulay_start=3,
+    pulay_regularization=1e-7,pulay_step_cap=2.,
+    pulay_reset_growth=2.,bath_complex=False,
+    bath_energy_window=4.,bath_coupling_bound=4.,
+    bath_fit_restarts=0,bath_retry_error=0.03,
+    initial_channel=None,initial_amplitude=0.,
+    restart=None,checkpoint_callback=None,checkpoint_every=5,
+    screening_monitor=False,
 ):
     """One equivalent six-site impurity replicated over an arbitrary torus.
 
     This is a Q=0 / primitive-translation-invariant Ansatz. For Q!=0
     susceptibility use the separate multi-impurity finite-source solver.
     """
+    from .cluster_convergence import (
+        CoupledSelfEnergyMixer,screening_diagnostic,fit_bath_with_restarts,maxabs
+    )
+    from .cluster_ed_gw_covariant import fit_finite_bath_complex
+    from .pseudospin import primitive_pseudospin_vertex
     t_start=perf_counter()
     time_lattice=time_bath=time_imp=time_dyson=0.0
-    G=np.array(background.G,copy=True)
-    mu=float(background.mu)
-    sigma_h=np.array(background.Sigma_H,copy=True)
-    sigma_emb=np.array(background.Sigma_GW,copy=True)
+    if not 0 < float(mixing) <= 1:
+        raise ValueError("uniform mixing must be in (0,1]")
+    if int(checkpoint_every)<1:
+        raise ValueError("checkpoint_every must be positive")
+    G=np.array(background.G if restart is None else restart.G,copy=True)
+    mu=float(background.mu if restart is None else restart.mu)
+    sigma_h=np.array(background.Sigma_H if restart is None
+                     else restart.Sigma_H,copy=True)
+    sigma_emb=np.array(background.Sigma_GW if restart is None
+                       else restart.Sigma_emb,copy=True)
     ncell=geom.ncell
+    mixer=CoupledSelfEnergyMixer(
+        method=str(mixing_method),alpha=float(mixing),
+        history=int(pulay_history),start=int(pulay_start),
+        regularization=float(pulay_regularization),
+        step_cap=float(pulay_step_cap),
+        reset_growth=float(pulay_reset_growth),
+        impurity_weight=float(np.sqrt(ncell)),
+    )
+    fitter=(fit_finite_bath_complex if bath_complex else fit_finite_bath)
+    residual_hist=[];component_hist=[];bath_hist=[]
+    screening_hist=[];bath_diag_hist=[];mu_hist=[]
+    previous_bath=None
+    if restart is None and abs(float(initial_amplitude))>0:
+        if initial_channel is None:
+            raise ValueError("initial_channel is required for a nonzero uniform seed")
+        K=primitive_pseudospin_vertex(str(initial_channel))
+        if np.max(abs(K-K.conj().T))>1e-10:
+            raise ValueError("uniform seed operator is not Hermitian")
+        for cell in range(ncell):
+            sl=slice(6*cell,6*(cell+1))
+            sigma_emb[:,0,0,sl,sl]+=float(initial_amplitude)*K[None]
+        mu,G,_,_=_solve_mu_matrix_fast(
+            geom.h0,sigma_h,sigma_emb,grid,
+            float(target_particles) if target_particles is not None
+            else float(np.sum(background.density)),
+            mu,1e-10,100
+        )
     filling_target=(float(np.sum(background.density)) if target_particles is None
                     else float(target_particles))
     if not np.isfinite(filling_target):
@@ -351,11 +397,19 @@ def uniform_primitive_cluster_ed_gw(
     )
     channel=build_embedding_channels(ints,ncell,gw_mode,geom.vq)
     Vc=cluster_interaction_matrix(ints,6)
-    bath=None
+    bath=(None if restart is None else BathParameters(
+        np.asarray(restart.bath.energies,float).copy(),
+        np.asarray(restart.bath.couplings,complex).copy(),
+        float(restart.bath.fit_error),int(restart.bath.nfev)
+    ))
     rho=one_body_density_matrix_tail(G,grid,geom.h0,mu,sigma_h)
     Gc=np.mean([G[:,0,0,sl,sl] for sl in chunks],axis=0)
     rhoc=np.mean([rho[0,0,sl,sl] for sl in chunks],axis=0)
-    sigma_imp=cluster_gw_map(Gc,rhoc,ints,grid,channel,Vc=Vc)[0]
+    sigma_imp=(cluster_gw_map(Gc,rhoc,ints,grid,channel,Vc=Vc)[0]
+               if restart is None else
+               np.asarray(restart.Sigma_ED_cluster,complex).copy())
+    if bath is not None and not bath_complex and maxabs(bath.couplings.imag)>1e-12:
+        raise ValueError("cannot resume complex bath in real-bath uniform solver")
     err=float("inf")
     mismatch=float("inf")
     bath_err=float("inf")
@@ -368,6 +422,8 @@ def uniform_primitive_cluster_ed_gw(
             G,rho,geom.h0,geom.vq,grid,channel,mu,
             static_reference=sigma_h
         )
+        if screening_monitor:
+            screening_hist.append(screening_diagnostic(P,geom.vq,channel,grid))
         Gc=np.mean([G[:,0,0,sl,sl] for sl in chunks],axis=0)
         rhoc=np.mean([rho[0,0,sl,sl] for sl in chunks],axis=0)
         scgw,_,_=cluster_gw_map(Gc,rhoc,ints,grid,channel,Vc=Vc)
@@ -377,12 +433,23 @@ def uniform_primitive_cluster_ed_gw(
         himp=hloc+static
         time_lattice+=perf_counter()-t_lattice
         t_fit=perf_counter()
-        bath=fit_finite_bath(
-            delta,grid.omega,mu,nbath=int(nbath),nfit=int(bath_nfit),
-            max_nfev=int(bath_max_nfev),initial=bath,
-            metric="delta",one_body=himp
+        bath,attempts=fit_bath_with_restarts(
+            fitter,delta,grid.omega,mu,initial=bath,
+            nbath=int(nbath),nfit=int(bath_nfit),
+            max_nfev=int(bath_max_nfev),
+            energy_window=float(bath_energy_window),
+            coupling_bound=float(bath_coupling_bound),
+            restarts=int(bath_fit_restarts),retry_error=float(bath_retry_error),
+            seed=1777+it,metric="delta",one_body=himp
         )
         time_bath+=perf_counter()-t_fit
+        bath_diag_hist.append(dict(
+            iteration=int(it),success=bool(bath.success),
+            active_bounds=bool(bath.active_bounds),
+            nfev=int(bath.nfev),attempts=int(attempts),
+            fit_error=float(bath.fit_error),
+            message=str(bath.fit_message),
+        ))
         t_imp=perf_counter()
         solver=FiniteBathImpurityED(
             build_impurity_one_body(himp,bath),ints,
@@ -401,23 +468,49 @@ def uniform_primitive_cluster_ed_gw(
             emb_new[:,0,0,sl,sl]+=sigma_new-scgw
         mismatch=float(np.linalg.norm(Gimp-Gc)/max(np.linalg.norm(Gc),1e-300))
         bath_err=float(bath.fit_error)
-        err=float(max(
-            np.max(np.abs(sh_new-sigma_h)),
-            np.max(np.abs(emb_new-sigma_emb)),
-            np.max(np.abs(sigma_new-sigma_imp))
-        ))
+        res_h=maxabs(sh_new-sigma_h)
+        res_emb=maxabs(emb_new-sigma_emb)
+        res_imp=maxabs(sigma_new-sigma_imp)
+        err=float(max(res_h,res_emb,res_imp))
+        residual_hist.append(err)
+        component_hist.append((res_h,res_emb,res_imp))
+        bath_hist.append((bath_err,mismatch))
+        mu_hist.append(float(mu))
         if verbose:
-            print(f"[uniform ED+GW] it={it}, residual={err:.3e}, bath={bath_err:.3e}, Gimp/Gc={mismatch:.3e}",flush=True)
-        a=1.0 if err<tol else float(mixing)
-        sigma_h=sigma_h+a*(sh_new-sigma_h)
-        sigma_emb=sigma_emb+a*(emb_new-sigma_emb)
-        sigma_imp=sigma_imp+a*(sigma_new-sigma_imp)
+            screen_msg=(f", screening_smin={screening_hist[-1]['min_singular_value']:.3e}"
+                        if screening_monitor else "")
+            print(
+                f"[uniform ED+GW] it={it}, residual={err:.3e} "
+                f"(H={res_h:.3e}, emb={res_emb:.3e}, imp={res_imp:.3e}), "
+                f"bath={bath_err:.3e}, fit_ok={bath.success}, "
+                f"at_bound={bath.active_bounds}, attempts={attempts}, "
+                f"Gimp/Gc={mismatch:.3e}, mu={mu:+.8f}{screen_msg}",
+                flush=True
+            )
+        if err<tol:
+            sigma_h=np.asarray(sh_new).copy()
+            sigma_emb=np.asarray(emb_new).copy()
+            sigma_imp=np.asarray(sigma_new).copy()
+        else:
+            sigma_h,sigma_emb,sigma_imp=mixer.propose(
+                sigma_h,sigma_emb,sigma_imp,
+                sh_new,emb_new,sigma_new,it
+            )
         t_dyson=perf_counter()
         mu,G,_,_=_solve_mu_matrix_fast(
             geom.h0,sigma_h,sigma_emb,grid,
             filling_target,mu,1e-10,100
         )
         time_dyson+=perf_counter()-t_dyson
+        if checkpoint_callback is not None and (
+                it % int(checkpoint_every)==0 or err<tol or it==int(max_iter)):
+            checkpoint_callback(it,SimpleNamespace(
+                G=np.asarray(G),Sigma_H=np.asarray(sigma_h),
+                Sigma_emb=np.asarray(sigma_emb),
+                Sigma_ED_cluster=np.asarray(sigma_imp),
+                mu=float(mu),bath=bath,final_error=float(err),
+                converged=bool(err<tol),
+            ))
         if err<tol:
             converged=True
             break
@@ -428,6 +521,15 @@ def uniform_primitive_cluster_ed_gw(
         Sigma_ED_cluster=sigma_imp,Sigma_GW_lattice=sigma_gw,
         bath_fit_error=bath_err,impurity_mismatch=mismatch,
         bath=bath,
+        residual_history=np.asarray(residual_hist),
+        component_residual_history=np.asarray(component_hist),
+        bath_diagnostics=bath_diag_hist,
+        bath_history=np.asarray(bath_hist),
+        mu_history=np.asarray(mu_hist),
+        screening_history=screening_hist,
+        pulay_fallbacks=int(mixer.fallbacks),
+        pulay_resets=int(mixer.resets),
+        bath_mode="complex" if bath_complex else "real",
         timing_seconds={
             "lattice":float(time_lattice),"bath_fit":float(time_bath),
             "impurity_ed":float(time_imp),"dyson":float(time_dyson),
