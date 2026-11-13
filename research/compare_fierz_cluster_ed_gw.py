@@ -22,10 +22,13 @@ it remains available as an optional cross-check.
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
+import math
 import sys
 import time
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import SimpleNamespace
 from concurrent.futures import ProcessPoolExecutor
@@ -66,7 +69,18 @@ def parse_args(argv=None):
     p=argparse.ArgumentParser(
         description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--V",type=float,required=True)
+    p.add_argument("--V",type=float,default=None,
+                   help="single interaction strength (old single-point mode)")
+    p.add_argument("--V-scan",nargs="+",type=float,default=None,metavar="V",
+                   help="explicit ordered V values; each point warm-starts from the previous converged point")
+    p.add_argument("--V-start",type=float,default=None)
+    p.add_argument("--V-stop",type=float,default=None)
+    p.add_argument("--V-step",type=float,default=None,
+                   help="inclusive arithmetic V grid with --V-start/--V-stop")
+    p.add_argument("--scan-on-failure",choices=("stop","continue"),default="stop",
+                   help="stop at first incomplete V (default), or continue from last certified per-mode solution")
+    p.add_argument("--resume-scan",action="store_true",
+                   help="reuse completed V point results/checkpoints from --out; retry the first incomplete point")
     p.add_argument("--n","--filling",dest="filling",type=float,required=True)
     p.add_argument("--T",type=float,default=.125)
     p.add_argument("--t",type=float,default=1.)
@@ -212,10 +226,13 @@ def _fierz_seed(gw,mode,geom,grid,target):
 
 
 def _multi_restart(x):
+    """Copy a certified multicell result/restart without sharing mutable baths."""
+    impurity=(x.Sigma_imp if isinstance(x,MultiCellRestart)
+              else x.Sigma_ED_cluster)
     return MultiCellRestart(
         Sigma_H=np.asarray(x.Sigma_H,complex).copy(),
         Sigma_emb=np.asarray(x.Sigma_emb,complex).copy(),
-        Sigma_imp=np.asarray(x.Sigma_ED_cluster,complex).copy(),
+        Sigma_imp=np.asarray(impurity,complex).copy(),
         G=np.asarray(x.G,complex).copy(),mu=float(x.mu),
         bath_energies=np.asarray(x.bath_energies,float).copy(),
         bath_couplings=np.asarray(x.bath_couplings,complex).copy()
@@ -341,8 +358,419 @@ def _sources(geom,grid,interactions,restart,opts,target,K,h,workers):
     )
 
 
-def main(argv=None):
-    a=parse_args(argv)
+
+def _requested_scan_values(a):
+    """Return an ordered V grid or None for the legacy single-point run."""
+    values=getattr(a,"V_scan",None)
+    range_args=(getattr(a,"V_start",None),getattr(a,"V_stop",None),
+                getattr(a,"V_step",None))
+    using_range=any(x is not None for x in range_args)
+    if values is not None and using_range:
+        raise ValueError("use --V-scan or --V-start/--V-stop/--V-step, not both")
+    if a.V is not None and (values is not None or using_range):
+        raise ValueError("--V specifies a single point; omit it when scanning V")
+    if values is None and not using_range:
+        return None
+    if using_range:
+        if any(x is None for x in range_args):
+            raise ValueError("the V range requires --V-start, --V-stop and --V-step")
+        try:
+            start,stop,step=(Decimal(str(x)) for x in range_args)
+        except InvalidOperation as exc:
+            raise ValueError("invalid V range") from exc
+        if not all(x.is_finite() for x in (start,stop,step)):
+            raise ValueError("V range entries must be finite")
+        if not step or (stop-start)*step<0:
+            raise ValueError("V step must be nonzero and point towards --V-stop")
+        count=int(abs((stop-start)/step))
+        if count>10000:
+            raise ValueError("refusing more than 10001 requested V points")
+        dvalues=[start+i*step for i in range(count+1)]
+        if dvalues[-1]!=stop:
+            dvalues.append(stop)  # include endpoint after a shorter last step
+        values=[float(v) for v in dvalues]
+    else:
+        values=list(map(float,values))
+    if not values or any(not math.isfinite(v) for v in values):
+        raise ValueError("V scan must contain finite values")
+    if len(values)>10001:
+        raise ValueError("refusing more than 10001 V points")
+    if len(values)>1:
+        differences=np.diff(values)
+        if not (np.all(differences>0) or np.all(differences<0)):
+            raise ValueError("V scan must be strictly increasing or decreasing")
+    return tuple(float(v) for v in values)
+
+
+def _scan_point_dir(root,V):
+    value=Decimal(str(float(V))).normalize()
+    tag=format(value,"f")
+    tag=tag.replace("-","m").replace(".","p")
+    return Path(root)/("V_"+tag)
+
+
+def _scan_signature(a,values):
+    """Only numerical/physical controls that affect already computed data."""
+    return dict(
+        version=1,values=list(values),filling=float(a.filling),
+        T=float(a.T),t=float(a.t),t1=float(a.t1),t2=float(a.t2),
+        K=list(map(float,a.K)),Q=list(map(float,a.Q)),
+        modes=list(dict.fromkeys(a.modes)),
+        channels=list(dict.fromkeys(a.channels)),
+        nw=int(a.nw),nomega=int(a.nomega),nbath=int(a.nbath),
+        uniform_bath=str(a.uniform_bath),
+        bath_fit_nfreq=int(a.bath_fit_nfreq),
+        bath_energy_window=float(a.bath_energy_window),
+        bath_coupling_bound=float(a.bath_coupling_bound),
+        skip_chi=bool(a.skip_chi),
+        chi_method=str(a.cluster_chi_method),
+        source_step=float(a.source_step),
+        ed_samples=int(a.ed_samples),
+        ed_tau_points=int(a.ed_tau_points),
+        ed_charge_sector_padding=int(a.ed_charge_sector_padding),
+        ed_sector_padding=int(a.ed_sector_padding),
+        ed_thermal_eigs=int(a.ed_thermal_eigs),
+        ed_krylov_steps=int(a.ed_krylov_steps),
+        tau_points=int(a.tau_points),
+    )
+
+
+def _scan_read_csv(path):
+    with Path(path).open(newline="",encoding="utf-8") as stream:
+        return list(csv.DictReader(stream))
+
+
+def _scan_write_outputs(out,signature,entries,green_rows,chi_rows,status_rows,
+                        *,state="running"):
+    out=Path(out)
+    green_fields=[
+        "V","method","status","warm_start_from_V",
+        "relative_Frobenius_K","low_frequency_error",
+        "trace_tau_relative_L2","mu","zero_field_residual",
+        "bath_fit_max","impurity_mismatch_max","seconds"
+    ]
+    chi_fields=[
+        "V","method","channel","status","warm_start_from_V",
+        "chi","ED_chi","relative_error_ED","chi_method",
+        "chi_wall_seconds","analytic_wall_seconds","max_linear_residual",
+        "linear_iterations","finite_source_wall_seconds","source_residual"
+    ]
+    status_fields=[
+        "V","method","status","warm_start_from_V","zero_field_residual",
+        "bath_fit_max","chi_complete","directory"
+    ]
+    _save_csv(out/"scan_green_comparison.csv",green_rows,green_fields)
+    _save_csv(out/"scan_chi_comparison.csv",chi_rows,chi_fields)
+    _save_csv(out/"scan_status.csv",status_rows,status_fields)
+
+    # Wide versions are easy to import directly into Origin and compare V trends.
+    modes=list(signature["modes"])
+    vpoints=[float(v) for v in signature["values"] if any(
+        float(row["V"])==float(v) for row in green_rows+chi_rows
+    )]
+    green_lookup={(float(x["V"]),x["method"]):x for x in green_rows}
+    wide_green=[]
+    for v in vpoints:
+        record=dict(V=v)
+        for mode in modes:
+            row=green_lookup.get((v,"cluster-"+mode),{})
+            record[mode+"_status"]=row.get("status","missing")
+            if row.get("status")=="converged":
+                for col in ("relative_Frobenius_K","low_frequency_error",
+                            "trace_tau_relative_L2"):
+                    record[mode+"_"+col]=row.get(col)
+        wide_green.append(record)
+    green_cols=["V"]+[
+        column for mode in modes for column in
+        (mode+"_status",)+tuple(
+            mode+"_"+x for x in (
+                "relative_Frobenius_K","low_frequency_error",
+                "trace_tau_relative_L2"
+            )
+        )
+    ]
+    _save_csv(out/"scan_green_wide.csv",wide_green,green_cols)
+
+    chi_lookup={
+        (float(x["V"]),x["channel"],x["method"]):x for x in chi_rows
+    }
+    wide_chi=[]
+    for v in vpoints:
+        for channel in signature["channels"]:
+            record=dict(V=v,channel=channel)
+            for name in ["ED"]+["cluster-"+m for m in modes]:
+                row=chi_lookup.get((v,channel,name),{})
+                key=name.replace("cluster-","")
+                record[key+"_status"]=row.get("status","missing")
+                if row.get("status")=="ok":
+                    record[key+"_chi"]=row.get("chi")
+            wide_chi.append(record)
+    wide_chi_cols=["V","channel"]+[
+        col for name in ["ED"]+modes
+        for col in (name+"_status",name+"_chi")
+    ]
+    _save_csv(out/"scan_chi_wide.csv",wide_chi,wide_chi_cols)
+    info=dict(signature=signature,status=state,points=entries)
+    tmp=out/"scan_manifest.json.tmp"
+    tmp.write_text(json.dumps(_json(info),ensure_ascii=False,indent=2,
+                              allow_nan=False),encoding="utf-8")
+    tmp.replace(out/"scan_manifest.json")
+
+
+def _scan_make_plots(out,chi_rows,green_rows,channels,modes):
+    """Build plots from numeric, successfully computed entries only."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        names=["ED"]+["cluster-"+x for x in modes]
+        for ch in channels:
+            fig,ax=plt.subplots(figsize=(7,4.5))
+            for name in names:
+                pts=[]
+                for row in chi_rows:
+                    if (row["method"]==name and row["channel"]==ch and
+                            row["status"]=="ok" and row.get("chi") is not None):
+                        pts.append((float(row["V"]),float(row["chi"])))
+                if pts:
+                    pts.sort()
+                    ax.plot([v for v,_ in pts],[y for _,y in pts],
+                            marker="o",label=name)
+            ax.set(xlabel="V",ylabel=r"$\chi(Q,0)$",title=f"{ch}, Q-fixed")
+            ax.legend(fontsize=8)
+            ax.grid(alpha=.2)
+            fig.tight_layout()
+            fig.savefig(Path(out)/("scan_chi_"+ch+".png"),dpi=170)
+            plt.close(fig)
+        fig,ax=plt.subplots(figsize=(7,4.5))
+        for mode in modes:
+            pts=[]
+            for row in green_rows:
+                if (row["method"]=="cluster-"+mode and
+                        row["status"]=="converged" and
+                        row.get("relative_Frobenius_K") is not None):
+                    pts.append((float(row["V"]),
+                                float(row["relative_Frobenius_K"])))
+            if pts:
+                pts.sort()
+                ax.plot([v for v,_ in pts],[y for _,y in pts],
+                        marker="o",label=mode)
+        ax.set(xlabel="V",ylabel=r"Relative $G(K,i\omega)$ Frobenius error")
+        ax.legend(fontsize=8)
+        ax.grid(alpha=.2)
+        fig.tight_layout()
+        fig.savefig(Path(out)/"scan_green_error.png",dpi=170)
+        plt.close(fig)
+    except (ImportError,ValueError,OSError) as exc:
+        print(f"[fierz-scan] summary plotting failed: {exc}",flush=True)
+
+
+def run_v_scan(a,values):
+    """V scan with strictly certified, mode-specific multicell warm starts.
+
+    Each target-V lattice/cluster GW skeleton is recomputed. The first point
+    uses the old initialization. Later points bypass the redundant uniform
+    stage when a previous certified complex-bath multicell state exists.
+    """
+    root=Path(a.out).resolve()
+    root.mkdir(parents=True,exist_ok=True)
+    modes=list(dict.fromkeys(a.modes))
+    channels=list(dict.fromkeys(a.channels))
+    sig=_scan_signature(a,values)
+    successful_states={}
+    successful_V={}
+    entries=[];green_rows=[];chi_rows=[];status_rows=[]
+    first_unfinished=0
+    manifest_path=root/"scan_manifest.json"
+    if a.resume_scan:
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"--resume-scan requires an existing {manifest_path}"
+            )
+        previous=json.loads(manifest_path.read_text(encoding="utf-8"))
+        if previous.get("signature")!=_json(sig):
+            raise ValueError("scan signature differs from recorded sweep")
+        for i,entry in enumerate(previous.get("points",[])):
+            if i>=len(values) or float(entry["V"])!=values[i]:
+                raise ValueError("scan manifest contains a mismatched V order")
+            if entry.get("status")!="ok":
+                break
+            v=values[i]
+            folder=_scan_point_dir(root,v)
+            if not folder.is_dir():
+                raise FileNotFoundError(f"missing completed scan folder: {folder}")
+            old_diag=json.loads((folder/"diagnostics.json").read_text(
+                encoding="utf-8"
+            ))
+            if any(
+                mode not in old_diag.get("methods",{}) or
+                "zero_field_residual" not in old_diag["methods"][mode]
+                for mode in modes
+            ):
+                raise ValueError(f"missing certified cluster metadata in {folder}")
+            for mode in modes:
+                point_args=copy.copy(a)
+                point_args.V=v
+                state=_load_checkpoint(
+                    _checkpoint_path(folder,mode,"baseline"),
+                    _checkpoint_signature(point_args,mode,"baseline"),
+                    stage="baseline",
+                    grid=MatsubaraGrid(nk1=1,nk2=1,nw=a.nw,
+                                       nOmega=a.nomega,T=a.T),
+                    nsites=18,nbath=a.nbath
+                )
+                saved_error=float(old_diag["methods"][mode]["zero_field_residual"])
+                if not math.isfinite(saved_error) or saved_error>=a.baseline_tol:
+                    raise ValueError(
+                        f"previous solution for {mode} at V={v:g} is not certified "
+                        f"at current baseline tolerance: {saved_error:g}"
+                    )
+                successful_states[mode]=state
+                successful_V[mode]=v
+            for row in _scan_read_csv(folder/"green_comparison.csv"):
+                warm=entry.get("warm_start_sources",{}).get(
+                    row["method"].replace("cluster-",""),None
+                )
+                green_rows.append(dict(V=v,**row,warm_start_from_V=warm))
+            for row in _scan_read_csv(folder/"chi_comparison.csv"):
+                warm=entry.get("warm_start_sources",{}).get(
+                    row["method"].replace("cluster-",""),None
+                )
+                chi_rows.append(dict(V=v,**row,warm_start_from_V=warm))
+            status_rows.extend(entry.get("method_statuses",[]))
+            entries.append(entry)
+            first_unfinished=i+1
+        print(
+            f"[fierz-scan] resumed {first_unfinished}/{len(values)} complete points; "
+            f"next V={values[first_unfinished] if first_unfinished<len(values) else 'none'}",
+            flush=True
+        )
+    _scan_write_outputs(root,sig,entries,green_rows,chi_rows,status_rows)
+    for i in range(first_unfinished,len(values)):
+        v=float(values[i])
+        sub=_scan_point_dir(root,v)
+        sub.mkdir(parents=True,exist_ok=True)
+        args=copy.copy(a)
+        args.V=v
+        args.V_scan=None
+        args.V_start=args.V_stop=args.V_step=None
+        args.resume_scan=False
+        args.resume_uniform=False
+        args.resume_baseline=False
+        args.out=sub
+        sources={m:successful_V[m] for m in modes if m in successful_states}
+        print(
+            f"[fierz-scan] point {i+1}/{len(values)}: V={v:g}, "
+            f"mode-specific previous V={sources or 'cold'}",flush=True
+        )
+        result=main(args,warm_states=successful_states,
+                    warm_sources=sources,return_scan_state=True)
+        for row in result["green_rows"]:
+            mode=row["method"].removeprefix("cluster-")
+            green_rows.append(dict(
+                V=v,**row,warm_start_from_V=sources.get(mode)
+            ))
+        for row in result["chi_rows"]:
+            mode=row["method"].removeprefix("cluster-")
+            chi_rows.append(dict(
+                V=v,**row,warm_start_from_V=sources.get(mode)
+            ))
+        ed_green_ok=any(
+            row.get("method")=="ED" and row.get("status")=="reference"
+            for row in result["green_rows"]
+        )
+        ed_chi_ok=bool(a.skip_chi) or all(
+            any(row.get("method")=="ED" and row.get("channel")==ch and
+                row.get("status")=="ok" for row in result["chi_rows"])
+            for ch in channels
+        )
+        statuses=[]
+        for mode in modes:
+            state=result["states"].get(mode)
+            mode_ok=state is not None and bool(getattr(state,"converged",False))
+            valid_chi=bool(a.skip_chi) or all(
+                any(row.get("method")=="cluster-"+mode and
+                    row.get("channel")==ch and row.get("status")=="ok"
+                    for row in result["chi_rows"])
+                for ch in channels
+            )
+            method_status=("ok" if mode_ok and valid_chi else
+                           "chi-failed" if mode_ok else "unconverged")
+            md=result["diagnostics"].get("methods",{}).get(mode,{})
+            entry=dict(
+                V=v,method="cluster-"+mode,status=method_status,
+                warm_start_from_V=sources.get(mode),
+                zero_field_residual=(
+                    float(state.final_error) if mode_ok else
+                    md.get("baseline_diagnostics",{}).get("residual")),
+                bath_fit_max=(
+                    float(np.max(state.bath_fit_error)) if mode_ok else None
+                ),
+                chi_complete=valid_chi,directory=str(sub),
+            )
+            statuses.append(entry)
+            status_rows.append(entry)
+            if mode_ok:
+                # Only a certified zero-source fixed point becomes a warm seed.
+                successful_states[mode]=state
+                successful_V[mode]=v
+        statuses.insert(0,dict(
+            V=v,method="ED",status="ok" if ed_green_ok and ed_chi_ok else "failed",
+            warm_start_from_V=None,zero_field_residual=None,
+            bath_fit_max=None,chi_complete=ed_chi_ok,directory=str(sub)
+        ))
+        status_rows.append(statuses[0])
+        complete=(ed_green_ok and ed_chi_ok and all(
+            entry["status"]=="ok" for entry in statuses[1:]
+        ))
+        point=dict(
+            V=v,status="ok" if complete else "partial",
+            directory=str(sub),warm_start_sources=sources,
+            ed_green_ok=ed_green_ok,ed_chi_ok=ed_chi_ok,
+            method_statuses=statuses
+        )
+        entries.append(point)
+        _scan_write_outputs(
+            root,sig,entries,green_rows,chi_rows,status_rows,
+            state="running" if complete else "partial"
+        )
+        if not complete and a.scan_on_failure=="stop":
+            print(
+                f"[fierz-scan] V={v:g} incomplete; keeping partial per-V "
+                f"results and stopping. Use --resume-scan to retry.",
+                flush=True
+            )
+            break
+    finished=len(entries)==len(values) and all(
+        x["status"]=="ok" for x in entries
+    )
+    _scan_write_outputs(
+        root,sig,entries,green_rows,chi_rows,status_rows,
+        state="complete" if finished else "partial"
+    )
+    _scan_make_plots(root,chi_rows,green_rows,channels,modes)
+    print(
+        f"[fierz-scan] {len(entries)}/{len(values)} V points attempted; "
+        f"status={'complete' if finished else 'partial'}; "
+        f"results at {root/'scan_manifest.json'}",flush=True
+    )
+    return dict(points=entries,completed=finished,output=str(root))
+
+
+def main(argv=None, *, warm_states=None, warm_sources=None,
+         return_scan_state=False):
+    a=(argv if isinstance(argv,argparse.Namespace) else parse_args(argv))
+    scan_values=_requested_scan_values(a)
+    if scan_values is not None:
+        if warm_states is not None or return_scan_state:
+            raise ValueError("nested V scans are not supported")
+        if a.resume_uniform or a.resume_baseline:
+            raise ValueError("use --resume-scan, not per-point --resume-uniform/--resume-baseline, for V scans")
+        return run_v_scan(a,scan_values)
+    if a.V is None or not math.isfinite(float(a.V)):
+        raise ValueError("single-point runs require a finite --V")
+    warm_states={} if warm_states is None else dict(warm_states)
+    warm_sources={} if warm_sources is None else dict(warm_sources)
     if not 0<a.filling<6:
         raise ValueError("filling must be between 0 and 6 spinless fermions per primitive cell")
     if a.nbath<1:
@@ -384,6 +812,10 @@ def main(argv=None):
         "baseline_mixing_method":a.baseline_mixing_method,
         "screening_monitor":bool(a.screening_monitor),
         "checkpoint_every":int(a.checkpoint_every),
+        "continuation":dict(
+            mode="scan-warm-start" if warm_states else "single-point",
+            input_sources={str(k):float(v) for k,v in warm_sources.items()},
+        ),
         "note":"The ED impurity is always the original six intra-triangle density interactions; only the matched lattice-GW and cluster-GW subtraction vary.",
         "stages":{},"errors":{},"methods":{}
     }
@@ -520,6 +952,24 @@ def main(argv=None):
     for mode in modes:
         print(f"[fierz-cluster] start {mode}: V={a.V:g}, n={a.filling:g}, nbath={a.nbath}",flush=True)
         build_embedding_channels(ints,geom.ncell,mode,geom.vq)
+        warm=warm_states.get(mode)
+        if warm is not None:
+            if (not bool(getattr(warm,"converged",True)) or
+                    str(getattr(warm,"gw_mode",mode))!=mode):
+                raise ValueError(
+                    f"refusing a nonconverged or wrong-Fierz warm seed for {mode}"
+                )
+            from_v=warm_sources.get(mode)
+            diag["methods"].setdefault(mode,{})["warm_start"]=dict(
+                used=True,source_V=float(from_v) if from_v is not None else None,
+                source_stage="converged-multicell-zero-field",
+                destination_V=float(a.V),
+                new_V_screening_recomputed=True,
+            )
+            print(
+                f"[fierz-cluster] {mode}: warm-start V={from_v} -> {a.V:g} "
+                "(rebuilding lattice/cluster GW at target V)",flush=True
+            )
         def initial():
             if a.initial_state=="free":
                 return noninteracting_cluster_seed(geom,grid,target)
@@ -542,8 +992,9 @@ def main(argv=None):
                 iterations=gw.iterations
             )
             return _fierz_seed(gw,mode,geom,grid,target)
-        seed=record_stage(mode+"_initial",initial)
-        if seed is None:
+        seed=(None if warm is not None else
+              record_stage(mode+"_initial",initial))
+        if seed is None and warm is None:
             mode_results[mode]=None
             green_rows.append(dict(method="cluster-"+mode,status="initial-failed"))
             for ch in channels:
@@ -558,10 +1009,12 @@ def main(argv=None):
         uniform_sig=_checkpoint_signature(a,mode,"uniform")
         baseline_sig=_checkpoint_signature(a,mode,"baseline")
         baseline_restart=(
-            _load_checkpoint(
-                baseline_path,baseline_sig,stage="baseline",
-                grid=grid,nsites=geom.nsites,nbath=a.nbath
-            ) if a.resume_baseline else None
+            _multi_restart(warm) if warm is not None else (
+                _load_checkpoint(
+                    baseline_path,baseline_sig,stage="baseline",
+                    grid=grid,nsites=geom.nsites,nbath=a.nbath
+                ) if a.resume_baseline else None
+            )
         )
         uniform_restart=(
             _load_checkpoint(
@@ -682,6 +1135,7 @@ def main(argv=None):
             zero_field_residual=base.final_error,
             uniform_residual=(zero_uniform.final_error
                               if zero_uniform is not None else None),
+            warm_start_from_V=warm_sources.get(mode) if warm is not None else None,
             bath_fit_error=base.bath_fit_error,
             impurity_mismatch=base.impurity_mismatch,
             gw_mode=base.gw_mode,
@@ -708,7 +1162,7 @@ def main(argv=None):
             zero_field_residual=float(base.final_error),
             bath_fit_max=float(np.max(base.bath_fit_error)),
             impurity_mismatch_max=float(np.max(base.impurity_mismatch)),
-            seconds=diag["stages"][mode+"_initial"]["seconds"]+
+            seconds=diag["stages"].get(mode+"_initial",{}).get("seconds",0.)+
                     diag["stages"].get(mode+"_uniform",{}).get("seconds",0.)+
                     diag["stages"][mode+"_zero_field"]["seconds"]
         ))
@@ -881,6 +1335,12 @@ def main(argv=None):
         print(f"[fierz-cluster] plot failed: {exc}",flush=True)
     print(f"[fierz-cluster] results: {out/'green_comparison.csv'}, "
           f"{out/'chi_comparison.csv'}",flush=True)
+    if return_scan_state:
+        return dict(
+            diagnostics=diag,states=mode_results,
+            green_rows=green_rows,chi_rows=chi_rows,
+            output=str(out),
+        )
     return diag
 
 
