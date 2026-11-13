@@ -462,6 +462,54 @@ def _scan_write_outputs(out,signature,entries,green_rows,chi_rows,status_rows,
     _save_csv(out/"scan_green_comparison.csv",green_rows,green_fields)
     _save_csv(out/"scan_chi_comparison.csv",chi_rows,chi_fields)
     _save_csv(out/"scan_status.csv",status_rows,status_fields)
+
+    # Wide versions are easy to import directly into Origin and compare V trends.
+    modes=list(signature["modes"])
+    vpoints=[float(v) for v in signature["values"] if any(
+        float(row["V"])==float(v) for row in green_rows+chi_rows
+    )]
+    green_lookup={(float(x["V"]),x["method"]):x for x in green_rows}
+    wide_green=[]
+    for v in vpoints:
+        record=dict(V=v)
+        for mode in modes:
+            row=green_lookup.get((v,"cluster-"+mode),{})
+            record[mode+"_status"]=row.get("status","missing")
+            if row.get("status")=="converged":
+                for col in ("relative_Frobenius_K","low_frequency_error",
+                            "trace_tau_relative_L2"):
+                    record[mode+"_"+col]=row.get(col)
+        wide_green.append(record)
+    green_cols=["V"]+[
+        column for mode in modes for column in
+        (mode+"_status",)+tuple(
+            mode+"_"+x for x in (
+                "relative_Frobenius_K","low_frequency_error",
+                "trace_tau_relative_L2"
+            )
+        )
+    ]
+    _save_csv(out/"scan_green_wide.csv",wide_green,green_cols)
+
+    chi_lookup={
+        (float(x["V"]),x["channel"],x["method"]):x for x in chi_rows
+    }
+    wide_chi=[]
+    for v in vpoints:
+        for channel in signature["channels"]:
+            record=dict(V=v,channel=channel)
+            for name in ["ED"]+["cluster-"+m for m in modes]:
+                row=chi_lookup.get((v,channel,name),{})
+                key=name.replace("cluster-","")
+                record[key+"_status"]=row.get("status","missing")
+                if row.get("status")=="ok":
+                    record[key+"_chi"]=row.get("chi")
+            wide_chi.append(record)
+    wide_chi_cols=["V","channel"]+[
+        col for name in ["ED"]+modes
+        for col in (name+"_status",name+"_chi")
+    ]
+    _save_csv(out/"scan_chi_wide.csv",wide_chi,wide_chi_cols)
     info=dict(signature=signature,status=state,points=entries)
     tmp=out/"scan_manifest.json.tmp"
     tmp.write_text(json.dumps(_json(info),ensure_ascii=False,indent=2,
