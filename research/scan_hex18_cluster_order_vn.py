@@ -144,9 +144,10 @@ def parse_args(argv=None):
     p.add_argument("--t1",type=float,default=-.5)
     p.add_argument("--t2",type=float,default=.5)
     p.add_argument("--K",nargs=2,type=float,default=QK,
-                   help="primitive-cell K for 6x6 ED-vs-cluster Green comparison")
+                   help="primitive K at which G(K,iomega) is compared to ED; does NOT set the order wave vector Q")
     p.add_argument("--modes",nargs="+",choices=("density","pseudospin","bj"),
-                   default=("density",))
+                   default=("density",),
+                   help="Fierz embedding schemes; physical V and ED impurity remain unchanged. Only density has compatible free-energy ranking")
     p.add_argument("--candidates",nargs="+",choices=FAMILIES,
                    default=DEFAULT_FAMILIES)
     p.add_argument("--seed-amplitudes",nargs="+",type=float,
@@ -183,6 +184,12 @@ def parse_args(argv=None):
                    help="debug only: skip requested ED Green comparison")
     p.add_argument("--tau-points",type=int,default=81)
     p.add_argument("--checkpoint-every",type=int,default=5)
+    p.add_argument("--plot-branches",action="store_true",
+                   help="save density/bond/current triptych for each converged branch")
+    p.add_argument("--plot-formats",nargs="+",choices=("png","svg","pdf"),
+                   default=("png",),help="triptych file formats")
+    p.add_argument("--plot-annotate",action="store_true",
+                   help="label native site indices on real-space triptych")
     p.add_argument("--resume",action="store_true")
     p.add_argument("--verbose",action="store_true")
     p.add_argument("--out",type=Path,required=True)
@@ -512,6 +519,25 @@ def _plot_phase(out,point_rows):
         print(f"[hex18-order] plot skipped: {exc}",flush=True)
 
 
+def _plot_branch(a,ordersfile):
+    """Plotting errors must not change a certified ED+GW fixed-point result."""
+    if not a.plot_branches:
+        return
+    try:
+        from research.plot_hex18_cluster_order import plot_order_triptych
+        images=plot_order_triptych(
+            ordersfile,formats=a.plot_formats,annotate=a.plot_annotate
+        )
+        if a.verbose:
+            print("[hex18-order] rendered: "+", ".join(map(str,images)),
+                  flush=True)
+    except Exception as exc:
+        print(
+            f"[hex18-order] plot warning for {ordersfile}: "
+            f"{type(exc).__name__}: {exc}",flush=True
+        )
+
+
 def run(a):
     signature=_run_signature(a)
     out=Path(a.out).resolve()
@@ -575,6 +601,9 @@ def run(a):
                         ))
                         row["ed_status"]=ed_status
                         _save_json(rowfile,row)
+                        _plot_branch(
+                            a,point_dir/f"{mode}__{key}_orders.npz"
+                        )
                         cache[(ni,vi,mode,key)]=cached_state
                         branch_rows.append(row)
                         per_point.append(row)
@@ -767,6 +796,10 @@ def run(a):
                     branch_rows.append(row)
                     per_point.append(row)
                     _save_json(rowfile,row)
+                    if row["status"]=="converged":
+                        _plot_branch(
+                            a,point_dir/f"{mode}__{key}_orders.npz"
+                        )
                     print(
                         f"[hex18-order] {mode}/{key} {row['status']}: "
                         f"res={row['final_error']:.3e}, phase={row['phase_family']}, "
