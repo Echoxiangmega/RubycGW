@@ -182,3 +182,7 @@ def test_hex18_order_cli_ed_green_compared_once_per_point(tmp_path):
     assert rows[0]["ed_status"]=="ok",r.stdout
     assert np.isfinite(float(rows[0]["g_error"]))
     assert float(rows[0]["g_error"])>=0
+    assert np.isfinite(float(rows[0]["G_K_KplusQ_norm"]))
+    with np.load(folder/"density__symmetric_orders.npz") as z:
+        assert z["G_K_KplusQ"].shape==(6,6,6)
+        assert z["KplusQ"].shape==(2,)
