@@ -15,6 +15,88 @@ matrix at the selected primitive momentum K. ED employs the existing
 thermal Lanczos truncation (not a full thermal eigenbasis), so its
 convergence controls remain important.
 
+## Alternative triangle3 impurity partition (3 correlated + 3 bath)
+
+Use the new dedicated script `research/scan_hex18_triangle_ed_gw_vn.py`
+for the two-triangle-per-primitive-cell partition. It invokes the same
+ordered-state scan, Green-function benchmark and real-space plotting logic
+as `scan_hex18_cluster_order_vn.py`, but uses
+`--cluster-partition triangle3`, **default `--nbath 3`**.
+
+On periodic hex18, this means **six independently self-consistent Anderson
+impurities**, each containing three interacting triangle sites and
+three auxiliary bath orbitals. The existing `cell6` branch remains
+available through the original script; it uses three six-site impurities
+and six bath orbitals by default. Both use the **exact same 18-site
+lattice hopping Hamiltonian**, including every `t1` and `t2` between
+different triangles. The triangular impurity's bare Hamiltonian contains
+only the three intra-triangle `t` hoppings; the intertriangle hopping
+is encoded by the full lattice Dyson equation and each triangle's
+self-consistent Weiss hybridization.
+
+In triangle3, the local ED and the subtracted local GW treat only
+the three V bonds on the **same** A or B triangle. The lattice GW
+remains an 18-site calculation and is never downfolded to isolated
+triangles. For `pseudospin`/`bj` options, the local Fierz vertices
+are projected from the correctly matched six-site A/B triangle
+definition before local GW subtraction; the physical ED impurity
+interaction is independent of Fierz convention.
+
+Example (PowerShell):
+
+```powershell
+git pull
+python research/scan_hex18_triangle_ed_gw_vn.py `
+  --V-start 0 --V-stop 5 --V-step 0.5 `
+  --fillings 2.0 2.1 2.2 2.3 `
+  --T 0.125 --t 1 --t1 -0.5 --t2 0.5 `
+  --K 0.333333333333 0.333333333333 `
+  --modes density `
+  --nw 19 --nomega 10 `
+  --max-iter 160 --mixing 0.25 --mixing-method pulay `
+  --bath-energy-window 8 --bath-fit-restarts 2 `
+  --plot-branches `
+  --out results/hex18_triangle3_vn
+```
+
+Or use `python research/scan_hex18_cluster_order_vn.py
+--cluster-partition triangle3` with the same remaining arguments.
+To test bath convergence, explicitly pass `--nbath 4` or
+`--nbath 6`. A 3+3 impurity has only `2^6=64` Fock states,
+compared with `2^12=4096` for the old 6+6 impurity; the 18-site GW
+and the ED Green **reference** cost do not decrease.
+
+The **only filling constraint** is the global folded-lattice
+`N_target=3*n`, enforced by a common chemical potential mu and
+full matrix Dyson equation. Neither the A and B occupancies nor
+the six individual impurity fillings are fixed separately. Each
+converged branch's JSON/CSV records `N_lattice`,
+`filling_error`, and the three A/B triangle occupancies;
+its `*_orders.npz` contains `triangle_occupations`
+of shape `(3,2)`. At `n=2.2`, the lattice target is 6.6,
+not six separately fixed occupancies.
+
+The same V/n branch-specific warm start, finite-Q zero-source
+self-consistency, ED Green comparison at the requested K, and optional
+density/bond/current triptych plotting are reused unchanged.
+The first triangle3 point starts from a free-lattice seed;
+the `--bootstrap uniform` setting (for legacy six-site warm-up)
+is intentionally not used for a triangle3 bootstrap, because it
+would require a different impurity partition. In both partitions,
+only **certified converged states of the same partition** are used
+for cross-V or cross-filling warm starts; restart checkpoint shapes
+and physical signatures distinguish the two.
+
+The triangle3 density-mode Luttinger-Ward free energy now sums
+six three-site ED-minus-local-GW Phi corrections instead of three
+six-site terms, using the same full-lattice GW and global Helmholtz
+Legendre transform. It is an approximate finite-T ranking only
+when bath and Gimp/Gloc consistency thresholds are satisfied.
+It is **not** automatically more accurate than cell6; the intertriangle
+two-particle diagrams are treated by lattice GW rather than ED.
+The two partitions must be benchmarked against the same ED Green
+reference and checked for phase-boundary sensitivity.
+
 ## Suggested run
 
 From the repository root, in PowerShell:
