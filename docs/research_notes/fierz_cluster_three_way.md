@@ -114,6 +114,88 @@ Its consistency with finite-source responses should be checked
 numerically at representative interacting points.
 
 
+## Sweeping V with converged Fierz-specific warm starts
+
+The comparison driver now supports ordered multi-V runs. Each requested
+V point computes its own exact 18-site ED Green function and, unless
+`--skip-chi` is set, the ED static susceptibility; it also solves every
+requested cluster embedding mode with fresh interactions and compares
+its zero-field Green function and static susceptibility against ED.
+
+Use an explicit list (PowerShell):
+
+```powershell
+python research/compare_fierz_cluster_ed_gw.py `
+  --V-scan 0 0.5 1 1.5 2 2.5 3 3.5 4 4.5 5 `
+  --n 2 --T 0.125 `
+  --K 0.333333333333 0.333333333333 `
+  --Q 0.333333333333 0.333333333333 `
+  --modes density pseudospin bj `
+  --channels x_even y_even z_same z_opposite `
+  --nbath 6 --nw 19 --nomega 10 `
+  --uniform-bath complex `
+  --uniform-max-iter 150 --baseline-max-iter 150 `
+  --source-max-iter 120 --source-tol 1e-7 `
+  --source-step 0.001 --source-workers 2 `
+  --out results/hex18_fierz_Vscan
+```
+
+Alternatively, replace `--V-scan ...` with
+`--V-start 0 --V-stop 5 --V-step 0.5`. The final V is always
+included, using a shorter last step if needed. The list may also be
+strictly decreasing. Do not add the old single-point `--V` when scanning.
+
+At the first V, the driver uses the normal `--initial-state` and
+uniform-to-complex-baseline stages. At each later V, **each mode**
+(density/pseudospin/bj) starts directly from its own previously
+**converged zero-field three-impurity complex-bath solution**:
+`G, Sigma_H, Sigma_emb, Sigma_ED, mu` and each bath pole/coupling
+are copied. The target V lattice/cluster GW `P,W,Sigma` and
+double-counting correction are **always recomputed**. The expensive
+uniform initialization is skipped at warm-started points; the
+zero-field multi-impurity map is still converged anew before any
+susceptibility is calculated. There is no reuse of previously
+computed V-dependent susceptibility or screening as final data.
+
+By default (`--scan-on-failure stop`), the sweep stops at the first
+incomplete ED/cluster/chi comparison, records partial outputs, and
+**never propagates an unconverged state**. With
+`--scan-on-failure continue`, modes with successfully converged
+zero-field states continue from their latest certified V; a mode that
+failed retains its earlier successful initializer and the gap is
+explicitly recorded. This option does not silently turn missing
+values into zero.
+
+Each target V has a separate directory, for example:
+`V_0/`, `V_0p5/`, and `V_5/`. Each contains the original
+`green_comparison.csv`, `chi_comparison.csv`, plots, and
+`baseline_cluster_<mode>_checkpoint.npz` files.
+The scan root additionally holds:
+
+- `scan_green_comparison.csv`, `scan_chi_comparison.csv`:
+  long-form results including V and a per-mode warm-start source V;
+- `scan_green_wide.csv`, `scan_chi_wide.csv`:
+  easy-to-import Origin tables with explicit success/failure status;
+- `scan_status.csv`, `scan_manifest.json`:
+  per-V/mode statuses and the scan's exact physical parameter signature;
+- `scan_green_error.png` and `scan_chi_<channel>.png`:
+  trends across V using only certified values.
+
+After an interrupted/incomplete scan, rerun the **same** scan with
+`--resume-scan`. It validates the physical configuration and loads
+only the consecutive previously **fully successful** V points,
+including their saved complex-bath checkpoints, then retries the first
+incomplete V without recomputing all preceding ED comparisons.
+You may adjust solver mixing or iteration caps when resuming,
+but physical inputs, bath size, source step and ED controls must match.
+
+A converged fixed point is not proof of thermodynamic stability.
+Across phase transitions, warm-started solutions can follow a
+metastable branch. To identify the stable CO/LC state, compare order
+parameters and (where available) appropriate free energies, not just
+the convergence residual. Large-V bath fit errors can also remain
+substantial even with a converged embedding iteration.
+
 ## Direct strong-V convergence controls (no V continuation)
 
 The direct comparison keeps the requested physical V fixed. Strong V
