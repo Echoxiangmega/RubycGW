@@ -92,6 +92,65 @@ def build_embedding_channels(interactions,ncell,mode,Vq=None):
     )
 
 
+
+def triangle_cluster_interactions(interactions, side=0):
+    """Physical three-bond density interaction within A (0) or B (1).
+
+    Both triangles have the same original V and no interaction between
+    them. The 3-orbital impurity uses local site indices 0,1,2.
+    """
+    side=int(side)
+    if side not in (0,1):
+        raise ValueError("triangle side must be 0 (A) or 1 (B)")
+    base=3*side
+    expected={(0,1),(0,2),(1,2)}
+    out=[]
+    for i,j,u in interactions:
+        i,j=int(i),int(j)
+        if base<=i<base+3 and base<=j<base+3:
+            out.append((i-base,j-base,float(u)))
+    keys={tuple(sorted((i,j))) for i,j,_ in out}
+    if len(out)!=3 or keys!=expected:
+        raise ValueError("triangle partition requires its three complete V bonds")
+    return tuple(out)
+
+
+def triangle_embedding_channel(M,side):
+    """Restrict a matched *six-site* local GW channel to one triangle.
+
+    The lattice channel and the physical 18-orbital Hamiltonian are NOT
+    modified. Only the local GW double counting uses the triangle's
+    bosonic vertices. For pseudospin/BJ, project the 6-site vertices and
+    associated coupling block instead of using an incompatible synthetic
+    3-site physical frame for triangle B.
+    """
+    if M.mode=="density":
+        return M
+    side=int(side)
+    if side not in (0,1):
+        raise ValueError("triangle side must be A=0 or B=1")
+    sl=slice(3*side,3*(side+1))
+    parent=M.cluster
+    selected=[
+        i for i,k in enumerate(parent.vertices)
+        if np.max(np.abs(k[sl,sl]),initial=0.)>1e-12
+    ]
+    expected=5 if M.mode=="pseudospin" else 6
+    if len(selected)!=expected:
+        raise RuntimeError(
+            f"local triangle {M.mode} has {len(selected)} bosonic channels, "
+            f"expected {expected}"
+        )
+    channel=ChannelDefinition(
+        mode=M.mode,
+        vertices=np.asarray(parent.vertices[selected,sl,sl],complex).copy(),
+        coupling=np.asarray(parent.coupling[np.ix_(selected,selected)],complex).copy(),
+        labels=tuple(parent.labels[i] for i in selected),
+        interaction_pairs=((0,1),(0,2),(1,2)),
+    )
+    return EmbeddingChannelDefinitions(M.mode,M.V,M.lattice,channel)
+
+
 def lattice_gw_map(G,rho,h0,Vq,grid,M,mu,*,static_reference=None):
     """Return (static, dynamic/rest, P, W) at one embedding iteration.
 
@@ -140,4 +199,5 @@ def cluster_gw_map(Gc,rhoc,interactions,grid,M,*,Vc=None):
 __all__=[
     "EmbeddingChannelDefinitions","build_embedding_channels",
     "lattice_gw_map","cluster_gw_map",
+    "triangle_cluster_interactions","triangle_embedding_channel",
 ]
