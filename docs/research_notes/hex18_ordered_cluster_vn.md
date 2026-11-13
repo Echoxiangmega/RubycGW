@@ -44,8 +44,11 @@ mixed CO/LC seed. These are a **set of trial self-energy patterns**, not
 pre-labelled exact phases. For more exhaustive testing include
 `--candidates` followed by names from
 `rubycgw.hex18_order.FAMILIES`, e.g.
-`co_qK_A1 co_qK_A2 lc_qK_same_sin lc_qK_opposite_sin bond_qK_c3
-bond_q0_c3 random_complex`, and multiple `--seed-amplitudes 0.04 0.12`.
+`co_qK_A1 co_qK_A2 co_qK_sin_A0 co_qK_odd_sin_A0
+lc_qK_same_sin lc_qK_opposite_sin bond_qK_c3 bond_q0_c3
+random_complex`, and multiple `--seed-amplitudes 0.04 0.12`.
+The independent finite-Q sine and cosine seeds allow different spatial
+phases within the three-cell torus, not merely different orbital directions.
 
 The hex18 ring3 bond geometry can be organized into C3/C6 bond classes
 as in the preceding hexagon HF study. The SD/ISD-like seeds here probe
