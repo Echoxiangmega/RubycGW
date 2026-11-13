@@ -488,7 +488,7 @@ def _scan_make_plots(out,chi_rows,green_rows,channels,modes):
                     pts.sort()
                     ax.plot([v for v,_ in pts],[y for _,y in pts],
                             marker="o",label=name)
-            ax.set(xlabel="V",ylabel=r"$\\chi(Q,0)$",title=f"{ch}, Q-fixed")
+            ax.set(xlabel="V",ylabel=r"$\chi(Q,0)$",title=f"{ch}, Q-fixed")
             ax.legend(fontsize=8)
             ax.grid(alpha=.2)
             fig.tight_layout()
@@ -507,7 +507,7 @@ def _scan_make_plots(out,chi_rows,green_rows,channels,modes):
                 pts.sort()
                 ax.plot([v for v,_ in pts],[y for _,y in pts],
                         marker="o",label=mode)
-        ax.set(xlabel="V",ylabel=r"Relative $G(K,i\\omega)$ Frobenius error")
+        ax.set(xlabel="V",ylabel=r"Relative $G(K,i\omega)$ Frobenius error")
         ax.legend(fontsize=8)
         ax.grid(alpha=.2)
         fig.tight_layout()
