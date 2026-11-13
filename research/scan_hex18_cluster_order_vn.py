@@ -74,12 +74,12 @@ def _json(value):
         return [_json(v) for v in value]
     if isinstance(value,np.ndarray):
         return _json(value.tolist())
+    if isinstance(value,(np.bool_,bool)):
+        return bool(value)
     if isinstance(value,(np.integer,int)):
         return int(value)
     if isinstance(value,(np.floating,float)):
         return float(value) if np.isfinite(value) else None
-    if isinstance(value,(np.bool_,bool)):
-        return bool(value)
     if isinstance(value,(complex,np.complexfloating)):
         return dict(real=float(value.real),imag=float(value.imag))
     return value
