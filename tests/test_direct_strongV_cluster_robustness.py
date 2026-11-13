@@ -6,6 +6,10 @@ do not claim that the genuinely strongly interacting V=5 fixed point exists.
 from __future__ import annotations
 
 from pathlib import Path
+import csv
+import json
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -153,3 +157,56 @@ def test_uniform_complex_bath_seed_checkpoint_resume_and_multicell_pulay(tmp_pat
     assert len(multi.screening_history)==multi.iterations
     assert multi.component_residual_history.shape[1]==3
     assert isinstance(multi.bath_diagnostics,list)
+
+
+def test_fierz_cli_direct_complex_uniform_and_baseline_checkpoint_resume(tmp_path):
+    """A checkpoint resumes the same interaction point without V continuation."""
+    root=Path(__file__).resolve().parents[1]
+    script=root/"research"/"compare_fierz_cluster_ed_gw.py"
+    common=[
+        sys.executable,str(script),
+        "--V","0","--n",str(2/3),"--T",".4",
+        "--K","0","0","--Q","0","0",
+        "--modes","density","--channels","z_same",
+        "--nw","3","--nomega","1","--nbath","1",
+        "--bath-fit-nfreq","2","--bath-max-nfev","45",
+        "--bath-fit-restarts","0",
+        "--uniform-bath","complex",
+        "--uniform-mixing-method","pulay",
+        "--baseline-mixing-method","pulay",
+        "--uniform-max-iter","8","--uniform-tol","1e-4",
+        "--baseline-max-iter","8","--baseline-tol","1e-4",
+        "--ed-sector-padding","1","--ed-thermal-eigs","1",
+        "--ed-krylov-steps","10","--tau-points","9",
+        "--checkpoint-every","2","--skip-chi",
+        "--out",str(tmp_path),
+    ]
+    first=subprocess.run(common,capture_output=True,text=True,timeout=180)
+    assert first.returncode==0,first.stdout+"\n"+first.stderr
+    uniform=tmp_path/"uniform_cluster_density_checkpoint.npz"
+    baseline=tmp_path/"baseline_cluster_density_checkpoint.npz"
+    assert uniform.is_file(),first.stdout
+    assert baseline.is_file(),first.stdout
+    data=json.loads((tmp_path/"diagnostics.json").read_text())
+    assert data["stages"]["density_uniform"]["status"]=="ok",first.stdout
+    assert data["stages"]["density_zero_field"]["status"]=="ok",first.stdout
+    assert data["methods"]["density"]["uniform_diagnostics"]["bath_mode"]=="complex"
+
+    second=subprocess.run(
+        common+["--resume-baseline"],capture_output=True,text=True,timeout=180
+    )
+    assert second.returncode==0,second.stdout+"\n"+second.stderr
+    data=json.loads((tmp_path/"diagnostics.json").read_text())
+    assert "density_uniform" not in data["stages"]
+    assert data["stages"]["density_zero_field"]["status"]=="ok"
+    with (tmp_path/"green_comparison.csv").open(newline="",encoding="utf-8") as f:
+        rows=list(csv.DictReader(f))
+    assert any(x["method"]=="cluster-density" and x["status"]=="converged"
+               for x in rows)
+
+    third=subprocess.run(
+        common+["--resume-uniform"],capture_output=True,text=True,timeout=180
+    )
+    assert third.returncode==0,third.stdout+"\n"+third.stderr
+    data=json.loads((tmp_path/"diagnostics.json").read_text())
+    assert data["stages"]["density_uniform"]["status"]=="ok",third.stdout
