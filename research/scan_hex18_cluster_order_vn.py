@@ -731,6 +731,14 @@ def run(a):
                             obs=order_observables(
                                 rho,geom,params,threshold=a.order_threshold
                             )
+                            occupations=np.asarray(obs["density"],float).reshape(
+                                geom.ncell,2,3
+                            ).sum(axis=-1)
+                            total_filling=float(occupations.sum())
+                            row["N_lattice"]=total_filling
+                            row["filling_error"]=total_filling-target
+                            row["triangle_A_occupations"]=occupations[:,0].tolist()
+                            row["triangle_B_occupations"]=occupations[:,1].tolist()
                             Gk=project_k_green(result.G,geom,K)
                             # Nonzero at finite-Q order: the off-diagonal
                             # primitive momentum Green block K -> K+Q.
@@ -800,6 +808,9 @@ def run(a):
                             np.savez_compressed(
                                 point_dir/f"{mode}__{key}_orders.npz",
                                 rho=rho,density=obs["density"],
+                                triangle_occupations=occupations,
+                                total_particles=total_filling,
+                                target_particles=target,
                                 bond_i=[x["i"] for x in obs["bond_rows"]],
                                 bond_j=[x["j"] for x in obs["bond_rows"]],
                                 bond_current=[x["current"] for x in obs["bond_rows"]],
@@ -860,7 +871,9 @@ BRANCH_COLS=[
     "status","phase_family","dominant_channel","dominant_amplitude",
     "co_amplitude","lc_amplitude","bond_anisotropy","density_range",
     "g_error","g_low_error","G_K_KplusQ_norm",
-    "mu","F_per_pc","free_energy_reliable",
+    "mu","N_lattice","filling_error",
+    "triangle_A_occupations","triangle_B_occupations",
+    "F_per_pc","free_energy_reliable",
     "final_error","bath_fit_max","gimp_gc_max","iterations","seconds",
     "warm_source","warm_from_V","warm_from_n","ed_status","error",
 ]
