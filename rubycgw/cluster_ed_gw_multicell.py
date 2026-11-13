@@ -64,6 +64,15 @@ class MultiCellEDGWOptions:
     mu_max_iter: int = 80
     verbose: bool = True
     gw_mode: str = "density"
+    mixing_method: str = "linear"
+    pulay_history: int = 6
+    pulay_start: int = 3
+    pulay_regularization: float = 1e-7
+    pulay_step_cap: float = 2.0
+    pulay_reset_growth: float = 2.0
+    bath_fit_restarts: int = 0
+    bath_retry_error: float = 0.03
+    screening_monitor: bool = False
 
 
 @dataclass
@@ -103,6 +112,11 @@ class MultiCellEDGWResult:
     elapsed_history: np.ndarray
     timing_seconds: dict[str, float] | None = None
     gw_mode: str = "density"
+    component_residual_history: np.ndarray | None = None
+    bath_diagnostics: list | None = None
+    screening_history: list | None = None
+    pulay_fallbacks: int = 0
+    pulay_resets: int = 0
 
 
 def _maxabs(a):
@@ -184,10 +198,16 @@ def solve_multicell_cluster_ed_gw(
     target_particles: float,
     opts: MultiCellEDGWOptions = MultiCellEDGWOptions(),
     restart: MultiCellRestart | None = None,
+    checkpoint_callback=None,checkpoint_every: int = 5,
 ):
     """Solve the finite-torus multi-impurity ED+GW fixed point."""
+    from .cluster_convergence import (
+        CoupledSelfEnergyMixer,screening_diagnostic,fit_bath_with_restarts
+    )
     h0 = np.asarray(h0, dtype=complex)
     Vq = np.asarray(Vq, dtype=complex)
+    if int(checkpoint_every)<1:
+        raise ValueError("checkpoint_every must be >=1")
     if grid.nk1 != 1 or grid.nk2 != 1:
         raise ValueError("multi-cell folded solver expects a one-point reduced BZ")
     norb = int(h0.shape[-1])
@@ -274,6 +294,14 @@ def solve_multicell_cluster_ed_gw(
         ]
 
     Vc = _cluster_matrix(cluster_interactions)
+    mixer=CoupledSelfEnergyMixer(
+        method=str(opts.mixing_method),alpha=float(opts.mixing),
+        history=int(opts.pulay_history),start=int(opts.pulay_start),
+        regularization=float(opts.pulay_regularization),
+        step_cap=float(opts.pulay_step_cap),
+        reset_growth=float(opts.pulay_reset_growth),
+        impurity_weight=float(np.sqrt(ncell)),
+    )
     fitter = fit_finite_bath_complex if bool(opts.complex_bath) else fit_finite_bath
     eye6 = np.eye(NSUB, dtype=complex)
 
@@ -285,6 +313,9 @@ def solve_multicell_cluster_ed_gw(
     converged = False
     err = np.inf
     residual_history = []
+    component_history=[]
+    bath_diagnostics=[]
+    screening_history=[]
     elapsed_history = []
     P = np.zeros((grid.nb, 1, 1, norb, norb), dtype=complex)
     W = np.zeros_like(P)
@@ -304,6 +335,8 @@ def solve_multicell_cluster_ed_gw(
             G,rho,h0,Vq,grid,channel,mu,
             static_reference=sigma_h
         )
+        if opts.screening_monitor:
+            screening_history.append(screening_diagnostic(P,Vq,channel,grid))
         sigma_emb_out = np.asarray(sigma_gw_lattice, dtype=complex).copy()
         time_lattice += perf_counter()-t0
 
@@ -329,21 +362,26 @@ def solve_multicell_cluster_ed_gw(
             static_shift_all[c] = static_shift
             himp_corr = hloc + static_shift
             t_fit=perf_counter()
-            bath = fitter(
-                delta,
-                grid.omega,
-                mu,
+            bath,attempts=fit_bath_with_restarts(
+                fitter,delta,grid.omega,mu,
                 nbath=int(opts.nbath),
                 nfit=int(opts.bath_fit_nfreq),
                 max_nfev=int(opts.bath_fit_max_nfev),
                 energy_window=float(opts.bath_energy_window),
                 coupling_bound=float(opts.bath_coupling_bound),
                 xtol=float(opts.bath_fit_xtol),
-                initial=baths[c],
-                metric="delta",
-                one_body=himp_corr,
+                initial=baths[c],metric="delta",one_body=himp_corr,
+                restarts=int(opts.bath_fit_restarts),
+                retry_error=float(opts.bath_retry_error),
+                seed=1777+it*137+c
             )
             time_bath+=perf_counter()-t_fit
+            bath_diagnostics.append(dict(
+                iteration=int(it),cell=int(c),success=bool(bath.success),
+                active_bounds=bool(bath.active_bounds),nfev=int(bath.nfev),
+                attempts=int(attempts),fit_error=float(bath.fit_error),
+                message=str(bath.fit_message)
+            ))
             baths[c] = bath
             bath_error_all[c] = float(bath.fit_error)
 
@@ -380,19 +418,21 @@ def solve_multicell_cluster_ed_gw(
             mismatch_all[c] = _relative_error(Gimp, Gc)
             sigma_emb_out[:, 0, 0, sl, sl] += sigma_ed - sigma_cgw
 
-        err = max(
-            _maxabs(sigma_h_out - sigma_h),
-            _maxabs(sigma_emb_out - sigma_emb),
-            _maxabs(sigma_ed_all - sigma_imp),
-        )
+        res_h=_maxabs(sigma_h_out - sigma_h)
+        res_emb=_maxabs(sigma_emb_out - sigma_emb)
+        res_imp=_maxabs(sigma_ed_all - sigma_imp)
+        err=max(res_h,res_emb,res_imp)
         residual_history.append(float(err))
+        component_history.append((res_h,res_emb,res_imp))
         elapsed_history.append(float(perf_counter() - t0))
         if opts.verbose:
             print(
-                f"[multi-ED+GW] it={it:03d}, residual={err:.3e}, "
+                f"[multi-ED+GW] it={it:03d}, residual={err:.3e} "
+                f"(H={res_h:.3e}, emb={res_emb:.3e}, imp={res_imp:.3e}), "
                 f"max Gimp/Gc={np.max(mismatch_all):.3e}, "
-                f"max bath={np.max(bath_error_all):.3e}, mu={mu:+.9f}, "
-                f"dt={elapsed_history[-1]:.1f}s",
+                f"max bath={np.max(bath_error_all):.3e}, "
+                f"fit_ok={all(d['success'] for d in bath_diagnostics[-ncell:])}, "
+                f"mu={mu:+.9f}, dt={elapsed_history[-1]:.1f}s",
                 flush=True,
             )
         if err < float(opts.tol):
@@ -412,12 +452,21 @@ def solve_multicell_cluster_ed_gw(
                 int(opts.mu_max_iter),
             )
             time_dyson+=perf_counter()-t_dyson
+            if checkpoint_callback is not None:
+                checkpoint_callback(it,MultiCellRestart(
+                    Sigma_H=np.asarray(sigma_h).copy(),
+                    Sigma_emb=np.asarray(sigma_emb).copy(),
+                    Sigma_imp=np.asarray(sigma_imp).copy(),
+                    G=np.asarray(G).copy(),mu=float(mu),
+                    bath_energies=np.stack([b.energies for b in baths]),
+                    bath_couplings=np.stack([b.couplings for b in baths])
+                ))
             break
 
-        a = float(opts.mixing)
-        sigma_h = sigma_h + a * (sigma_h_out - sigma_h)
-        sigma_emb = sigma_emb + a * (sigma_emb_out - sigma_emb)
-        sigma_imp = sigma_imp + a * (sigma_ed_all - sigma_imp)
+        sigma_h,sigma_emb,sigma_imp=mixer.propose(
+            sigma_h,sigma_emb,sigma_imp,
+            sigma_h_out,sigma_emb_out,sigma_ed_all,it
+        )
         t_dyson=perf_counter()
         mu, G, _, _ = _solve_mu_matrix_fast(
             h0,
@@ -430,6 +479,16 @@ def solve_multicell_cluster_ed_gw(
             int(opts.mu_max_iter),
         )
         time_dyson+=perf_counter()-t_dyson
+        if checkpoint_callback is not None and (
+                it%int(checkpoint_every)==0 or it==int(opts.max_iter)):
+            checkpoint_callback(it,MultiCellRestart(
+                Sigma_H=np.asarray(sigma_h).copy(),
+                Sigma_emb=np.asarray(sigma_emb).copy(),
+                Sigma_imp=np.asarray(sigma_imp).copy(),
+                G=np.asarray(G).copy(),mu=float(mu),
+                bath_energies=np.stack([b.energies for b in baths]),
+                bath_couplings=np.stack([b.couplings for b in baths])
+            ))
 
     t_final_lattice=perf_counter()
     # Rebuild lattice quantities on exactly the returned Dyson state.  This is
@@ -488,6 +547,11 @@ def solve_multicell_cluster_ed_gw(
             "total":float(total_wall),
         },
         gw_mode=channel.mode,
+        component_residual_history=np.asarray(component_history),
+        bath_diagnostics=bath_diagnostics,
+        screening_history=screening_history,
+        pulay_fallbacks=int(mixer.fallbacks),
+        pulay_resets=int(mixer.resets),
     )
 
 
