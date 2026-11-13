@@ -553,23 +553,72 @@ def main(argv=None):
             save()
             continue
 
+        uniform_path=_checkpoint_path(out,mode,"uniform")
+        baseline_path=_checkpoint_path(out,mode,"baseline")
+        uniform_sig=_checkpoint_signature(a,mode,"uniform")
+        baseline_sig=_checkpoint_signature(a,mode,"baseline")
+        baseline_restart=(
+            _load_checkpoint(
+                baseline_path,baseline_sig,stage="baseline",
+                grid=grid,nsites=geom.nsites,nbath=a.nbath
+            ) if a.resume_baseline else None
+        )
+        uniform_restart=(
+            _load_checkpoint(
+                uniform_path,uniform_sig,stage="uniform",
+                grid=grid,nsites=geom.nsites,nbath=a.nbath
+            ) if a.resume_uniform else None
+        )
         def uniform():
             sol=uniform_primitive_cluster_ed_gw(
                 geom,grid,seed,nbath=a.nbath,
                 max_iter=a.uniform_max_iter,tol=a.uniform_tol,
                 mixing=a.uniform_mixing,
+                mixing_method=a.uniform_mixing_method,
+                pulay_history=a.pulay_history,pulay_start=a.pulay_start,
+                pulay_step_cap=a.pulay_step_cap,
+                pulay_reset_growth=a.pulay_reset_growth,
+                bath_complex=(a.uniform_bath=="complex"),
+                bath_energy_window=a.bath_energy_window,
+                bath_coupling_bound=a.bath_coupling_bound,
+                bath_fit_restarts=a.bath_fit_restarts,
+                bath_retry_error=a.bath_retry_error,
+                initial_channel=a.uniform_seed_channel,
+                initial_amplitude=a.uniform_seed_amplitude,
                 bath_nfit=a.bath_fit_nfreq,
                 bath_max_nfev=a.bath_max_nfev,
                 target_particles=target,gw_mode=mode,
+                restart=uniform_restart,
+                screening_monitor=a.screening_monitor,
+                checkpoint_every=a.checkpoint_every,
+                checkpoint_callback=lambda it,state:_save_checkpoint(
+                    uniform_path,uniform_sig,state,it,stage="uniform"
+                ),
                 verbose=a.verbose
+            )
+            diag["methods"].setdefault(mode,{})["uniform_diagnostics"]=dict(
+                residual_history=sol.residual_history,
+                component_residual_history=sol.component_residual_history,
+                bath_history=sol.bath_history,
+                bath_diagnostics=sol.bath_diagnostics,
+                screening_history=sol.screening_history,
+                pulay_fallbacks=sol.pulay_fallbacks,
+                pulay_resets=sol.pulay_resets,
+                bath_mode=sol.bath_mode,iterations=sol.iterations,
+                residual=sol.final_error,
+                checkpoint=str(uniform_path),
             )
             if not sol.converged:
                 raise RuntimeError(
-                    f"uniform cluster {mode} not converged: {sol.final_error:.3e}"
+                    f"uniform cluster {mode} not converged: {sol.final_error:.3e}; "
+                    f"restart from {uniform_path} with --resume-uniform"
                 )
             return sol
-        zero_uniform=record_stage(mode+"_uniform",uniform)
-        if zero_uniform is None:
+        zero_uniform=(
+            None if baseline_restart is not None
+            else record_stage(mode+"_uniform",uniform)
+        )
+        if zero_uniform is None and baseline_restart is None:
             green_rows.append(dict(method="cluster-"+mode,status="uniform-failed"))
             if not a.skip_chi:
                 chi_rows.extend(dict(method="cluster-"+mode,channel=ch,
@@ -580,20 +629,43 @@ def main(argv=None):
             opts=MultiCellEDGWOptions(
                 max_iter=a.baseline_max_iter,tol=a.baseline_tol,
                 mixing=a.baseline_mixing,nbath=a.nbath,
+                mixing_method=a.baseline_mixing_method,
+                pulay_history=a.pulay_history,pulay_start=a.pulay_start,
+                pulay_step_cap=a.pulay_step_cap,
+                pulay_reset_growth=a.pulay_reset_growth,
+                bath_fit_restarts=a.bath_fit_restarts,
+                bath_retry_error=a.bath_retry_error,
+                bath_energy_window=a.bath_energy_window,
+                bath_coupling_bound=a.bath_coupling_bound,
                 bath_fit_nfreq=a.bath_fit_nfreq,
                 bath_fit_max_nfev=a.bath_max_nfev,
+                screening_monitor=a.screening_monitor,
                 complex_bath=True,verbose=a.verbose,gw_mode=mode
             )
             result=solve_multicell_cluster_ed_gw(
                 geom.h0,geom.vq,ints,grid,
                 target_particles=target,opts=opts,
-                restart=restart_from_uniform_cluster(
-                    zero_uniform,geom.ncell
-                )
+                restart=(baseline_restart if baseline_restart is not None else
+                         restart_from_uniform_cluster(zero_uniform,geom.ncell)),
+                checkpoint_every=a.checkpoint_every,
+                checkpoint_callback=lambda it,state:_save_checkpoint(
+                    baseline_path,baseline_sig,state,it,stage="baseline"
+                ),
+            )
+            diag["methods"].setdefault(mode,{})["baseline_diagnostics"]=dict(
+                residual_history=result.residual_history,
+                component_residual_history=result.component_residual_history,
+                bath_diagnostics=result.bath_diagnostics,
+                screening_history=result.screening_history,
+                pulay_fallbacks=result.pulay_fallbacks,
+                pulay_resets=result.pulay_resets,
+                iterations=result.iterations,residual=result.final_error,
+                checkpoint=str(baseline_path),
             )
             if not result.converged:
                 raise RuntimeError(
-                    f"zero-field complex-bath {mode} residual={result.final_error:.3e}"
+                    f"zero-field complex-bath {mode} residual={result.final_error:.3e}; "
+                    f"restart from {baseline_path} with --resume-baseline"
                 )
             return result
         base=record_stage(mode+"_zero_field",baseline)
@@ -608,7 +680,8 @@ def main(argv=None):
         group=diag["methods"].setdefault(mode,{})
         group.update(dict(
             zero_field_residual=base.final_error,
-            uniform_residual=zero_uniform.final_error,
+            uniform_residual=(zero_uniform.final_error
+                              if zero_uniform is not None else None),
             bath_fit_error=base.bath_fit_error,
             impurity_mismatch=base.impurity_mismatch,
             gw_mode=base.gw_mode,
@@ -636,7 +709,7 @@ def main(argv=None):
             bath_fit_max=float(np.max(base.bath_fit_error)),
             impurity_mismatch_max=float(np.max(base.impurity_mismatch)),
             seconds=diag["stages"][mode+"_initial"]["seconds"]+
-                    diag["stages"][mode+"_uniform"]["seconds"]+
+                    diag["stages"].get(mode+"_uniform",{}).get("seconds",0.)+
                     diag["stages"][mode+"_zero_field"]["seconds"]
         ))
         save()
@@ -668,6 +741,14 @@ def main(argv=None):
             source_opts=MultiCellEDGWOptions(
                 max_iter=a.source_max_iter,tol=a.source_tol,
                 mixing=a.source_mixing,nbath=a.nbath,
+                mixing_method=a.source_mixing_method,
+                pulay_history=a.pulay_history,pulay_start=a.pulay_start,
+                pulay_step_cap=a.pulay_step_cap,
+                pulay_reset_growth=a.pulay_reset_growth,
+                bath_fit_restarts=a.bath_fit_restarts,
+                bath_retry_error=a.bath_retry_error,
+                bath_energy_window=a.bath_energy_window,
+                bath_coupling_bound=a.bath_coupling_bound,
                 bath_fit_nfreq=a.bath_fit_nfreq,
                 bath_fit_max_nfev=a.bath_max_nfev,
                 complex_bath=True,verbose=a.verbose,gw_mode=mode
