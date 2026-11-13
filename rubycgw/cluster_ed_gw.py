@@ -56,6 +56,9 @@ class BathParameters:
     couplings: np.ndarray
     fit_error: float
     nfev: int
+    success: bool = True
+    active_bounds: bool = False
+    fit_message: str = ""
 
 
 @dataclass(frozen=True)
@@ -381,7 +384,15 @@ def fit_finite_bath(
     else:
         den = max(float(np.linalg.norm(dfit.ravel())), 1e-300)
         err = float(np.linalg.norm((fit - dfit).ravel()) / den)
-    return BathParameters(eps, bath_hyb, err, int(opt.nfev))
+    at_bound=bool(np.any(
+        np.isclose(opt.x,lower,rtol=0.,atol=1e-6) |
+        np.isclose(opt.x,upper,rtol=0.,atol=1e-6)
+    ))
+    return BathParameters(
+        eps,bath_hyb,err,int(opt.nfev),
+        success=bool(opt.success),active_bounds=at_bound,
+        fit_message=str(opt.message)
+    )
 
 
 def split_static_hybridization(
