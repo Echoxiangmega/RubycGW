@@ -22,10 +22,13 @@ it remains available as an optional cross-check.
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
+import math
 import sys
 import time
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import SimpleNamespace
 from concurrent.futures import ProcessPoolExecutor
@@ -66,7 +69,18 @@ def parse_args(argv=None):
     p=argparse.ArgumentParser(
         description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--V",type=float,required=True)
+    p.add_argument("--V",type=float,default=None,
+                   help="single interaction strength (old single-point mode)")
+    p.add_argument("--V-scan",nargs="+",type=float,default=None,metavar="V",
+                   help="explicit ordered V values; each point warm-starts from the previous converged point")
+    p.add_argument("--V-start",type=float,default=None)
+    p.add_argument("--V-stop",type=float,default=None)
+    p.add_argument("--V-step",type=float,default=None,
+                   help="inclusive arithmetic V grid with --V-start/--V-stop")
+    p.add_argument("--scan-on-failure",choices=("stop","continue"),default="stop",
+                   help="stop at first incomplete V (default), or continue from last certified per-mode solution")
+    p.add_argument("--resume-scan",action="store_true",
+                   help="reuse completed V point results/checkpoints from --out; retry the first incomplete point")
     p.add_argument("--n","--filling",dest="filling",type=float,required=True)
     p.add_argument("--T",type=float,default=.125)
     p.add_argument("--t",type=float,default=1.)
@@ -212,10 +226,13 @@ def _fierz_seed(gw,mode,geom,grid,target):
 
 
 def _multi_restart(x):
+    """Copy a certified multicell result/restart without sharing mutable baths."""
+    impurity=(x.Sigma_imp if isinstance(x,MultiCellRestart)
+              else x.Sigma_ED_cluster)
     return MultiCellRestart(
         Sigma_H=np.asarray(x.Sigma_H,complex).copy(),
         Sigma_emb=np.asarray(x.Sigma_emb,complex).copy(),
-        Sigma_imp=np.asarray(x.Sigma_ED_cluster,complex).copy(),
+        Sigma_imp=np.asarray(impurity,complex).copy(),
         G=np.asarray(x.G,complex).copy(),mu=float(x.mu),
         bath_energies=np.asarray(x.bath_energies,float).copy(),
         bath_couplings=np.asarray(x.bath_couplings,complex).copy()
@@ -341,8 +358,20 @@ def _sources(geom,grid,interactions,restart,opts,target,K,h,workers):
     )
 
 
-def main(argv=None):
-    a=parse_args(argv)
+def main(argv=None, *, warm_states=None, warm_sources=None,
+         return_scan_state=False):
+    a=(argv if isinstance(argv,argparse.Namespace) else parse_args(argv))
+    scan_values=_requested_scan_values(a)
+    if scan_values is not None:
+        if warm_states is not None or return_scan_state:
+            raise ValueError("nested V scans are not supported")
+        if a.resume_uniform or a.resume_baseline:
+            raise ValueError("use --resume-scan, not per-point --resume-uniform/--resume-baseline, for V scans")
+        return run_v_scan(a,scan_values)
+    if a.V is None or not math.isfinite(float(a.V)):
+        raise ValueError("single-point runs require a finite --V")
+    warm_states={} if warm_states is None else dict(warm_states)
+    warm_sources={} if warm_sources is None else dict(warm_sources)
     if not 0<a.filling<6:
         raise ValueError("filling must be between 0 and 6 spinless fermions per primitive cell")
     if a.nbath<1:
@@ -384,6 +413,10 @@ def main(argv=None):
         "baseline_mixing_method":a.baseline_mixing_method,
         "screening_monitor":bool(a.screening_monitor),
         "checkpoint_every":int(a.checkpoint_every),
+        "continuation":dict(
+            mode="scan-warm-start" if warm_states else "single-point",
+            input_sources={str(k):float(v) for k,v in warm_sources.items()},
+        ),
         "note":"The ED impurity is always the original six intra-triangle density interactions; only the matched lattice-GW and cluster-GW subtraction vary.",
         "stages":{},"errors":{},"methods":{}
     }
@@ -520,6 +553,24 @@ def main(argv=None):
     for mode in modes:
         print(f"[fierz-cluster] start {mode}: V={a.V:g}, n={a.filling:g}, nbath={a.nbath}",flush=True)
         build_embedding_channels(ints,geom.ncell,mode,geom.vq)
+        warm=warm_states.get(mode)
+        if warm is not None:
+            if (not bool(getattr(warm,"converged",True)) or
+                    str(getattr(warm,"gw_mode",mode))!=mode):
+                raise ValueError(
+                    f"refusing a nonconverged or wrong-Fierz warm seed for {mode}"
+                )
+            from_v=warm_sources.get(mode)
+            diag["methods"].setdefault(mode,{})["warm_start"]=dict(
+                used=True,source_V=float(from_v) if from_v is not None else None,
+                source_stage="converged-multicell-zero-field",
+                destination_V=float(a.V),
+                new_V_screening_recomputed=True,
+            )
+            print(
+                f"[fierz-cluster] {mode}: warm-start V={from_v} -> {a.V:g} "
+                "(rebuilding lattice/cluster GW at target V)",flush=True
+            )
         def initial():
             if a.initial_state=="free":
                 return noninteracting_cluster_seed(geom,grid,target)
@@ -542,8 +593,9 @@ def main(argv=None):
                 iterations=gw.iterations
             )
             return _fierz_seed(gw,mode,geom,grid,target)
-        seed=record_stage(mode+"_initial",initial)
-        if seed is None:
+        seed=(None if warm is not None else
+              record_stage(mode+"_initial",initial))
+        if seed is None and warm is None:
             mode_results[mode]=None
             green_rows.append(dict(method="cluster-"+mode,status="initial-failed"))
             for ch in channels:
@@ -558,10 +610,12 @@ def main(argv=None):
         uniform_sig=_checkpoint_signature(a,mode,"uniform")
         baseline_sig=_checkpoint_signature(a,mode,"baseline")
         baseline_restart=(
-            _load_checkpoint(
-                baseline_path,baseline_sig,stage="baseline",
-                grid=grid,nsites=geom.nsites,nbath=a.nbath
-            ) if a.resume_baseline else None
+            _multi_restart(warm) if warm is not None else (
+                _load_checkpoint(
+                    baseline_path,baseline_sig,stage="baseline",
+                    grid=grid,nsites=geom.nsites,nbath=a.nbath
+                ) if a.resume_baseline else None
+            )
         )
         uniform_restart=(
             _load_checkpoint(
@@ -682,6 +736,7 @@ def main(argv=None):
             zero_field_residual=base.final_error,
             uniform_residual=(zero_uniform.final_error
                               if zero_uniform is not None else None),
+            warm_start_from_V=warm_sources.get(mode) if warm is not None else None,
             bath_fit_error=base.bath_fit_error,
             impurity_mismatch=base.impurity_mismatch,
             gw_mode=base.gw_mode,
@@ -708,7 +763,7 @@ def main(argv=None):
             zero_field_residual=float(base.final_error),
             bath_fit_max=float(np.max(base.bath_fit_error)),
             impurity_mismatch_max=float(np.max(base.impurity_mismatch)),
-            seconds=diag["stages"][mode+"_initial"]["seconds"]+
+            seconds=diag["stages"].get(mode+"_initial",{}).get("seconds",0.)+
                     diag["stages"].get(mode+"_uniform",{}).get("seconds",0.)+
                     diag["stages"][mode+"_zero_field"]["seconds"]
         ))
@@ -881,6 +936,12 @@ def main(argv=None):
         print(f"[fierz-cluster] plot failed: {exc}",flush=True)
     print(f"[fierz-cluster] results: {out/'green_comparison.csv'}, "
           f"{out/'chi_comparison.csv'}",flush=True)
+    if return_scan_state:
+        return dict(
+            diagnostics=diag,states=mode_results,
+            green_rows=green_rows,chi_rows=chi_rows,
+            output=str(out),
+        )
     return diag
 
 
