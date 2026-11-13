@@ -319,6 +319,7 @@ def _fresh_bootstrap(geom,params,grid,target,mode,a):
     from rubycgw.fierz_cluster_embedding import (
         triangle_cluster_interactions,triangle_embedding_channel,
     )
+    from rubycgw.cluster_ed_gw import cluster_interaction_matrix
     cluster_size=3 if a.cluster_partition=="triangle3" else 6
     nimp=geom.nsites//cluster_size
     rho=one_body_density_matrix_tail(
@@ -337,7 +338,8 @@ def _fresh_bootstrap(geom,params,grid,target,mode,a):
                    triangle_embedding_channel(defs,cell%2))
         sc,_,_=cluster_gw_map(
             bg.G[:,0,0,sl,sl],rho[0,0,sl,sl],
-            terms,grid,local_def
+            terms,grid,local_def,
+            Vc=cluster_interaction_matrix(terms,cluster_size)
         )
         sigma_imp.append(sc)
     energies=np.linspace(-a.bath_energy_window/2,
