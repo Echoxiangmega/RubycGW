@@ -190,7 +190,7 @@ def _draw_density(ax,torus,mapping,density,edges,*,annotate=False):
                         color="black",zorder=7)
     ax.set_title("A  Site density",fontsize=12,weight="semibold")
     ax.figure.colorbar(img,ax=ax,orientation="horizontal",
-                       shrink=.8,pad=.04,label=r"$n_i-\overline n$")
+                       shrink=.8,pad=.04,label=r"$n_i-\overline{n}$")
 
 
 def _draw_bonds(ax,torus,edges,*,reference="kind-mean",annotate=False):
