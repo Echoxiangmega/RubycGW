@@ -117,8 +117,10 @@ numerically at representative interacting points.
 ## Sweeping V with converged Fierz-specific warm starts
 
 The comparison driver now supports ordered multi-V runs. Each requested
-V point computes its own exact 18-site ED Green function and, unless
-`--skip-chi` is set, the ED static susceptibility; it also solves every
+V point computes its own 18-site ED Green reference (using the
+existing finite-temperature Lanczos approximation) and, unless
+`--skip-chi` is set, the ED thermal susceptibility (using the
+existing stochastic thermal trace); it also solves every
 requested cluster embedding mode with fresh interactions and compares
 its zero-field Green function and static susceptibility against ED.
 
