@@ -448,9 +448,13 @@ def _classify_winner(rows,mode,free_energy_tol):
     distinct=[]
     for row in eligible:
         if any(
-            row.get("rho") is not None and old.get("rho") is not None and
-            float(np.linalg.norm(row["rho"]-old["rho"]))<1e-4 and
-            float(abs(row["F_per_pc"]-old["F_per_pc"]))<1e-5
+            row.get("order_signature") is not None and
+            old.get("order_signature") is not None and
+            float(np.linalg.norm(
+                np.asarray(row["order_signature"],float)-
+                np.asarray(old["order_signature"],float)
+            ))<1e-3 and
+            float(abs(row["F_per_pc"]-old["F_per_pc"]))<1e-4
             for old in distinct
         ):
             continue
@@ -558,6 +562,15 @@ def run(a):
                     if cached_state is not None:
                         row=json.loads(rowfile.read_text(encoding="utf-8"))
                         row["status"]="converged"
+                        # ED may have failed in an earlier interrupted run.
+                        # A newly computed ED reference must refresh G errors.
+                        with np.load(statefile,allow_pickle=False) as state:
+                            stored_Gk=np.asarray(state["Gk"],complex)
+                        row.update(_green_errors(
+                            stored_Gk,Gref,grid.omega
+                        ))
+                        row["ed_status"]=ed_status
+                        _save_json(rowfile,row)
                         cache[(ni,vi,mode,key)]=cached_state
                         branch_rows.append(row)
                         per_point.append(row)
@@ -662,6 +675,13 @@ def run(a):
                             Gk=project_k_green(result.G,geom,K)
                             errors=_green_errors(Gk,Gref,grid.omega)
                             row.update(errors)
+                            # Duplicate seeds may converge to the same ordered
+                            # endpoint; compare normal density matrices, not
+                            # their seed names, when ranking free-energy minima.
+                            upper=rho[np.triu_indices(geom.nsites)]
+                            row["order_signature"]=np.round(
+                                np.concatenate((upper.real,upper.imag)),5
+                            ).tolist()
                             row.update(dict(
                                 status="converged",
                                 phase_family=obs["phase_family"],
