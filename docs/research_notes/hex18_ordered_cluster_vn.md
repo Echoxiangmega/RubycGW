@@ -56,6 +56,81 @@ real-bond modulation on the **actual Ruby hopping graph**. They are not
 automatically equivalent to kagome SD/ISD states. The script reports
 actual real-space bond observables so the distinction can be checked.
 
+## Real-space density, bond and current visualization
+
+The plotter `research/plot_hex18_cluster_order.py` consumes the
+`*_orders.npz` files saved by this scan **without any new ED or GW
+calculations**. It produces a single, matched three-panel figure:
+site densities `n_i - mean(n)`, real-bond order, and oriented physical
+bond currents on the true six-triangle hexagon.
+
+Its site permutation is the *exact* equivalence verified in
+`research/verify_hex18_equivalence.py`, so it uses the same Hamiltonian
+as the native hex18 solver while showing the original hexagonal drawing.
+All 36 physical hoppings are represented; the six wrapped bonds are
+shown as dashed periodic-image links. Arrows follow the signs of the
+stored bond currents, including the hopping amplitude convention.
+The default real-bond panel subtracts the mean within each hopping
+type `t`, `t1`, and `t2`, exposing symmetry-breaking modulation
+rather than a uniform kinetic background.
+
+For one converged candidate, from the repository root:
+
+```powershell
+python research/plot_hex18_cluster_order.py `
+  --orders results/hex18_ordered_vn/n_2p2/V_1/density__symmetric_orders.npz `
+  --formats png svg --annotate
+```
+
+For all converged branches in an existing scan, or just the reliably
+selected minimum-F branch at each point:
+
+```powershell
+python research/plot_hex18_cluster_order.py `
+  --scan-root results/hex18_ordered_vn `
+  --selection converged --modes density --V 1 --fillings 2.2
+```
+
+Use `--selection winners` only for points with reliable phase
+ranking in `phase_summary.csv`. Unresolved points have no selected
+winner. Optional `--bond-reference zero` displays the raw real
+bond expectation without subtracting each hopping type's mean.
+
+To produce three-panel images automatically after each *converged*
+candidate in a new scan, add to the scan command:
+
+```powershell
+--plot-branches --plot-formats png svg
+```
+
+Plots are saved beside each candidate's NPZ result as
+`<mode>__<candidate>_orders_realspace.png` (and `.svg` when requested).
+Failed/unconverged branches do not produce misleading state plots.
+The plotter and the automatic scan hook share the same implementation.
+
+## What --K and --modes mean
+
+`--K K1 K2` selects the **primitive momentum at which the already
+converged 18-site Green function is projected to a 6x6 matrix** for
+comparison with the thermal Lanczos ED reference. The default is
+`K=(1/3,1/3)`; `K=(0,0)` is also allowed. It is *not* a
+symmetry-breaking wave vector and does not constrain the ordered state.
+The output additionally contains the off-diagonal momentum mixing
+`G(K,K+Q;iomega)` with the fixed commensurate
+`Q=(1/3,1/3)`. To find finite-Q order, the **candidate seed** and
+the 18-site multi-impurity solver are responsible, not the `--K` flag.
+
+`--modes` chooses the lattice GW Fierz decoupling matched to the
+six-site impurity GW subtraction: `density`, `pseudospin` (A1+E)
+or `bj` (bond/current). All use the **same physical interaction
+Hamiltonian** and the same exact impurity solver. By default the
+script uses `--modes density`; requesting all three compares
+their approximate Green functions and order patterns, at extra cost.
+Only the density-mode Luttinger-Ward implementation currently
+supports the available free-energy ranking. Other modes' phase
+summary remains `unresolved` even when a particular order is
+well established.
+
 ## Why finite Q is included
 
 Q=(1/3,1/3) is commensurate with the three-cell hex18 PBC. The seed
