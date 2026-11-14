@@ -102,7 +102,11 @@ def test_CO_seed_enters_triangle3_with_independent_A_B_Weiss_fields():
     assert np.any(np.abs(source[:3,:3])>0)
     assert np.any(np.abs(source[6:9,6:9])>0)
     pert=_inject_seed(init,source,.3,geom.h0,grid,3.9)
-    assert_allclose(pert.Sigma_emb[:,0,0]-init.Sigma_emb[:,0,0],.3*source[None],atol=1e-13)
+    assert_allclose(
+        pert.Sigma_emb[:,0,0]-init.Sigma_emb[:,0,0],
+        np.broadcast_to(.3*source, (grid.nf,18,18)),
+        rtol=0,atol=1e-13
+    )
     rho=one_body_density_matrix_tail(pert.G,grid,geom.h0,pert.mu,pert.Sigma_H)[0,0]
     obs=order_observables(rho,geom,params,threshold=.002)
     assert obs["co_amplitude"]>.002
