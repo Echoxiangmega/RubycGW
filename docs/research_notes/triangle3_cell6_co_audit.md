@@ -87,6 +87,7 @@ python research/scan_hex18_triangle_ed_gw_vn.py `
   --seed-amplitudes 0.08 0.3 `
   --nw 19 --nomega 10 --nbath 3 `
   --max-iter 160 --mixing-method pulay `
+  --bootstrap free `
   --out results/triangle3_n13_same_point
 
 python research/scan_hex18_cluster_order_vn.py `
@@ -99,6 +100,7 @@ python research/scan_hex18_cluster_order_vn.py `
   --seed-amplitudes 0.08 0.3 `
   --nw 19 --nomega 10 --nbath 6 `
   --max-iter 160 --mixing-method pulay `
+  --bootstrap free `
   --out results/cell6_n13_same_point
 ```
 
