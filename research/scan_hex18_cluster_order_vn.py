@@ -294,6 +294,14 @@ def _inject_seed(restart,K,amplitude,h0,grid,target):
 def _fresh_bootstrap(geom,params,grid,target,mode,a):
     from rubycgw.fierz_cluster_embedding import build_embedding_channels,cluster_gw_map
     bg=noninteracting_cluster_seed(geom,grid,float(target))
+    if a.bootstrap=="uniform" and a.cluster_partition=="triangle3":
+        print(
+            "[hex18-order] triangle3 has no matched uniform 2x3-site "
+            "impurity bootstrap; using full-lattice free initializer instead. "
+            "To compare partition basins, explicitly select --bootstrap free "
+            "for BOTH triangle3 and cell6.",
+            flush=True,
+        )
     if a.bootstrap=="uniform" and a.cluster_partition=="cell6":
         u=uniform_primitive_cluster_ed_gw(
             geom,grid,bg,nbath=a.nbath,gw_mode=mode,
