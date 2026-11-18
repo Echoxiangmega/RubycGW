@@ -130,3 +130,58 @@ JAX compilation is kept separate so that a cold first VMC run is not confused wi
 ## Recommended first use
 
 Start with selected \((N_f,V)\) points where HF predicts different competitors. The purpose of this Hex18 stage is to measure how much Slater and Slater-Jastrow recover the exact energy and the CO/BOW/LC channel structure before scaling VMC to clusters that ED cannot solve.
+
+
+## Projection-after-variation against the exact ED symmetry sector
+
+For a **nondegenerate** Hex18 ED ground state, an already completed VMC run can
+be projected into the exact ordinary finite-torus space-group sector without
+rerunning VMC. The first implementation uses the verified 3 translations
+times ordinary \(C_{3v}\) point group (18 many-body symmetry operations).
+
+First test the second-quantized permutations and their fermionic signs:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/test_symmetry_projection.py
+\`\`\`
+
+Then postprocess an existing run, for example:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/postprocess_symmetry.py \
+  --input results/vmc_hex18_N6_V2_jastrow
+\`\`\`
+
+This writes:
+
+\`\`\`text
+ed_symmetry_sector.json
+symmetry_projection_all.csv
+symmetry_projection_best.csv
+*/projected_state.npz
+*/projected_summary.json
+\`\`\`
+
+For every VMC state it reports the target-sector weight
+
+\[
+w_\Gamma=\langle\Psi|P_\Gamma|\Psi\rangle,
+\]
+
+then exactly reevaluates \(E\), ED-ground-space fidelity, and the same
+CO/BOW/LC diagnostics for \(P_\Gamma|\Psi\rangle\).
+
+Interpretation:
+
+- small \(w_\Gamma\) but high projected fidelity means much of the original
+  error was symmetry-sector contamination;
+- \(w_\Gamma\approx1\) with little improvement after projection means the
+  Slater/Jastrow variational manifold itself is missing important correlations.
+
+This PAV step restores finite-cluster symmetry for a fair ED comparison. It
+does **not** remove ordinary finite-size effects of the 18-site torus.
+
+For \(t_1=-t_2\), the model also has gauge-compensated point operations such as
+the signed \(C_6\) defined in \`native_ed.geometry\`. Those are deliberately
+not mixed into this first ordinary-space-group PAV and can be added after this
+baseline is validated.
