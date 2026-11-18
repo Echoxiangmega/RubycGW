@@ -36,6 +36,117 @@ def minimum_image_shells(g, n_shells: int = 4, tol: float = 1e-8):
     return np.asarray(distances), mats, counts
 
 
+
+def bond_aware_jastrow_channels(g, n_nonbond_shells: int = 4, tol: float = 1e-8):
+    """Density-Jastrow channels that distinguish t, t1 and t2 graph bonds.
+
+    Channels are:
+      1) all graph bonds of kind t,
+      2) all graph bonds of kind t1,
+      3) all graph bonds of kind t2,
+      4+) non-graph pairs grouped by minimum-image Euclidean distance.
+
+    Graph-bond pairs are excluded from the distance shells, so no pair is
+    counted twice. This is useful on the Ruby lattice because physically
+    distinct hopping/interacting bonds can have the same geometric distance.
+    """
+    ns = g.Ns
+    mats = []
+    labels = []
+    distances = []
+    counts = []
+
+    edge_pairs = set()
+    for kind in ("t", "t1", "t2"):
+        m = np.zeros((ns, ns), float)
+        n = 0
+        ds = []
+        for e in g.edges:
+            if e.kind != kind:
+                continue
+            i, j = int(e.i), int(e.j)
+            key = tuple(sorted((i, j)))
+            if key in edge_pairs:
+                raise RuntimeError(f"Duplicate graph pair in bond-aware Jastrow: {key}")
+            edge_pairs.add(key)
+            m[i, j] = m[j, i] = 1.0
+            n += 1
+            d = min(
+                np.linalg.norm(
+                    np.asarray(g.positions[j]) + np.asarray(g.B) @ np.asarray(w, int)
+                    - np.asarray(g.positions[i])
+                )
+                for w in product(range(-2, 3), repeat=2)
+            )
+            ds.append(float(d))
+        mats.append(m)
+        labels.append(f"bond:{kind}")
+        distances.append(float(np.mean(ds)) if ds else float("nan"))
+        counts.append(n)
+
+    records = []
+    for i in range(ns):
+        for j in range(i + 1, ns):
+            if (i, j) in edge_pairs:
+                continue
+            d = min(
+                np.linalg.norm(
+                    np.asarray(g.positions[j]) + np.asarray(g.B) @ np.asarray(w, int)
+                    - np.asarray(g.positions[i])
+                )
+                for w in product(range(-2, 3), repeat=2)
+            )
+            records.append((float(d), i, j))
+
+    shell_distances = []
+    for d, _, _ in sorted(records):
+        if not shell_distances or abs(d-shell_distances[-1]) > tol:
+            shell_distances.append(d)
+    if n_nonbond_shells > 0:
+        shell_distances = shell_distances[:n_nonbond_shells]
+
+    for ishell, d0 in enumerate(shell_distances, 1):
+        m = np.zeros((ns, ns), float)
+        n = 0
+        for d, i, j in records:
+            if abs(d-d0) <= tol:
+                m[i, j] = m[j, i] = 1.0
+                n += 1
+        mats.append(m)
+        labels.append(f"nonbond:r{ishell}")
+        distances.append(float(d0))
+        counts.append(n)
+
+    mats = np.asarray(mats, dtype=float)
+    counts = np.asarray(counts, dtype=int)
+    distances = np.asarray(distances, dtype=float)
+
+    # Every included unordered pair appears in exactly one channel.
+    total = np.sum(mats, axis=0)
+    iu = np.triu_indices(ns, k=1)
+    if np.any(total[iu] > 1.0 + 1e-12):
+        raise RuntimeError("Bond-aware Jastrow channels overlap")
+    return labels, distances, mats, counts
+
+
+def jastrow_channels(g, mode: str = "distance", n_shells: int = 4):
+    """Unified Jastrow channel constructor.
+
+    mode='distance':
+        old behavior, all pairs grouped only by distance.
+    mode='bond_aware':
+        separate t/t1/t2 graph bonds, then n_shells nonbond distance shells.
+    """
+    mode = str(mode).lower()
+    if mode == "distance":
+        distances, mats, counts = minimum_image_shells(g, n_shells=n_shells)
+        labels = [f"distance:r{i+1}" for i in range(len(distances))]
+        return labels, distances, mats, counts
+    if mode == "bond_aware":
+        return bond_aware_jastrow_channels(g, n_nonbond_shells=n_shells)
+    raise ValueError(f"Unknown Jastrow mode: {mode}")
+
+
 def one_body_seed_hamiltonian(g, seed: str, seed_amplitude: float, star_formfactor) -> np.ndarray:
     """Auxiliary one-body Hamiltonian used only to initialize variational states."""
     ns = g.Ns
