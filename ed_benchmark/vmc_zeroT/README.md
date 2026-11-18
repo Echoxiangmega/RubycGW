@@ -336,3 +336,30 @@ larger \`--ed-k\` rather than silently using an incomplete multiplet.
 Because VAP runs once per ED ground symmetry sector, the VAP wall time scales
 approximately with the number of such sectors in addition to the requested
 seed count.
+
+
+### Stable reduced-orbital optimization at single-particle degeneracies
+
+The first reduced implementation differentiated through
+\`eigh(h_var)\` at every VMC step. This is ill-defined when the auxiliary
+single-particle spectrum is degenerate (for example the Hex18 \(N_f=3\)
+benchmark), and can produce NaN eigenvector gradients.
+
+The current implementation uses the same translation+C3 independent one-body
+generators only to construct the occupied-virtual tangent space once:
+
+\[
+\delta Q_a=(1-P_0)G_aQ_0 .
+\]
+
+Real-linearly dependent directions are removed by SVD. VMC then optimizes only
+the remaining reduced orbital-rotation parameters through
+
+\[
+Q(\theta)=\mathrm{QR}\!\left[Q_0+\sum_a\theta_a\delta Q_a\right],
+\]
+
+so the differentiable path contains no eigendecomposition. The program prints
+both the original symmetry-generator count and the active tangent rank.
+The SR Jacobian is explicitly evaluated in complex mode because the parameters
+are real but the Slater wavefunction can be complex.
