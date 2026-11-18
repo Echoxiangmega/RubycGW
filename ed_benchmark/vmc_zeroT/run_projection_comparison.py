@@ -38,7 +38,7 @@ import geometry as native_geometry
 import observables as native_observables
 
 from benchmark_observables import benchmark_observables
-from vmc_ansatz import jastrow_channels
+from vmc_ansatz import jastrow_channels, bond_backflow_channels
 from run_benchmark import atomic_json, run_vmc_one, solve_ed
 from run_parametric import run_full_vap_one
 from symmetry_projection import (
@@ -52,14 +52,23 @@ from symmetry_projection import (
 )
 
 
-METHOD_ORDER = [
-    "ED",
-    "Raw-Slater-Jastrow",
-    "PAV-TR-Slater-Jastrow",
-    "PAV-TR-Slater-Jastrow+1LS",
-    "Full-VAP-TR-Slater-Jastrow",
-    "Full-VAP-TR-Slater-Jastrow+1LS",
-]
+def method_names(use_backflow: bool):
+    suffix = "-Backflow" if use_backflow else ""
+    return {
+        "ed": "ED",
+        "raw": "Raw-Slater-Jastrow" + suffix,
+        "pav": "PAV-TR-Slater-Jastrow" + suffix,
+        "pav_ls": "PAV-TR-Slater-Jastrow" + suffix + "+1LS",
+        "vap": "Full-VAP-TR-Slater-Jastrow" + suffix,
+        "vap_ls": "Full-VAP-TR-Slater-Jastrow" + suffix + "+1LS",
+    }
+
+
+def ordered_methods(names):
+    return [
+        names["ed"], names["raw"], names["pav"], names["pav_ls"],
+        names["vap"], names["vap_ls"],
+    ]
 
 
 def write_csv(path: Path, rows):
@@ -404,13 +413,17 @@ def lanczos_row(
     return row, out
 
 
-def load_summary_state(directory, H, *, expected_jastrow_mode):
+def load_summary_state(
+    directory, H, *, expected_jastrow_mode, expected_backflow=False
+):
     sf = directory/"summary.json"
     wf = directory/"final_state.npz"
     if not sf.exists() or not wf.exists():
         return None, None
     summary = json.loads(sf.read_text(encoding="utf-8"))
     if summary.get("jastrow_mode", "distance") != expected_jastrow_mode:
+        return None, None
+    if bool(summary.get("backflow_enabled", False)) != bool(expected_backflow):
         return None, None
     with np.load(wf, allow_pickle=False) as z:
         psi = np.asarray(z["psi_native"], np.complex128)
@@ -435,6 +448,10 @@ def parser():
         default=["normal", "sd", "isd", "lc_same", "lc_opposite"],
     )
     p.add_argument("--seed-amplitude", type=float, default=0.08)
+    p.add_argument(
+        "--correlator", choices=["sj", "backflow"], default="backflow",
+        help="sj: density Jastrow only; backflow: add 3 complex t/t1/t2 backflow amplitudes"
+    )
     p.add_argument(
         "--jastrow-mode", choices=["bond_aware", "distance"], default="bond_aware"
     )
@@ -466,6 +483,17 @@ def main():
     out = Path(a.output).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
+    use_backflow = a.correlator == "backflow"
+    names = method_names(use_backflow)
+    method_order = ordered_methods(names)
+    raw_prefix = "slater_jastrow_backflow" if use_backflow else "slater_jastrow"
+    pav_prefix = "pav_tr_backflow" if use_backflow else "pav_tr"
+    pav_ls_prefix = "pav_tr_backflow_1ls" if use_backflow else "pav_tr_1ls"
+    vap_prefix = "full_vap_tr_sj_backflow" if use_backflow else "full_vap_tr_sj"
+    vap_ls_prefix = (
+        "full_vap_tr_sj_backflow_1ls" if use_backflow else "full_vap_tr_1ls"
+    )
+
     g = native_geometry.RubyPBC("ring3", t=a.t, t1=a.t1, t2=a.t2)
     H, evals, ed_gs, ed_row = solve_ed(
         g, a.nf, a.V, k=a.ed_k, degeneracy_tol=a.ed_degeneracy_tol
@@ -481,6 +509,7 @@ def main():
     jlabels, jdist, _, jcounts = jastrow_channels(
         g, mode=a.jastrow_mode, n_shells=a.jastrow_shells
     )
+    bf_labels, _, bf_counts = bond_backflow_channels(g)
     atomic_json(out/"settings.json", {
         **vars(a),
         "cluster": "ring3",
@@ -489,6 +518,12 @@ def main():
         "spatial_sector_count": len(sectors),
         "time_reversal_target_count": len(tr_targets),
         "spinless_time_reversal": "complex conjugation K",
+        "correlator": a.correlator,
+        "backflow_enabled": use_backflow,
+        "backflow_labels": bf_labels if use_backflow else [],
+        "backflow_channel_counts": (
+            [int(x) for x in bf_counts] if use_backflow else []
+        ),
         "jastrow_channel_count": len(jlabels),
     })
     atomic_json(out/"geometry.json", g.metadata())
@@ -519,7 +554,7 @@ def main():
         )
 
     ed = dict(ed_row)
-    ed["method"] = "ED"
+    ed["method"] = names["ed"]
     ed["target_k"] = "ground manifold"
     ed["target_c3"] = "ground manifold"
     ed["time_reversal_restored"] = True
@@ -544,9 +579,12 @@ def main():
     # A. Unrestricted raw SJ, then PAV with spatial + TR restoration.
     for seed in a.seeds:
         run_id += 1
-        d = out/f"slater_jastrow__{seed}"
+        d = out/f"{raw_prefix}__{seed}"
         summary, psi = (
-            load_summary_state(d,H,expected_jastrow_mode=a.jastrow_mode)
+            load_summary_state(
+                d,H,expected_jastrow_mode=a.jastrow_mode,
+                expected_backflow=use_backflow
+            )
             if a.resume else (None,None)
         )
         if summary is None:
@@ -568,15 +606,19 @@ def main():
                 output_dir=out,
                 validate_hamiltonian=(run_id==1),
                 jastrow_mode=a.jastrow_mode,
+                use_backflow=use_backflow,
+                method_name=names["raw"],
+                dir_prefix=raw_prefix,
             )
             summary,psi = load_summary_state(
-                d,H,expected_jastrow_mode=a.jastrow_mode
+                d,H,expected_jastrow_mode=a.jastrow_mode,
+                expected_backflow=use_backflow
             )
         else:
             print(f"\n[resume full raw SJ] seed={seed}", flush=True)
 
         raw_row = exact_state_row(
-            method="Raw-Slater-Jastrow", seed=seed, psi=psi,
+            method=names["raw"], seed=seed, psi=psi,
             H=H, ed_gs=ed_gs, ed_row=ed_row,
             target_k="mixed", target_c3="mixed", projection="none",
             extra={
@@ -588,6 +630,11 @@ def main():
                 "time_total_s": summary.get("time_total_s"),
                 "mc_E": summary.get("mc_E"),
                 "mc_E_error": summary.get("mc_E_error"),
+                "backflow_enabled": use_backflow,
+                "backflow_labels": summary.get("backflow_labels", ""),
+                "backflow_channel_counts": summary.get("backflow_channel_counts", ""),
+                "backflow_eta_real": summary.get("backflow_eta_real", ""),
+                "backflow_eta_imag": summary.get("backflow_eta_imag", ""),
             },
         )
         rows.append(raw_row)
@@ -617,7 +664,7 @@ def main():
             ppsi, trinfo = restore_time_reversal_pav(pair,H)
             support = target_support_weight(group,target,ppsi)
             row = exact_state_row(
-                method="PAV-TR-Slater-Jastrow",
+                method=names["pav"],
                 seed=seed, psi=ppsi, H=H, ed_gs=ed_gs, ed_row=ed_row,
                 target_k=target["k"], target_q=target["q"],
                 target_c3=target["c3"], projection=proj_name,
@@ -639,10 +686,20 @@ def main():
                     "jastrow_mode": a.jastrow_mode,
                     "jastrow_labels": ";".join(map(str,jlabels)),
                     "jastrow_channel_counts": ";".join(str(int(x)) for x in jcounts),
+                    "backflow_enabled": use_backflow,
+                    "backflow_labels": summary.get("backflow_labels", ""),
+                    "backflow_channel_counts": summary.get("backflow_channel_counts", ""),
+                    "backflow_eta_real": summary.get("backflow_eta_real", ""),
+                    "backflow_eta_imag": summary.get("backflow_eta_imag", ""),
+                    "backflow_enabled": use_backflow,
+                    "backflow_labels": summary.get("backflow_labels", ""),
+                    "backflow_channel_counts": summary.get("backflow_channel_counts", ""),
+                    "backflow_eta_real": summary.get("backflow_eta_real", ""),
+                    "backflow_eta_imag": summary.get("backflow_eta_imag", ""),
                 },
             )
             rows.append(row)
-            pd = out/f"pav_tr__target{target['target_id']}__{seed}"
+            pd = out/f"{pav_prefix}__target{target['target_id']}__{seed}"
             pd.mkdir(parents=True,exist_ok=True)
             atomic_json(pd/"summary.json",row)
             np.savez_compressed(
@@ -658,7 +715,7 @@ def main():
             )
 
             ls_row,ls_psi = lanczos_row(
-                base_method="PAV-TR-Slater-Jastrow",
+                base_method=names["pav"],
                 seed=seed, psi=ppsi, H=H, ed_gs=ed_gs, ed_row=ed_row,
                 target=target, group=group, projection=proj_name,
                 extra={
@@ -670,7 +727,7 @@ def main():
                 },
             )
             rows.append(ls_row)
-            lsd = out/f"pav_tr_1ls__target{target['target_id']}__{seed}"
+            lsd = out/f"{pav_ls_prefix}__target{target['target_id']}__{seed}"
             lsd.mkdir(parents=True,exist_ok=True)
             atomic_json(lsd/"summary.json",ls_row)
             np.savez_compressed(
@@ -684,9 +741,12 @@ def main():
             for seed in a.seeds:
                 run_id += 1
                 tid = target["target_id"]
-                d = out/f"full_vap_tr_sj__sector{tid}__{seed}"
+                d = out/f"{vap_prefix}__sector{tid}__{seed}"
                 summary,_ = (
-                    load_summary_state(d,H,expected_jastrow_mode=a.jastrow_mode)
+                    load_summary_state(
+                        d,H,expected_jastrow_mode=a.jastrow_mode,
+                        expected_backflow=use_backflow
+                    )
                     if a.resume else (None,None)
                 )
                 if summary is None:
@@ -701,9 +761,9 @@ def main():
                         ground_sectors=sectors,
                         sector_id=tid,
                         sector_dim=int(target["dimension"]),
-                        method_name="Full-VAP-TR-Slater-Jastrow",
-                        family_name="full_vap_tr_sj",
-                        dir_prefix="full_vap_tr_sj",
+                        method_name=names["vap"],
+                        family_name=vap_prefix,
+                        dir_prefix=vap_prefix,
                         projection_name=proj_name,
                         seed_name=seed,
                         seed_amplitude=a.seed_amplitude,
@@ -720,6 +780,7 @@ def main():
                         jastrow_mode=a.jastrow_mode,
                         partner_chars=target["partner_characters"],
                         time_reversal_even=True,
+                        use_backflow=use_backflow,
                     )
                 else:
                     row = summary
@@ -733,7 +794,8 @@ def main():
                 rows.append(row)
 
                 _,vap_psi = load_summary_state(
-                    d,H,expected_jastrow_mode=a.jastrow_mode
+                    d,H,expected_jastrow_mode=a.jastrow_mode,
+                    expected_backflow=use_backflow
                 )
                 if vap_psi is None:
                     raise RuntimeError(f"Missing VAP-TR state: {d}")
@@ -747,7 +809,7 @@ def main():
                 row["time_reversal_residual"] = time_reversal_residual(vap_psi)
 
                 ls_row,ls_psi = lanczos_row(
-                    base_method="Full-VAP-TR-Slater-Jastrow",
+                    base_method=names["vap"],
                     seed=seed, psi=vap_psi, H=H, ed_gs=ed_gs, ed_row=ed_row,
                     target=target, group=group, projection=proj_name,
                     extra={
@@ -759,7 +821,7 @@ def main():
                     },
                 )
                 rows.append(ls_row)
-                lsd = out/f"full_vap_tr_1ls__target{tid}__{seed}"
+                lsd = out/f"{vap_ls_prefix}__target{tid}__{seed}"
                 lsd.mkdir(parents=True,exist_ok=True)
                 atomic_json(lsd/"summary.json",ls_row)
                 np.savez_compressed(
@@ -775,7 +837,7 @@ def main():
                 write_csv(out/"comparison_all.csv",rows)
 
     best = [ed]
-    for method in METHOD_ORDER[1:]:
+    for method in method_order[1:]:
         cand = [r for r in rows if r.get("method")==method and r.get("E") is not None]
         if cand:
             best.append(min(cand,key=lambda r:float(r["E"])))
@@ -783,7 +845,10 @@ def main():
     write_csv(out/"comparison_best.csv",best)
     atomic_json(out/"comparison_best.json",best)
 
-    print("\n=== ED / Raw SJ / PAV-TR / PAV-TR+1LS / Full VAP-TR / Full VAP-TR+1LS ===")
+    print(
+        "\n=== ED / Raw / PAV-TR / PAV-TR+1LS / Full VAP-TR / Full VAP-TR+1LS "
+        f"[correlator={a.correlator}] ==="
+    )
     for r in best:
         print(
             f"{r['method']:31s} seed={str(r.get('seed','')):11s} "
