@@ -81,8 +81,8 @@ def initial_base_state_native(M0, native_states, ns, nf):
 
 
 def make_projectable_seed(
-    M0, native_H, group, chars, *, rng_seed=0, min_weight=1e-8,
-    initial_jitter=1e-4, max_tries=8,
+    M0, native_H, group, chars, *, partner_chars=None,
+    rng_seed=0, min_weight=1e-8, initial_jitter=1e-4, max_tries=8,
 ):
     """Ensure the unprojected seed has nonzero weight in the target irrep.
 
@@ -97,7 +97,11 @@ def make_projectable_seed(
     base0 = initial_base_state_native(
         M0, native_H.states, native_H.g.Ns, native_H.nf
     )
-    _, w0 = project_to_characters(group, chars, base0)
+    _, w0_primary = project_to_characters(group, chars, base0)
+    w0 = float(w0_primary)
+    if partner_chars is not None:
+        _, w0_partner = project_to_characters(group, partner_chars, base0)
+        w0 += float(w0_partner)
     if w0 >= min_weight:
         return M0, float(w0), 0.0
 
@@ -112,7 +116,11 @@ def make_projectable_seed(
         base = initial_base_state_native(
             q, native_H.states, native_H.g.Ns, native_H.nf
         )
-        _, w = project_to_characters(group, chars, base)
+        _, w_primary = project_to_characters(group, chars, base)
+        w = float(w_primary)
+        if partner_chars is not None:
+            _, w_partner = project_to_characters(group, partner_chars, base)
+            w += float(w_partner)
         if w >= min_weight:
             return np.asarray(q, np.complex128), float(w), scale
         scale *= 10.0
