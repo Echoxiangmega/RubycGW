@@ -43,16 +43,28 @@ def main():
     assert pair is not None and w>0
     y,info=restore_time_reversal_lowest(pair,H)
 
-    assert time_reversal_residual(y)<1e-10
-    assert target_support_residual(group,target,y)<1e-10
-
+    tr0=time_reversal_residual(y)
+    sp0=target_support_residual(group,target,y)
     obs=benchmark_observables(g,H.states,y,native_observables)
+    print("post-TR diagnostics:")
+    print("  spatial support residual =",sp0)
+    print("  time-reversal residual   =",tr0)
+    print("  J_same                   =",obs.lc_same_mean)
+    print("  J_opposite               =",obs.lc_opposite_mean)
+
+    assert tr0<1e-10,tr0
+    assert sp0<1e-10,sp0
     assert abs(obs.lc_same_mean)<1e-10,obs.lc_same_mean
     assert abs(obs.lc_opposite_mean)<1e-10,obs.lc_opposite_mean
 
     z,_=one_lanczos_step(y,H)
-    assert time_reversal_residual(z)<1e-10
-    assert target_support_residual(group,target,z)<1e-10
+    tr1=time_reversal_residual(z)
+    sp1=target_support_residual(group,target,z)
+    print("post-1LS diagnostics:")
+    print("  spatial support residual =",sp1)
+    print("  time-reversal residual   =",tr1)
+    assert tr1<1e-10,tr1
+    assert sp1<1e-10,sp1
     obs2=benchmark_observables(g,H.states,z,native_observables)
     assert abs(obs2.lc_same_mean)<1e-10,obs2.lc_same_mean
     assert abs(obs2.lc_opposite_mean)<1e-10,obs2.lc_opposite_mean
