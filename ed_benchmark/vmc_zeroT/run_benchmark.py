@@ -288,6 +288,16 @@ def run_vmc_one(
         dir_prefix = ansatz
     d = output_dir / f"{dir_prefix}__{seed_name}"
     d.mkdir(parents=True, exist_ok=True)
+    params_np = vstate.parameters
+    M_opt = np.asarray(params_np["M"], np.complex128)
+    v_opt = (
+        np.asarray(params_np["v"], np.float64)
+        if "v" in params_np else np.empty(0, dtype=np.float64)
+    )
+    eta_saved = (
+        np.asarray(params_np["eta"], np.complex128)
+        if "eta" in params_np else np.empty(0, dtype=np.complex128)
+    )
     np.savez_compressed(
         d / "final_state.npz",
         psi_native=psi,
@@ -296,6 +306,9 @@ def run_vmc_one(
         shell_counts=shell_counts,
         jastrow_labels=np.asarray(jastrow_labels),
         star_formfactor=star,
+        variational_M=M_opt,
+        variational_v=v_opt,
+        variational_eta=eta_saved,
     )
     history = {}
     try:
