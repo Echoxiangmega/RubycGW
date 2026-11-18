@@ -29,12 +29,12 @@ import geometry as native_geometry
 import observables as native_observables
 
 from benchmark_observables import benchmark_observables, ruby_star_formfactor
-from vmc_ansatz import minimum_image_shells, one_body_seed_hamiltonian
+from vmc_ansatz import minimum_image_shells, one_body_seed_hamiltonian, one_body_seed
 from parametric_ansatz import (
     build_symmetry_tied_basis,
-    seed_tied_parameters,
-    reconstruct_one_body,
-    build_parametric_netket_model,
+    build_orbital_rotation_data,
+    rotate_orbitals_numpy,
+    build_stable_parametric_netket_model,
 )
 from run_benchmark import (
     atomic_json,
@@ -73,22 +73,21 @@ def add_ed_differences(row, ed):
     return row
 
 
-def exact_state_from_tied_params(basis, params, native_H):
-    h = reconstruct_one_body(basis, params)
-    _, u = np.linalg.eigh(h)
-    M = np.asarray(u[:, :native_H.nf], complex)
-    return initial_base_state_native(M, native_H.states, native_H.g.Ns, native_H.nf)
+def exact_state_from_rotation(rot, theta, native_H):
+    Q = rotate_orbitals_numpy(rot["Q0"], rot["tangent_basis"], theta)
+    return initial_base_state_native(
+        Q, native_H.states, native_H.g.Ns, native_H.nf
+    )
 
 
-def target_sector_weight(basis, params, native_H, group, chars):
-    psi = exact_state_from_tied_params(basis, params, native_H)
+def target_sector_weight_rotation(rot, theta, native_H, group, chars):
+    psi = exact_state_from_rotation(rot, theta, native_H)
     _, w = project_to_characters(group, chars, psi)
     return float(w)
 
 
-def union_sector_weight(basis, params, native_H, group, sectors):
-    """Total weight in the direct sum of all ED-ground symmetry sectors."""
-    psi = exact_state_from_tied_params(basis, params, native_H)
+def union_sector_weight_rotation(rot, theta, native_H, group, sectors):
+    psi = exact_state_from_rotation(rot, theta, native_H)
     total = 0.0
     for sec in sectors:
         _, w = project_to_characters(group, sec["characters"], psi)
@@ -104,30 +103,28 @@ def state_union_sector_weight(psi, group, sectors):
     return float(min(max(total, 0.0), 1.0))
 
 
-def make_projectable_tied_params(
-    basis, params, native_H, group, chars, *, rng_seed,
+def make_projectable_theta(
+    rot, native_H, group, chars, *, rng_seed,
     min_weight=1e-8, initial_jitter=1e-4, max_tries=8,
 ):
-    p = {k: np.array(v, dtype=float, copy=True) for k, v in params.items()}
-    w0 = target_sector_weight(basis, p, native_H, group, chars)
+    theta0 = np.zeros(rot["tangent_rank"], dtype=float)
+    w0 = target_sector_weight_rotation(rot, theta0, native_H, group, chars)
     if w0 >= min_weight:
-        return p, w0, 0.0
+        return theta0, float(w0), 0.0
 
     rng = np.random.default_rng(int(rng_seed))
     scale = float(initial_jitter)
     for _ in range(max_tries):
-        q = {k: np.array(v, copy=True) for k, v in p.items()}
-        for key in ("onsite", "bond_re", "bond_im"):
-            if q[key].size:
-                q[key] += scale * rng.normal(size=q[key].shape)
-        w = target_sector_weight(basis, q, native_H, group, chars)
+        theta = scale * rng.normal(size=theta0.shape)
+        w = target_sector_weight_rotation(rot, theta, native_H, group, chars)
         if w >= min_weight:
-            return q, float(w), scale
+            return theta, float(w), scale
         scale *= 10.0
     raise RuntimeError(
-        f"Could not make tied seed projectable: initial w={w0:.3e}, "
+        f"Could not make reduced orbital seed projectable: initial w={w0:.3e}, "
         f"last jitter={scale/10:.3e}"
     )
+
 
 
 def run_one(
@@ -148,26 +145,38 @@ def run_one(
     hi, _, H_fast, graph = make_netket_hamiltonian(g, nf, V)
     star = ruby_star_formfactor(g)
     distances, shells, shell_counts = minimum_image_shells(g, n_shells=n_shells)
-    h_seed = one_body_seed_hamiltonian(g, seed_name, seed_amplitude, star)
-    init_params = seed_tied_parameters(basis, h_seed)
+
+    # The seed eigendecomposition is performed once in NumPy, outside autodiff.
+    # All subsequent optimization is through a small set of symmetry-tied
+    # occupied-virtual orbital rotations and QR, avoiding eigh gradients.
+    Q0 = one_body_seed(g, nf, seed_name, seed_amplitude, star)
+    rot = build_orbital_rotation_data(basis, Q0, tol=1e-10)
+    if rot["tangent_rank"] < 1:
+        raise RuntimeError(
+            f"Seed {seed_name} has zero active occupied-virtual symmetry-tied "
+            "rotation directions."
+        )
+    theta0 = np.zeros(rot["tangent_rank"], dtype=float)
 
     if projected:
-        seed_weight = target_sector_weight(basis, init_params, native_H, group, chars)
+        seed_weight = target_sector_weight_rotation(
+            rot, theta0, native_H, group, chars
+        )
     else:
-        seed_weight = union_sector_weight(
-            basis, init_params, native_H, group, ground_sectors
+        seed_weight = union_sector_weight_rotation(
+            rot, theta0, native_H, group, ground_sectors
         )
     seed_jitter = 0.0
     if projected and seed_weight < 1e-8:
-        init_params, seed_weight, seed_jitter = make_projectable_tied_params(
-            basis, init_params, native_H, group, chars,
+        theta0, seed_weight, seed_jitter = make_projectable_theta(
+            rot, native_H, group, chars,
             rng_seed=rng_seed + 7919,
             min_weight=1e-8,
             initial_jitter=1e-4,
         )
         print(
             f"[param init] {seed_name}: target sector {sector_id} weight was negligible; "
-            f"jitter={seed_jitter:.1e}, new w={seed_weight:.3e}",
+            f"rotation jitter={seed_jitter:.1e}, new w={seed_weight:.3e}",
             flush=True,
         )
     elif projected:
@@ -181,14 +190,20 @@ def run_one(
             flush=True,
         )
 
+    print(
+        f"[reduced orbitals] symmetry generators={rot['generator_count']}, "
+        f"active tangent rank={rot['tangent_rank']}",
+        flush=True,
+    )
+
     maps = np.asarray([op.site_map for op in group], np.int32) if projected else None
     pchars = np.asarray(chars, complex) if projected else None
-    model = build_parametric_netket_model(
-        basis,
-        nf,
-        init_params,
+    model = build_stable_parametric_netket_model(
+        rot["Q0"],
+        rot["tangent_basis"],
         shells,
         use_jastrow,
+        initial_theta=theta0,
         projection_site_maps=maps,
         projection_characters=pchars,
     )
@@ -223,7 +238,8 @@ def run_one(
 
     print(
         f"[optimizer] parameters={vstate.n_parameters}, "
-        f"one_body={basis.n_one_body_parameters}, jastrow={len(distances) if use_jastrow else 0}",
+        f"reduced_orbital={rot['tangent_rank']}, "
+        f"jastrow={len(distances) if use_jastrow else 0}",
         flush=True,
     )
     log = nk.logging.RuntimeLog()
@@ -293,13 +309,20 @@ def run_one(
         "projected_sector_residual": sector_residual,
         "initial_target_sector_weight": float(seed_weight),
         "initial_seed_parameter_jitter": float(seed_jitter),
+        "orbital_parameterization": "fixed-seed symmetry-tied occupied-virtual rotations + QR",
         "n_parameters": int(vstate.n_parameters),
-        "n_one_body_parameters": int(basis.n_one_body_parameters),
-        "n_onsite_parameters": int(basis.n_onsite),
-        "n_complex_bond_parameters": int(basis.n_bond),
+        "n_one_body_parameters": int(rot["tangent_rank"]),
+        "n_symmetry_generators": int(rot["generator_count"]),
+        "n_active_tangent_parameters": int(rot["tangent_rank"]),
+        "n_onsite_parameters_reference": int(basis.n_onsite),
+        "n_complex_bond_parameters_reference": int(basis.n_bond),
         "n_jastrow_parameters": int(len(distances) if use_jastrow else 0),
         "mc_E": float(np.real(final_stats.mean)),
         "mc_E_error": stats_error(final_stats),
+        "mc_variance": (
+            float(np.real(final_stats.variance))
+            if hasattr(final_stats, "variance") else None
+        ),
         "warmup_mc_E": float(np.real(warm_stats.mean)),
         "n_samples": int(vstate.n_samples),
         "n_iter": int(n_iter),
@@ -406,7 +429,8 @@ def main():
         ],
         "n_onsite_parameters": basis.n_onsite,
         "n_complex_bond_parameters": basis.n_bond,
-        "n_one_body_parameters": basis.n_one_body_parameters,
+        "n_one_body_parameters_reference_generators": basis.n_one_body_parameters,
+        "differentiable_parameterization": "occupied-virtual orbital rotations + QR (no eigh gradient)",
         "subgroup_order": len(basis.subgroup_maps),
         "subgroup": "primitive translations x C3",
         "projected_group": projection_group_name,
