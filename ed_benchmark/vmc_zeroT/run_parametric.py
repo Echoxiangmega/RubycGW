@@ -262,7 +262,9 @@ def run_one(
     tp = time.perf_counter()
     psi_nk = np.asarray(vstate.to_array(normalize=True))
     psi = reorder_netket_vector_to_native(hi, psi_nk, native_H.states, g.Ns)
-    E_exact = float(np.vdot(psi, native_H.operator @ psi).real)
+    Hpsi = native_H.operator @ psi
+    E_exact = float(np.vdot(psi, Hpsi).real)
+    variance_exact = float(max(0.0, np.vdot(Hpsi, Hpsi).real - E_exact**2))
     obs = benchmark_observables(g, native_H.states, psi, native_observables)
     fidelity = float(np.sum(np.abs(ed_gs.conj().T @ psi) ** 2).real)
     if projected:
@@ -330,6 +332,8 @@ def run_one(
             float(np.real(final_stats.variance))
             if hasattr(final_stats, "variance") else None
         ),
+        "exact_energy_variance": variance_exact,
+        "exact_energy_variance_per_site": variance_exact / g.Ns,
         "warmup_mc_E": float(np.real(warm_stats.mean)),
         "n_samples": int(vstate.n_samples),
         "n_iter": int(n_iter),
@@ -447,7 +451,9 @@ def run_full_vap_one(
     tp = time.perf_counter()
     psi_nk = np.asarray(vstate.to_array(normalize=True))
     psi = reorder_netket_vector_to_native(hi, psi_nk, native_H.states, g.Ns)
-    E_exact = float(np.vdot(psi, native_H.operator @ psi).real)
+    Hpsi = native_H.operator @ psi
+    E_exact = float(np.vdot(psi, Hpsi).real)
+    variance_exact = float(max(0.0, np.vdot(Hpsi, Hpsi).real - E_exact**2))
     obs = benchmark_observables(g, native_H.states, psi, native_observables)
     fidelity = float(np.sum(np.abs(ed_gs.conj().T @ psi) ** 2).real)
     _, sector_weight = project_to_characters(group, chars, psi)
@@ -500,6 +506,8 @@ def run_full_vap_one(
             float(np.real(final_stats.variance))
             if hasattr(final_stats, "variance") else None
         ),
+        "exact_energy_variance": variance_exact,
+        "exact_energy_variance_per_site": variance_exact / g.Ns,
         "warmup_mc_E": float(np.real(warm_stats.mean)),
         "n_samples": int(vstate.n_samples),
         "n_iter": int(n_iter),
