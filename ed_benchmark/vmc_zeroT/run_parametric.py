@@ -337,7 +337,9 @@ def run_one(
         "target_sector_weight": float(final_sector_weight),
         "ground_manifold_dimension": int(ed_gs.shape[1]),
         "projected_sector_residual": sector_residual,
-        "initial_target_sector_weight": float(seed_weight),
+        "initial_target_sector_weight": (
+            None if seed_weight is None else float(seed_weight)
+        ),
         "initial_seed_parameter_jitter": float(seed_jitter),
         "orbital_parameterization": "fixed-seed symmetry-tied occupied-virtual rotations + QR",
         "n_parameters": int(vstate.n_parameters),
@@ -427,7 +429,8 @@ def run_full_vap_one(
             v0 = None
         if eta0.size == 0:
             eta0 = None
-        seed_weight = float(initial_params.get("target_weight", np.nan))
+        tw = initial_params.get("target_weight", None)
+        seed_weight = None if tw is None else float(tw)
         seed_jitter = 0.0
     if initial_params is not None:
         print(
@@ -609,6 +612,11 @@ def run_full_vap_one(
             eta_opt = np.asarray(vstate.parameters["eta"], np.complex128)
         except Exception:
             eta_opt = None
+
+    # JSON metadata must not contain NaN/Inf. Warm-start diagnostic
+    # fields that are undefined are stored as None/null instead.
+    if not np.isfinite(tr_phase0):
+        tr_phase0 = 0.0
 
     row = {
         "method": method_name,
