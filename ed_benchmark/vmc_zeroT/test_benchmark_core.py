@@ -21,6 +21,12 @@ from vmc_ansatz import minimum_image_shells, one_body_seed
 def main():
     g = geometry.RubyPBC("ring3", t=1.0, t1=0.5, t2=0.5)
     assert g.Ns == 18 and len(g.edges) == 36
+    assert np.array_equal(g.M, np.array([[1, 1], [-1, 2]], dtype=int))
+    assert list(g.reps) == [(0, 0), (1, 0), (1, 1)]
+    assert g.point_maps()["C3"] is not None
+    strip = geometry.RubyPBC("3x1", t=1.0, t1=0.5, t2=0.5)
+    assert np.array_equal(strip.M, np.array([[3, 0], [0, 1]], dtype=int))
+    assert strip.point_maps()["C3"] is None
     f = ruby_star_formfactor(g)
     assert len(f) == 36 and abs(f.mean()) < 1e-12 and np.max(abs(f)) == 1.0
     d, mats, counts = minimum_image_shells(g, n_shells=4)
