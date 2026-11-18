@@ -633,3 +633,67 @@ python ed_benchmark/vmc_zeroT/test_one_lanczos_step.py
 
 The main output \`comparison_best.csv\` contains the best-energy representative
 of all six methods across the requested seeds and ED-ground sectors.
+
+
+## Time-reversal-restored finite-size benchmark
+
+The recommended Hex18 projection benchmark now restores spinless time reversal
+in addition to the ordinary spatial symmetry target. The six reported methods
+are
+
+\`\`\`text
+ED
+Raw-Slater-Jastrow
+PAV-TR-Slater-Jastrow
+PAV-TR-Slater-Jastrow+1LS
+Full-VAP-TR-Slater-Jastrow
+Full-VAP-TR-Slater-Jastrow+1LS
+\`\`\`
+
+The raw state remains intentionally unprojected because it is the reference
+for future large-cluster broken-symmetry VMC.
+
+For spinless fermions in the occupation basis,
+
+\[
+\mathcal T = K.
+\]
+
+For a TR-self-conjugate spatial irrep, PAV/VAP restore a real representative
+(up to an overall phase). For a complex spatial irrep, the code first combines
+the conjugate spatial pair
+
+\[
+\Gamma\oplus\Gamma^*
+\]
+
+(for example \(K/K'\)), then restores time reversal. Such a target is reported
+with paired quantum-number labels rather than incorrectly assigning a
+TR-invariant state to only one complex sector.
+
+PAV-TR performs exact post-variation spatial projection followed by an exact
+minimum-energy real combination in
+\(\mathrm{span}_{\mathbb R}\{\Re\Psi,\Im\Psi\}\).
+
+Full-VAP-TR includes the same restoration inside the NetKet variational model.
+A trainable real phase spans the possible TR-invariant combinations during
+optimization.
+
+The output includes
+
+\`\`\`text
+time_reversal_residual
+J_same_mean
+J_opposite_mean
+target_support_weight
+projected_sector_residual
+\`\`\`
+
+For the projected finite-size benchmark, both current means should vanish to
+numerical precision, while \(S_{\rm LC}\) can remain finite.
+
+Regression test:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/test_time_reversal_benchmark.py
+\`\`\`
