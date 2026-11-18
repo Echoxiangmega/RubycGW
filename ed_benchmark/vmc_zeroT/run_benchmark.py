@@ -355,6 +355,21 @@ def main():
     out = Path(a.output).resolve()
     out.mkdir(parents=True, exist_ok=True)
     g = native_geometry.RubyPBC("ring3", t=a.t, t1=a.t1, t2=a.t2)
+    # Hard guard: this benchmark is the 18-site hexagonal ring torus (ring3),
+    # never the distinct 3x1 torus that happens to contain the same number of
+    # primitive cells/sites.
+    expected_M = np.array([[1, 1], [-1, 2]], dtype=int)
+    expected_reps = [(0, 0), (1, 0), (1, 1)]
+    if g.name != "ring3" or not np.array_equal(g.M, expected_M) or list(g.reps) != expected_reps:
+        raise RuntimeError(
+            f"Hex18 geometry guard failed: name={g.name}, M={g.M.tolist()}, reps={g.reps}"
+        )
+    if np.array_equal(g.M, np.array(native_geometry.SPECS["3x1"][0], dtype=int)):
+        raise RuntimeError("Refusing to run: geometry is the 3x1 torus, not Hex18 ring3")
+    if g.point_maps().get("C3") is None:
+        raise RuntimeError("Hex18 ring3 must retain the verified C3 point map")
+
+    atomic_json(out / "geometry.json", g.metadata())
     settings = vars(a).copy()
     settings.update(
         {"cluster": "ring3", "Ns": g.Ns, "filling_per_primitive": a.nf / g.num_cells}
@@ -362,6 +377,7 @@ def main():
     atomic_json(out / "settings.json", settings)
 
     print(f"[Hex18] Ns={g.Ns}, Nf={a.nf}, n={a.nf/g.num_cells:g} per primitive cell")
+    print(f"[geometry] ring3 M={g.M.tolist()}, reps={g.reps}; verified C3=yes")
     print(f"[model] t={a.t:g}, t1={a.t1:g}, t2={a.t2:g}, Vtri={a.V:g}; PBC ring3")
 
     H, evals, ed_gs, ed_row = solve_ed(
