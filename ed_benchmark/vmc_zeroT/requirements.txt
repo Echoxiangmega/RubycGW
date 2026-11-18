@@ -1,0 +1,2 @@
+# Native ED already uses NumPy/SciPy. NetKet pulls compatible JAX/Flax versions.
+netket>=3.21,<4
