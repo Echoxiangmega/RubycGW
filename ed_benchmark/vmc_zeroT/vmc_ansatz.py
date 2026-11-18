@@ -208,6 +208,8 @@ def build_projected_netket_model(
                 z_safe = jnp.where(jnp.abs(z) > 1e-300, z, tiny)
                 return shift + jnp.log(z_safe)
 
-            return jax.vmap(projected_logpsi)(n)
+            # Support arbitrary leading batch/sample dimensions, as in the
+            # unprojected NetKet model.
+            return jnp.vectorize(projected_logpsi, signature="(n)->()")(n)
 
     return LogProjectedSlaterDensityJastrow()
