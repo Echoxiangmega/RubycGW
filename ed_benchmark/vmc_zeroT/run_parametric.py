@@ -53,11 +53,13 @@ from run_vap import initial_base_state_native, make_projectable_seed
 from symmetry_projection import (
     build_ordinary_space_group,
     build_translation_c3_group,
+    build_c3_group,
     characterize_unique_state,
     decompose_ground_manifold_abelian,
     project_to_characters,
     projected_sector_residual,
     commutator_error,
+    sector_quantum_numbers,
 )
 
 
@@ -375,6 +377,10 @@ def run_one(
 def run_full_vap_one(
     g, nf, V, native_H, ed_gs, ed_E0, group, chars, *,
     ground_sectors, sector_id, sector_dim,
+    method_name="Full-VAP-Slater-Jastrow",
+    family_name="full_vap_sj",
+    dir_prefix="full_vap_sj",
+    projection_name="target symmetry sector",
     seed_name, seed_amplitude, n_shells, n_samples, n_discard,
     n_chains, n_iter, learning_rate, diag_shift, rng_seed, chunk_size,
     output_dir,
@@ -477,7 +483,7 @@ def run_full_vap_one(
     sector_residual = projected_sector_residual(group, chars, psi)
     post_s = time.perf_counter() - tp
 
-    d = output_dir / f"full_vap_sj__sector{sector_id}__{seed_name}"
+    d = output_dir / f"{dir_prefix}__sector{sector_id}__{seed_name}"
     d.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         d / "final_state.npz",
@@ -498,9 +504,10 @@ def run_full_vap_one(
     atomic_json(d / "history.json", history)
 
     row = {
-        "method": "Full-VAP-Slater-Jastrow",
+        "method": method_name,
         "seed": seed_name,
-        "family": "full_vap_sj",
+        "family": family_name,
+        "projection": projection_name,
         "target_sector_id": sector_id,
         "target_sector_ground_dimension": sector_dim,
         "E": E_exact,
@@ -559,7 +566,7 @@ def parser():
     p.add_argument("--V", type=float, default=2.0)
     p.add_argument(
         "--families", nargs="+",
-        choices=["param_slater", "param_sj", "param_vap_sj", "full_vap_sj"],
+        choices=["param_slater", "param_sj", "param_vap_sj", "full_vap_sj", "c3_vap_sj"],
         default=["param_slater", "param_sj", "param_vap_sj"],
     )
     p.add_argument(
@@ -589,6 +596,8 @@ def parser():
 def result_dir_for(output_dir, family, seed, sector_id):
     if family == "full_vap_sj":
         return output_dir / f"full_vap_sj__sector{sector_id}__{seed}"
+    if family == "c3_vap_sj":
+        return output_dir / f"c3_vap_sj__sector{sector_id}__{seed}"
     if family == "param_vap_sj":
         return output_dir / f"param_vap_sj__sector{sector_id}__{seed}"
     return output_dir / f"{family}__{seed}"
@@ -647,6 +656,29 @@ def main():
         if not ground_sectors:
             raise RuntimeError("Failed to identify any symmetry sector in ED ground manifold")
 
+    # C3-only sectors are used for projection schemes that deliberately
+    # leave primitive translations unfixed.
+    c3_group = build_c3_group(g, H.states)
+    c3_err, c3_name = commutator_error(c3_group, H.operator, n_tests=2)
+    if c3_err > 1e-9:
+        raise RuntimeError(f"C3/H mismatch: {c3_name} {c3_err:.3e}")
+    if ed_gs.shape[1] == 1:
+        c3_chars = characterize_unique_state(c3_group, ed_gs[:, 0], tol=1e-8)
+        c3_sectors = [{
+            "characters": c3_chars,
+            "basis": ed_gs,
+            "dimension": 1,
+            "residual": 0.0,
+        }]
+    else:
+        c3_sectors = decompose_ground_manifold_abelian(
+            c3_group, ed_gs, tol=max(1e-8, 10*a.ed_degeneracy_tol)
+        )
+    for sec in ground_sectors:
+        sec["quantum_numbers"] = sector_quantum_numbers(g, group, sec["characters"])
+    for sec in c3_sectors:
+        sec["quantum_numbers"] = sector_quantum_numbers(g, c3_group, sec["characters"])
+
     basis = build_symmetry_tied_basis(g)
     metadata = {
         "site_orbits": basis.site_orbits,
@@ -663,6 +695,7 @@ def main():
         "projected_group": projection_group_name,
         "ed_ground_manifold_dimension": int(ed_gs.shape[1]),
         "ed_ground_sector_count": int(len(ground_sectors)),
+        "ed_ground_c3_sector_count": int(len(c3_sectors)),
     }
     atomic_json(out / "parameterization.json", metadata)
     atomic_json(out / "settings.json", vars(a))
@@ -677,6 +710,8 @@ def main():
                     "sector_id": i,
                     "dimension": int(sec["dimension"]),
                     "residual": float(sec["residual"]),
+                    "momentum": sec["quantum_numbers"]["momentum"],
+                    "c3": sec["quantum_numbers"]["c3"],
                     "characters": [
                         {
                             "operation": op.name,
@@ -688,6 +723,34 @@ def main():
                     ],
                 }
                 for i, sec in enumerate(ground_sectors)
+            ],
+        },
+    )
+
+    atomic_json(
+        out / "ed_ground_c3_sectors.json",
+        {
+            "group": "ordinary C3 only",
+            "ground_manifold_dimension": int(ed_gs.shape[1]),
+            "sector_count": int(len(c3_sectors)),
+            "sectors": [
+                {
+                    "sector_id": i,
+                    "dimension": int(sec["dimension"]),
+                    "residual": float(sec["residual"]),
+                    "momentum": sec["quantum_numbers"]["momentum"],
+                    "c3": sec["quantum_numbers"]["c3"],
+                    "characters": [
+                        {
+                            "operation": op.name,
+                            "real": float(ch.real),
+                            "imag": float(ch.imag),
+                            "phase_over_pi": float(np.angle(ch)/np.pi),
+                        }
+                        for op, ch in zip(c3_group, sec["characters"])
+                    ],
+                }
+                for i, sec in enumerate(c3_sectors)
             ],
         },
     )
@@ -705,22 +768,39 @@ def main():
         f"ground_symmetry_sectors={len(ground_sectors)}, F_groundspace=1"
     )
     for i, sec in enumerate(ground_sectors):
+        qn = sec["quantum_numbers"]
         print(
-            f"  [ED sector {i}] dim={sec['dimension']} "
+            f"  [ED sector {i}] k={qn['momentum']['name']} "
+            f"q={qn['momentum']['q']} {qn['c3']['label']} "
+            f"dim={sec['dimension']} residual={sec['residual']:.2e}"
+        )
+    print(f"[ED C3-only] sectors={len(c3_sectors)}; k deliberately unfixed")
+    for i, sec in enumerate(c3_sectors):
+        qn = sec["quantum_numbers"]
+        print(
+            f"  [C3 sector {i}] k={qn['momentum']['name']} "
+            f"{qn['c3']['label']} dim={sec['dimension']} "
             f"residual={sec['residual']:.2e}"
         )
 
     run_id = 0
     for family in a.families:
-        targets = (
-            list(enumerate(ground_sectors))
-            if family in ("param_vap_sj", "full_vap_sj")
-            else [(None, None)]
-        )
+        if family == "c3_vap_sj":
+            active_group = c3_group
+            active_sectors = c3_sectors
+            targets = list(enumerate(c3_sectors))
+        else:
+            active_group = group
+            active_sectors = ground_sectors
+            targets = (
+                list(enumerate(ground_sectors))
+                if family in ("param_vap_sj", "full_vap_sj")
+                else [(None, None)]
+            )
         for sector_id, sec in targets:
             chars = (
                 sec["characters"] if sec is not None
-                else ground_sectors[0]["characters"]
+                else active_sectors[0]["characters"]
             )
             sector_dim = int(sec["dimension"]) if sec is not None else None
             for seed in a.seeds:
@@ -737,12 +817,23 @@ def main():
                     print(f"[resume] reused {run_dir/'summary.json'}", flush=True)
                 else:
                     try:
-                        if family == "full_vap_sj":
+                        if family in ("full_vap_sj", "c3_vap_sj"):
+                            is_c3 = family == "c3_vap_sj"
                             row = run_full_vap_one(
-                                g, a.nf, a.V, H, ed_gs, float(evals[0]), group, chars,
-                                ground_sectors=ground_sectors,
+                                g, a.nf, a.V, H, ed_gs, float(evals[0]), active_group, chars,
+                                ground_sectors=active_sectors,
                                 sector_id=sector_id,
                                 sector_dim=sector_dim,
+                                method_name=(
+                                    "C3-VAP-Slater-Jastrow"
+                                    if is_c3 else "Full-VAP-Slater-Jastrow"
+                                ),
+                                family_name=("c3_vap_sj" if is_c3 else "full_vap_sj"),
+                                dir_prefix=("c3_vap_sj" if is_c3 else "full_vap_sj"),
+                                projection_name=(
+                                    "ordinary C3 only; momentum unfixed"
+                                    if is_c3 else projection_group_name
+                                ),
                                 seed_name=seed,
                                 seed_amplitude=a.seed_amplitude,
                                 n_shells=a.jastrow_shells,
@@ -820,6 +911,7 @@ def main():
         "Param-Slater-Jastrow",
         "Param-VAP-Slater-Jastrow",
         "Full-VAP-Slater-Jastrow",
+        "C3-VAP-Slater-Jastrow",
     ):
         cand = [
             r for r in rows
@@ -832,7 +924,7 @@ def main():
     write_csv(out / "parametric_best.csv", best)
     atomic_json(out / "parametric_best.json", best)
 
-    print("\n=== ED / reduced / full-VAP best comparison ===")
+    print("\n=== ED / reduced / full-VAP / C3-VAP best comparison ===")
     for r in best:
         print(
             f"{r['method']:30s} seed={str(r.get('seed','')):11s} "
