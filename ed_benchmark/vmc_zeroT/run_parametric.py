@@ -512,17 +512,27 @@ def run_full_vap_one(
     variance_exact = float(max(0.0, np.vdot(Hpsi, Hpsi).real - E_exact**2))
     obs = benchmark_observables(g, native_H.states, psi, native_observables)
     fidelity = float(np.sum(np.abs(ed_gs.conj().T @ psi) ** 2).real)
-    _, w_primary = project_to_characters(group, chars, psi)
+    p_primary, w_primary = project_to_characters(group, chars, psi)
     sector_weight = float(w_primary)
     if partner_chars is not None:
-        _, w_partner = project_to_characters(group, partner_chars, psi)
+        p_partner, w_partner = project_to_characters(group, partner_chars, psi)
         sector_weight += float(w_partner)
         sector_weight = min(max(sector_weight, 0.0), 1.0)
-        sector_residual = float(np.sqrt(max(0.0, 1.0-sector_weight)))
+        projected = np.zeros_like(psi, dtype=np.complex128)
+        if p_primary is not None:
+            projected += np.sqrt(max(float(w_primary), 0.0))*p_primary
+        if p_partner is not None:
+            projected += np.sqrt(max(float(w_partner), 0.0))*p_partner
+        sector_residual = float(np.linalg.norm(psi-projected))
     else:
         sector_residual = projected_sector_residual(group, chars, psi)
-    tr_overlap = abs(np.dot(psi, psi))
-    tr_residual = float(np.sqrt(max(0.0, 2.0-2.0*min(1.0, tr_overlap))))
+
+    tr_bilinear = np.dot(psi, psi)
+    if abs(tr_bilinear) < 1e-15:
+        tr_residual = float(np.sqrt(2.0))
+    else:
+        tr_phase = tr_bilinear/abs(tr_bilinear)
+        tr_residual = float(np.linalg.norm(psi-tr_phase*np.conj(psi)))
     post_s = time.perf_counter() - tp
 
     d = output_dir / f"{dir_prefix}__sector{sector_id}__{seed_name}"
