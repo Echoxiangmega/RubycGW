@@ -412,7 +412,7 @@ def one_lanczos_step(psi, H, *, tol=1e-13):
 
 def lanczos_row(
     *, base_method, seed, psi, H, ed_gs, ed_row,
-    target, group, projection, extra=None,
+    target, group, projection, extra=None, time_reversal_restored=True,
 ):
     out, info = one_lanczos_step(psi, H)
     support = target_support_weight(group, target, out)
@@ -432,7 +432,7 @@ def lanczos_row(
             **info,
             "target_support_weight": support,
             "projected_sector_residual": target_support_residual(group, target, out),
-            "time_reversal_restored": True,
+            "time_reversal_restored": bool(time_reversal_restored),
         },
     )
     return row, out
@@ -774,6 +774,7 @@ def main():
                 seed=seed, psi=ppsi, H=H, ed_gs=ed_gs, ed_row=ed_row,
                 target_k=target["k"], target_q=target["q"],
                 target_c3=target["c3"], projection=proj_name,
+                time_reversal_restored=a.restore_time_reversal,
                 extra={
                     "target_id": target["target_id"],
                     "target_sector_ground_dimension": target["dimension"],
@@ -970,6 +971,15 @@ def main():
                             f"\n[VAP stage TR] seed={seed}, target={tid}",
                             flush=True,
                         )
+                        _, spatial_psi = load_summary_state(
+                            rd,H,expected_jastrow_mode=a.jastrow_mode,
+                            expected_backflow=use_backflow
+                        )
+                        tr_phase_warm = 0.0
+                        if spatial_psi is not None:
+                            b = np.dot(spatial_psi, spatial_psi)
+                            if abs(b) > 1e-14:
+                                tr_phase_warm = float(-0.5*np.angle(b))
                         row = run_full_vap_one(
                             g,a.nf,a.V,H,ed_gs,float(evals[0]),
                             group,target["characters"],
@@ -997,6 +1007,7 @@ def main():
                             time_reversal_even=True,
                             use_backflow=use_backflow,
                             initial_params=rparams,
+                            initial_tr_phase_override=tr_phase_warm,
                         )
                     else:
                         row = summary
@@ -1027,6 +1038,7 @@ def main():
                     base_method=names["vap"],
                     seed=seed, psi=vap_psi, H=H, ed_gs=ed_gs, ed_row=ed_row,
                     target=target, group=group, projection=proj_name,
+                    time_reversal_restored=a.restore_time_reversal,
                     extra={
                         "target_id": tid,
                         "target_sector_ground_dimension": target["dimension"],
