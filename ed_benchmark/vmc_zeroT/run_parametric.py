@@ -61,6 +61,15 @@ from symmetry_projection import (
 )
 
 
+class UnreachableTargetSector(RuntimeError):
+    """Reduced orbital manifold has numerically zero overlap with a target sector."""
+    def __init__(self, message, *, initial_weight, best_weight, last_scale):
+        super().__init__(message)
+        self.initial_weight = float(initial_weight)
+        self.best_weight = float(best_weight)
+        self.last_scale = float(last_scale)
+
+
 def write_csv(path: Path, rows: list[dict]):
     keys = list(dict.fromkeys(k for r in rows for k in r))
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -120,15 +129,23 @@ def make_projectable_theta(
 
     rng = np.random.default_rng(int(rng_seed))
     scale = float(initial_jitter)
+    best_w = float(w0)
+    last_scale = 0.0
     for _ in range(max_tries):
         theta = scale * rng.normal(size=theta0.shape)
         w = target_sector_weight_rotation(rot, theta, native_H, group, chars)
+        best_w = max(best_w, float(w))
+        last_scale = scale
         if w >= min_weight:
             return theta, float(w), scale
         scale *= 10.0
-    raise RuntimeError(
-        f"Could not make reduced orbital seed projectable: initial w={w0:.3e}, "
-        f"last jitter={scale/10:.3e}"
+    raise UnreachableTargetSector(
+        "Reduced orbital manifold cannot reach this target symmetry sector "
+        f"from the present seed/tangent basis: initial w={w0:.3e}, "
+        f"best probed w={best_w:.3e}, last jitter={last_scale:.3e}",
+        initial_weight=w0,
+        best_weight=best_w,
+        last_scale=last_scale,
     )
 
 
@@ -561,8 +578,30 @@ def parser():
     p.add_argument("--rng-seed", type=int, default=2026)
     p.add_argument("--ed-k", type=int, default=8)
     p.add_argument("--ed-degeneracy-tol", type=float, default=1e-8)
+    p.add_argument(
+        "--resume", action="store_true",
+        help="Reuse existing per-run summary.json files in the output directory"
+    )
     p.add_argument("--output", default="results/parametric_hex18_N6_V2")
     return p
+
+
+def result_dir_for(output_dir, family, seed, sector_id):
+    if family == "full_vap_sj":
+        return output_dir / f"full_vap_sj__sector{sector_id}__{seed}"
+    if family == "param_vap_sj":
+        return output_dir / f"param_vap_sj__sector{sector_id}__{seed}"
+    return output_dir / f"{family}__{seed}"
+
+
+def load_existing_summary(path):
+    fn = path / "summary.json"
+    if not fn.exists():
+        return None
+    try:
+        return json.loads(fn.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 def main():
@@ -691,47 +730,82 @@ def main():
                     f"\n[run {run_id}] {family}, seed={seed}{sector_txt}",
                     flush=True,
                 )
-                if family == "full_vap_sj":
-                    row = run_full_vap_one(
-                        g, a.nf, a.V, H, ed_gs, float(evals[0]), group, chars,
-                        ground_sectors=ground_sectors,
-                        sector_id=sector_id,
-                        sector_dim=sector_dim,
-                        seed_name=seed,
-                        seed_amplitude=a.seed_amplitude,
-                        n_shells=a.jastrow_shells,
-                        n_samples=a.n_samples,
-                        n_discard=a.n_discard,
-                        n_chains=a.n_chains,
-                        n_iter=a.n_iter,
-                        learning_rate=a.learning_rate,
-                        diag_shift=a.diag_shift,
-                        rng_seed=a.rng_seed + 1009*run_id,
-                        chunk_size=a.chunk_size,
-                        output_dir=out,
-                    )
+
+                run_dir = result_dir_for(out, family, seed, sector_id)
+                row = load_existing_summary(run_dir) if a.resume else None
+                if row is not None:
+                    print(f"[resume] reused {run_dir/'summary.json'}", flush=True)
                 else:
-                    row = run_one(
-                        g, a.nf, a.V, H, ed_gs, float(evals[0]), group, chars, basis,
-                        ground_sectors=ground_sectors,
-                        sector_id=sector_id,
-                        sector_dim=sector_dim,
-                        family=family,
-                        seed_name=seed,
-                        seed_amplitude=a.seed_amplitude,
-                        n_shells=a.jastrow_shells,
-                        n_samples=a.n_samples,
-                        n_discard=a.n_discard,
-                        n_chains=a.n_chains,
-                        n_iter=a.n_iter,
-                        learning_rate=a.learning_rate,
-                        diag_shift=a.diag_shift,
-                        rng_seed=a.rng_seed + 1009*run_id,
-                        chunk_size=a.chunk_size,
-                        output_dir=out,
-                    )
+                    try:
+                        if family == "full_vap_sj":
+                            row = run_full_vap_one(
+                                g, a.nf, a.V, H, ed_gs, float(evals[0]), group, chars,
+                                ground_sectors=ground_sectors,
+                                sector_id=sector_id,
+                                sector_dim=sector_dim,
+                                seed_name=seed,
+                                seed_amplitude=a.seed_amplitude,
+                                n_shells=a.jastrow_shells,
+                                n_samples=a.n_samples,
+                                n_discard=a.n_discard,
+                                n_chains=a.n_chains,
+                                n_iter=a.n_iter,
+                                learning_rate=a.learning_rate,
+                                diag_shift=a.diag_shift,
+                                rng_seed=a.rng_seed + 1009*run_id,
+                                chunk_size=a.chunk_size,
+                                output_dir=out,
+                            )
+                        else:
+                            row = run_one(
+                                g, a.nf, a.V, H, ed_gs, float(evals[0]), group, chars, basis,
+                                ground_sectors=ground_sectors,
+                                sector_id=sector_id,
+                                sector_dim=sector_dim,
+                                family=family,
+                                seed_name=seed,
+                                seed_amplitude=a.seed_amplitude,
+                                n_shells=a.jastrow_shells,
+                                n_samples=a.n_samples,
+                                n_discard=a.n_discard,
+                                n_chains=a.n_chains,
+                                n_iter=a.n_iter,
+                                learning_rate=a.learning_rate,
+                                diag_shift=a.diag_shift,
+                                rng_seed=a.rng_seed + 1009*run_id,
+                                chunk_size=a.chunk_size,
+                                output_dir=out,
+                            )
+                    except UnreachableTargetSector as exc:
+                        row = {
+                            "method": "Param-VAP-Slater-Jastrow",
+                            "seed": seed,
+                            "family": family,
+                            "target_sector_id": sector_id,
+                            "target_sector_ground_dimension": sector_dim,
+                            "ground_manifold_dimension": int(ed_gs.shape[1]),
+                            "status": "unreachable_target_sector",
+                            "initial_target_sector_weight": exc.initial_weight,
+                            "best_probed_target_sector_weight": exc.best_weight,
+                            "last_probe_jitter": exc.last_scale,
+                            "E": None,
+                            "fidelity_ground_subspace": None,
+                            "target_sector_weight": None,
+                            "time_total_s": 0.0,
+                        }
+                        run_dir.mkdir(parents=True, exist_ok=True)
+                        atomic_json(run_dir / "summary.json", row)
+                        print(
+                            f"[skip] {seed}, sector={sector_id}: reduced tangent "
+                            f"manifold is symmetry-incompatible "
+                            f"(best probed w={exc.best_weight:.3e})",
+                            flush=True,
+                        )
+
                 rows.append(row)
                 write_csv(out / "parametric_all.csv", rows)
+                if row.get("status") == "unreachable_target_sector":
+                    continue
                 print(
                     f"[result] E={row['E']:.12g}, dE={row['delta_E_vs_ED']:.4e}, "
                     f"F_groundspace={row['fidelity_ground_subspace']:.6f}, "
@@ -747,7 +821,12 @@ def main():
         "Param-VAP-Slater-Jastrow",
         "Full-VAP-Slater-Jastrow",
     ):
-        cand = [r for r in rows if r.get("method") == method]
+        cand = [
+            r for r in rows
+            if r.get("method") == method
+            and r.get("status", "ok") == "ok"
+            and r.get("E") is not None
+        ]
         if cand:
             best.append(min(cand, key=lambda r: float(r["E"])))
     write_csv(out / "parametric_best.csv", best)
