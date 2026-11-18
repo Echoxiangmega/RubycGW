@@ -774,7 +774,6 @@ def main():
                 seed=seed, psi=ppsi, H=H, ed_gs=ed_gs, ed_row=ed_row,
                 target_k=target["k"], target_q=target["q"],
                 target_c3=target["c3"], projection=proj_name,
-                time_reversal_restored=a.restore_time_reversal,
                 extra={
                     "target_id": target["target_id"],
                     "target_sector_ground_dimension": target["dimension"],
@@ -820,6 +819,7 @@ def main():
                 base_method=names["pav"],
                 seed=seed, psi=ppsi, H=H, ed_gs=ed_gs, ed_row=ed_row,
                 target=target, group=group, projection=proj_name,
+                time_reversal_restored=a.restore_time_reversal,
                 extra={
                     "target_id": target["target_id"],
                     "target_sector_ground_dimension": target["dimension"],
