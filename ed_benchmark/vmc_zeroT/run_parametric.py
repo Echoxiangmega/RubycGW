@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 import sys
 import time
+from functools import partial
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
@@ -224,8 +225,9 @@ def run_one(
     warmup_s = time.perf_counter() - tw
 
     optimizer = nk.optimizer.Sgd(learning_rate=learning_rate)
+    qgt_ctor = partial(nk.optimizer.qgt.QGTJacobianDense, mode="complex")
     sr = nk.optimizer.SR(
-        qgt=nk.optimizer.qgt.QGTJacobianDense,
+        qgt=qgt_ctor,
         solver=nk.optimizer.solver.cholesky_with_fallback,
         diag_shift=diag_shift,
     )
