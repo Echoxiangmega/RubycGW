@@ -385,6 +385,7 @@ def run_full_vap_one(
     seed_name, seed_amplitude, n_shells, n_samples, n_discard,
     n_chains, n_iter, learning_rate, diag_shift, rng_seed, chunk_size,
     output_dir, jastrow_mode="distance",
+    partner_chars=None, time_reversal_even=False,
 ):
     """Full-orbital VAP-Slater-Jastrow baseline on Hex18.
 
@@ -422,6 +423,29 @@ def run_full_vap_one(
             flush=True,
         )
 
+    # For a TR-restored benchmark, first form the spatial target (or
+    # conjugate-sector pair), then choose the initial global phase that
+    # maximizes the norm of its real component. This avoids accidental
+    # cancellation when applying spinless T=K.
+    tr_phase0 = 0.0
+    if time_reversal_even:
+        base0 = initial_base_state_native(
+            M0, native_H.states, native_H.g.Ns, native_H.nf
+        )
+        p0, w0 = project_to_characters(group, chars, base0)
+        pair0 = np.zeros_like(base0, dtype=np.complex128)
+        if p0 is not None:
+            pair0 += np.sqrt(max(float(w0), 0.0)) * p0
+        if partner_chars is not None:
+            pp0, wp0 = project_to_characters(group, partner_chars, base0)
+            if pp0 is not None:
+                pair0 += np.sqrt(max(float(wp0), 0.0)) * pp0
+        if np.linalg.norm(pair0) > 1e-14:
+            pair0 /= np.linalg.norm(pair0)
+            bilinear = np.dot(pair0, pair0)
+            if abs(bilinear) > 1e-14:
+                tr_phase0 = float(-0.5 * np.angle(bilinear))
+
     maps = np.asarray([op.site_map for op in group], dtype=np.int32)
     model = build_projected_netket_model(
         M0,
@@ -429,6 +453,11 @@ def run_full_vap_one(
         use_jastrow=True,
         site_maps=maps,
         characters=np.asarray(chars, complex),
+        partner_characters=(
+            None if partner_chars is None else np.asarray(partner_chars, complex)
+        ),
+        time_reversal_even=time_reversal_even,
+        initial_tr_phase=tr_phase0,
     )
     sampler = nk.sampler.MetropolisFermionHop(hi, graph=graph, n_chains=n_chains)
     vstate = nk.vqs.MCState(
@@ -482,8 +511,17 @@ def run_full_vap_one(
     variance_exact = float(max(0.0, np.vdot(Hpsi, Hpsi).real - E_exact**2))
     obs = benchmark_observables(g, native_H.states, psi, native_observables)
     fidelity = float(np.sum(np.abs(ed_gs.conj().T @ psi) ** 2).real)
-    _, sector_weight = project_to_characters(group, chars, psi)
-    sector_residual = projected_sector_residual(group, chars, psi)
+    _, w_primary = project_to_characters(group, chars, psi)
+    sector_weight = float(w_primary)
+    if partner_chars is not None:
+        _, w_partner = project_to_characters(group, partner_chars, psi)
+        sector_weight += float(w_partner)
+        sector_weight = min(max(sector_weight, 0.0), 1.0)
+        sector_residual = float(np.sqrt(max(0.0, 1.0-sector_weight)))
+    else:
+        sector_residual = projected_sector_residual(group, chars, psi)
+    tr_overlap = abs(np.dot(psi, psi))
+    tr_residual = float(np.sqrt(max(0.0, 2.0-2.0*min(1.0, tr_overlap))))
     post_s = time.perf_counter() - tp
 
     d = output_dir / f"{dir_prefix}__sector{sector_id}__{seed_name}"
@@ -522,6 +560,10 @@ def run_full_vap_one(
         "target_sector_weight": float(sector_weight),
         "ground_manifold_dimension": int(ed_gs.shape[1]),
         "projected_sector_residual": float(sector_residual),
+        "time_reversal_restored": bool(time_reversal_even),
+        "time_reversal_residual": tr_residual,
+        "initial_tr_phase": float(tr_phase0),
+        "target_has_tr_partner": bool(partner_chars is not None),
         "initial_target_sector_weight": float(seed_weight),
         "initial_seed_parameter_jitter": float(seed_jitter),
         "orbital_parameterization": "full complex Ns x Nf orbital matrix + QR",
