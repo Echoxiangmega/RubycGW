@@ -314,3 +314,193 @@ def build_parametric_netket_model(
             return jnp.vectorize(projected_logpsi, signature="(n)->()")(n)
 
     return ParametricSlaterJastrow()
+
+
+def build_orbital_rotation_data(
+    basis: SymmetryTiedBasis,
+    Q0: np.ndarray,
+    tol: float = 1e-10,
+):
+    """Build a stable reduced tangent basis for the occupied Slater subspace.
+
+    This replaces autodifferentiating through eigh(h_var). Let G_a be the
+    translation+C3 independent Hermitian one-body generators. Around a fixed
+    occupied subspace Q0, only occupied-virtual mixing changes the determinant:
+
+        dQ_a = (1-P0) G_a Q0,   P0=Q0 Q0^dag.
+
+    Real-linear dependent tangent directions are removed by SVD. The resulting
+    real parameters are symmetry-tied linear combinations of the original
+    onsite/real-bond/imag-bond generators, but the differentiable path contains
+    no eigendecomposition.
+    """
+    Q0 = np.asarray(Q0, np.complex128)
+    ns, nf = Q0.shape
+    Q0, _ = np.linalg.qr(Q0, mode="reduced")
+    P0 = Q0 @ Q0.conj().T
+    Iminus = np.eye(ns, dtype=complex) - P0
+
+    generators = []
+    labels = []
+    for i, m in enumerate(basis.onsite_matrices):
+        generators.append(np.asarray(m, complex)); labels.append(f"onsite[{i}]")
+    for i, m in enumerate(basis.bond_real_matrices):
+        generators.append(np.asarray(m, complex)); labels.append(f"bond_re[{i}]")
+    for i, m in enumerate(basis.bond_imag_matrices):
+        generators.append(np.asarray(m, complex)); labels.append(f"bond_im[{i}]")
+
+    tangents = []
+    active_labels = []
+    for lab, G in zip(labels, generators):
+        dQ = Iminus @ G @ Q0
+        nrm = float(np.linalg.norm(dQ))
+        if nrm > tol:
+            tangents.append(dQ)
+            active_labels.append(lab)
+
+    if not tangents:
+        return {
+            "Q0": Q0,
+            "tangent_basis": np.zeros((0, ns, nf), np.complex128),
+            "singular_values": np.zeros(0),
+            "generator_labels": labels,
+            "active_generator_labels": [],
+            "generator_count": len(generators),
+            "tangent_rank": 0,
+        }
+
+    # Real coefficients multiply complex tangent directions, so determine rank
+    # in the real vector space [Re(dQ), Im(dQ)].
+    A = np.column_stack([
+        np.concatenate([d.real.ravel(), d.imag.ravel()]) for d in tangents
+    ])
+    U, s, Vh = np.linalg.svd(A, full_matrices=False)
+    cutoff = tol * max(1.0, float(s[0]))
+    rank = int(np.count_nonzero(s > cutoff))
+    basis_vecs = []
+    nflat = ns * nf
+    for j in range(rank):
+        u = U[:, j]
+        d = u[:nflat].reshape(ns, nf) + 1j*u[nflat:].reshape(ns, nf)
+        # Re-project away tiny numerical occupied-space components.
+        d = Iminus @ d
+        d /= np.linalg.norm(d)
+        basis_vecs.append(d)
+
+    return {
+        "Q0": Q0,
+        "tangent_basis": np.asarray(basis_vecs, np.complex128),
+        "singular_values": np.asarray(s[:rank], float),
+        "generator_labels": labels,
+        "active_generator_labels": active_labels,
+        "generator_count": len(generators),
+        "tangent_rank": rank,
+        "generator_to_tangent_vh": np.asarray(Vh[:rank, :], float),
+    }
+
+
+def rotate_orbitals_numpy(Q0, tangent_basis, theta):
+    """Reference NumPy map used for seed/projector diagnostics."""
+    Q0 = np.asarray(Q0, complex)
+    tangent_basis = np.asarray(tangent_basis, complex)
+    theta = np.asarray(theta, float)
+    M = np.array(Q0, copy=True)
+    if len(theta):
+        M += np.einsum("a,aij->ij", theta, tangent_basis)
+    Q, R = np.linalg.qr(M, mode="reduced")
+    # Fix QR column phases continuously enough for deterministic exact checks.
+    d = np.diag(R)
+    phase = np.where(np.abs(d) > 1e-14, d/np.abs(d), 1.0+0j)
+    Q = Q * phase.conj()[None, :]
+    return Q
+
+
+def build_stable_parametric_netket_model(
+    Q0: np.ndarray,
+    tangent_basis: np.ndarray,
+    shell_matrices: np.ndarray,
+    use_jastrow: bool,
+    *,
+    projection_site_maps=None,
+    projection_characters=None,
+):
+    """Reduced Slater(-Jastrow) model without differentiating through eigh.
+
+    Q(theta) = qr[ Q0 + sum_a theta_a dQ_a ], with real theta_a and fixed
+    translation+C3 symmetry-tied tangent directions dQ_a.
+    """
+    import jax
+    import jax.numpy as jnp
+    from flax import linen as nn
+    import netket as nk
+
+    Q0_np = np.asarray(Q0, np.complex128)
+    tan_np = np.asarray(tangent_basis, np.complex128)
+    shells_np = np.asarray(shell_matrices, np.float64)
+    ns, nf = Q0_np.shape
+    maps_np = None if projection_site_maps is None else np.asarray(projection_site_maps, np.int32)
+    chars_np = None if projection_characters is None else np.asarray(projection_characters, np.complex128)
+    projected = maps_np is not None
+    if projected and chars_np.shape != (maps_np.shape[0],):
+        raise ValueError("projection character/map mismatch")
+
+    class StableReducedSlaterJastrow(nn.Module):
+        @nn.compact
+        def __call__(self, n):
+            theta = self.param(
+                "theta", nn.initializers.zeros_init(), (tan_np.shape[0],), jnp.float64
+            )
+            if use_jastrow:
+                v = self.param(
+                    "v", nn.initializers.zeros_init(), (shells_np.shape[0],), jnp.float64
+                )
+            else:
+                v = None
+
+            M = jnp.asarray(Q0_np)
+            if tan_np.shape[0]:
+                M = M + jnp.einsum("a,aij->ij", theta, jnp.asarray(tan_np))
+            Q, R = jnp.linalg.qr(M, mode="reduced")
+            d = jnp.diag(R)
+            phase = jnp.where(jnp.abs(d) > 1e-14, d/jnp.abs(d), 1.0+0j)
+            Q = Q * jnp.conj(phase)[None, :]
+
+            shells = jnp.asarray(shells_np)
+            filling = nf / ns
+
+            def base_logpsi(x):
+                occ = jnp.nonzero(x, size=nf)[0]
+                out = nk.jax.logdet_cmplx(Q[occ])
+                if use_jastrow and shells.shape[0] > 0:
+                    dn = x - filling
+                    feat = 0.5*jnp.einsum("i,sij,j->s", dn, shells, dn)
+                    out = out + jnp.dot(v, feat)
+                return out
+
+            if not projected:
+                return jnp.vectorize(base_logpsi, signature="(n)->()")(n)
+
+            maps = jnp.asarray(maps_np)
+            chars = jnp.asarray(chars_np)
+
+            def fock_sign(p, source):
+                occupied = jnp.nonzero(source, size=nf)[0]
+                mapped = p[occupied]
+                cmp = mapped[:, None] > mapped[None, :]
+                inv = jnp.sum(jnp.triu(cmp, k=1), dtype=jnp.int32)
+                return jnp.where((inv & 1) == 0, 1.0, -1.0)
+
+            def projected_logpsi(x):
+                sources = jax.vmap(lambda p: x[p])(maps)
+                logs = jax.vmap(base_logpsi)(sources)
+                signs = jax.vmap(fock_sign)(maps, sources)
+                coeff = jnp.conj(chars) * signs
+                shift = jnp.max(jnp.real(logs))
+                z = jnp.sum(coeff*jnp.exp(logs-shift))
+                tiny = jnp.asarray(1e-300+0j, dtype=z.dtype)
+                z = jnp.where(jnp.abs(z) > 1e-300, z, tiny)
+                return shift + jnp.log(z)
+
+            return jnp.vectorize(projected_logpsi, signature="(n)->()")(n)
+
+    return StableReducedSlaterJastrow()
