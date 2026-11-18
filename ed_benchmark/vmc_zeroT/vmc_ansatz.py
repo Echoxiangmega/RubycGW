@@ -116,3 +116,98 @@ def build_netket_model(M0: np.ndarray, shell_matrices: np.ndarray, use_jastrow: 
             return logpsi(n)
 
     return LogSlaterDensityJastrow()
+
+
+def build_projected_netket_model(
+    M0: np.ndarray,
+    shell_matrices: np.ndarray,
+    use_jastrow: bool,
+    site_maps: np.ndarray,
+    characters: np.ndarray,
+):
+    """Create a symmetry-projected log wavefunction for variation after projection.
+
+    For a target one-dimensional irrep with characters chi_g, the model is
+
+        Psi_Gamma(x) = sum_g chi_g^* (U_g Psi)(x)
+
+    up to an irrelevant overall 1/|G| factor. For the site permutation
+    c_i^dag -> c_{p(i)}^dag,
+
+        (U_g Psi)(x_target) = s_g(x_source) Psi(x_source),
+        x_source[i] = x_target[p(i)],
+
+    where s_g is the fermionic reordering parity. The same complex Slater
+    matrix and real density-Jastrow parameters are shared by all group images.
+    """
+    import jax
+    import jax.numpy as jnp
+    from flax import linen as nn
+    import netket as nk
+
+    M0 = np.asarray(M0, np.complex128)
+    shells_np = np.asarray(shell_matrices, np.float64)
+    maps_np = np.asarray(site_maps, np.int32)
+    chars_np = np.asarray(characters, np.complex128)
+    ns, nf = M0.shape
+    if maps_np.ndim != 2 or maps_np.shape[1] != ns:
+        raise ValueError("site_maps must have shape (|G|, Ns)")
+    if chars_np.shape != (maps_np.shape[0],):
+        raise ValueError("characters length does not match site_maps")
+
+    class LogProjectedSlaterDensityJastrow(nn.Module):
+        @nn.compact
+        def __call__(self, n: jax.Array) -> jax.Array:
+            def init_M(key):
+                del key
+                return jnp.asarray(M0)
+
+            M = self.param("M", init_M)
+            if use_jastrow:
+                v = self.param(
+                    "v", nn.initializers.zeros_init(), (shells_np.shape[0],), jnp.float64
+                )
+            else:
+                v = None
+
+            Q, _ = jnp.linalg.qr(M, mode="reduced")
+            shells = jnp.asarray(shells_np)
+            maps = jnp.asarray(maps_np)
+            chars = jnp.asarray(chars_np)
+            filling = nf / ns
+
+            def base_logpsi(x):
+                occupied = jnp.nonzero(x, size=nf)[0]
+                A = Q[occupied]
+                out = nk.jax.logdet_cmplx(A)
+                if use_jastrow and shells.shape[0] > 0:
+                    dn = x - filling
+                    features = 0.5 * jnp.einsum("i,sij,j->s", dn, shells, dn)
+                    out = out + jnp.dot(v, features)
+                return out
+
+            def fock_sign(p, source):
+                occupied = jnp.nonzero(source, size=nf)[0]
+                mapped = p[occupied]
+                # Number of inversions in mapped creation-operator order.
+                cmp = mapped[:, None] > mapped[None, :]
+                inv = jnp.sum(jnp.triu(cmp, k=1), dtype=jnp.int32)
+                return jnp.where((inv & 1) == 0, 1.0, -1.0)
+
+            def projected_logpsi(x):
+                # source[i] = target[p(i)] for U_p acting on amplitudes.
+                sources = jax.vmap(lambda p: x[p])(maps)
+                logs = jax.vmap(base_logpsi)(sources)
+                signs = jax.vmap(fock_sign)(maps, sources)
+                coeff = jnp.conj(chars) * signs
+                shift = jnp.max(jnp.real(logs))
+                z = jnp.sum(coeff * jnp.exp(logs - shift))
+                # Exact symmetry nodes are allowed. A tiny complex floor avoids
+                # undefined log/gradient at accidental floating-point zero only.
+                tiny = jnp.asarray(1e-300 + 0.0j, dtype=z.dtype)
+                z_safe = jnp.where(jnp.abs(z) > 1e-300, z, tiny)
+                return shift + jnp.log(z_safe)
+
+            return jax.vmap(projected_logpsi)(n)
+
+    return LogProjectedSlaterDensityJastrow()
