@@ -203,13 +203,34 @@ def run_vmc_one(
     warmup_s = time.perf_counter() - tw
 
     optimizer = nk.optimizer.Sgd(learning_rate=learning_rate)
-    driver = nk.driver.VMC_SR(
-        H_fast,
-        optimizer,
-        variational_state=vstate,
-        diag_shift=diag_shift,
-        mode="complex",
-    )
+    # VMC_SR/SRt requires all parameter leaves to have the same dtype.
+    # Our Varma-style ansatz intentionally has a complex Slater matrix M
+    # and a *real* density-Jastrow vector v. For that mixed real/complex
+    # PyTree use the standard VMC driver with an explicit dense-Jacobian SR
+    # preconditioner, which NetKet supports for mixed parameter types.
+    if ansatz == "slater_jastrow":
+        sr = nk.optimizer.SR(
+            qgt=nk.optimizer.qgt.QGTJacobianDense,
+            solver=nk.optimizer.solver.cholesky_with_fallback,
+            diag_shift=diag_shift,
+        )
+        driver = nk.driver.VMC(
+            H_fast,
+            optimizer,
+            variational_state=vstate,
+            preconditioner=sr,
+        )
+        optimizer_engine = "VMC+SR(QGTJacobianDense,mixed-real-complex)"
+    else:
+        driver = nk.driver.VMC_SR(
+            H_fast,
+            optimizer,
+            variational_state=vstate,
+            diag_shift=diag_shift,
+            mode="complex",
+        )
+        optimizer_engine = "VMC_SR(complex)"
+    print(f"[optimizer] {optimizer_engine}", flush=True)
     log = nk.logging.RuntimeLog()
     topt = time.perf_counter()
     driver.run(n_iter=n_iter, out=log, show_progress=True)
@@ -267,6 +288,7 @@ def run_vmc_one(
         "n_samples": int(vstate.n_samples),
         "n_iter": int(n_iter),
         "n_chains": int(n_chains),
+        "optimizer_engine": optimizer_engine,
         "hamiltonian_max_abs_diff": hamiltonian_max_abs_diff,
         "jastrow_shell_distances": ";".join(f"{x:.12g}" for x in distances),
         "time_build_s": setup_s,
