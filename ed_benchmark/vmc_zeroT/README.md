@@ -515,3 +515,76 @@ For this first comparison all methods deliberately use the same distance-shell
 density Jastrow. Bond-aware \(v_t,v_{t1},v_{t2}\) parameters should be tested
 as a separate controlled extension rather than mixed into the C3 constraint
 comparison.
+
+
+## Full PAV / Full VAP comparison with bond-aware Jastrow
+
+The current recommended Hex18 benchmark deliberately drops the C3-constrained
+reference ansatz and compares only:
+
+\`\`\`text
+ED
+PAV-Slater-Jastrow
+Full-VAP-Slater-Jastrow
+\`\`\`
+
+using the same unrestricted full complex Slater matrix in both variational
+methods.
+
+The recommended Jastrow mode is now \`bond_aware\`. Its first three independent
+density-correlation parameters are
+
+\[
+v_t,\qquad v_{t1},\qquad v_{t2},
+\]
+
+acting only on the corresponding Ruby graph-bond pairs. Graph bonds are then
+excluded from all longer-range channels. The remaining non-graph pairs are
+grouped by minimum-image Euclidean distance.
+
+Thus, with
+
+\`\`\`text
+--jastrow-mode bond_aware --jastrow-shells 4
+\`\`\`
+
+there are \(3+4=7\) real Jastrow parameters: three bond-type channels plus
+four non-bond distance shells. The old pure-distance parameterization remains
+available with \`--jastrow-mode distance\`.
+
+Test the channel partition first:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/test_bond_aware_jastrow.py
+\`\`\`
+
+For example:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/run_projection_comparison.py \
+  --nf 3 \
+  --t 1 --t1 0.5 --t2 -0.5 --V 2.5 \
+  --seeds normal sd isd lc_same lc_opposite \
+  --jastrow-mode bond_aware \
+  --jastrow-shells 4 \
+  --n-samples 4096 \
+  --n-iter 300 \
+  --ed-k 12 \
+  --output results/full_pav_vap_bondjastrow_N3_V2p5
+\`\`\`
+
+The script prints and saves the ED momentum sector labels and writes:
+
+\`\`\`text
+jastrow_channels.json
+ed_projection_sectors.json
+comparison_all.csv
+comparison_best.csv
+comparison_best.json
+\`\`\`
+
+For \`bond_aware\`, \`--jastrow-shells\` means the number of additional
+non-bond distance shells, not the total number of Jastrow parameters.
+
+Use \`--resume\` to reuse completed raw-SJ and full-VAP runs. Resume refuses to
+reuse a run whose saved \`jastrow_mode\` differs from the requested mode.
