@@ -588,3 +588,48 @@ non-bond distance shells, not the total number of Jastrow parameters.
 
 Use \`--resume\` to reuse completed raw-SJ and full-VAP runs. Resume refuses to
 reuse a run whose saved \`jastrow_mode\` differs from the requested mode.
+
+
+## Six-way Hex18 comparison with exact one-Lanczos postprocessing
+
+The recommended projection benchmark now compares exactly six rows:
+
+\`\`\`text
+ED
+Raw-Slater-Jastrow
+PAV-Slater-Jastrow
+PAV-Slater-Jastrow+1LS
+Full-VAP-Slater-Jastrow
+Full-VAP-Slater-Jastrow+1LS
+\`\`\`
+
+\`Raw-Slater-Jastrow\` is the optimized unrestricted full complex Slater x
+Jastrow state before any symmetry projection.
+
+For PAV and Full VAP, the optional one-Lanczos result is not another Monte
+Carlo optimization. On Hex18 the complete fixed-N wavefunction is already
+enumerated, so the code constructs
+
+\[
+r=(H-E)\Psi
+\]
+
+and diagonalizes the exact \(2\times2\) Hamiltonian in
+
+\[
+\mathrm{span}\{\Psi,r\}=\mathrm{span}\{\Psi,H\Psi\}.
+\]
+
+This gives the variationally optimal one-step Krylov/Lanczos state with no
+sampling error in the postprocessing. Because \(H\) commutes with the target
+symmetry projector, PAV+1LS and VAP+1LS remain in the same \(k\)/point-group
+sector as their parent states.
+
+Test the Lanczos implementation with:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/test_one_lanczos_step.py
+\`\`\`
+
+The main output \`comparison_best.csv\` contains the best-energy representative
+of all six methods across the requested seeds and ED-ground sectors.
