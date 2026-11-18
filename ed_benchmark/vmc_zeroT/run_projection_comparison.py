@@ -868,7 +868,8 @@ def main():
                         expected_backflow=use_backflow
                     ) if a.resume else (None,None)
                 )
-                if tsum is None:
+                tparams_existing = load_variational_params(td) if a.resume else None
+                if tsum is None and tparams_existing is None:
                     print(
                         f"\n[VAP stage T] seed={seed}, target={tid}, k={target['k']}",
                         flush=True,
@@ -901,6 +902,12 @@ def main():
                         use_backflow=use_backflow,
                         initial_params=raw_params,
                     )
+                elif tsum is None and tparams_existing is not None:
+                    print(
+                        f"\n[resume VAP stage T] recovered parameters from {td/'final_state.npz'} "
+                        "(summary was missing)",
+                        flush=True,
+                    )
                 tparams = load_variational_params(td)
                 if tparams is None:
                     raise RuntimeError(f"Missing translation-stage parameters: {td}")
@@ -913,7 +920,12 @@ def main():
                         expected_backflow=use_backflow
                     ) if a.resume else (None,None)
                 )
-                if rsum is None:
+                rparams_existing = load_variational_params(rd) if a.resume else None
+                can_recover_r = (
+                    rsum is None and rparams_existing is not None
+                    and a.restore_time_reversal
+                )
+                if rsum is None and not can_recover_r:
                     print(
                         f"\n[VAP stage T+R] seed={seed}, target={tid}, "
                         f"k={target['k']} C3={target['c3']}",
@@ -952,6 +964,12 @@ def main():
                         time_reversal_even=False,
                         use_backflow=use_backflow,
                         initial_params=tparams,
+                    )
+                elif can_recover_r:
+                    print(
+                        f"\n[resume VAP stage T+R] recovered parameters from {rd/'final_state.npz'} "
+                        "(summary was missing)",
+                        flush=True,
                     )
                 rparams = load_variational_params(rd)
                 if rparams is None:
