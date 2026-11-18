@@ -68,7 +68,7 @@ def _sanitize_json_nonfinite(obj):
     if isinstance(obj, (float, np.floating)):
         x = float(obj)
         return x if np.isfinite(x) else None
-    if isinstance(obj, np.complexfloating):
+    if isinstance(obj, (complex, np.complexfloating)):
         z = complex(obj)
         return {
             "real": float(z.real) if np.isfinite(z.real) else None,
