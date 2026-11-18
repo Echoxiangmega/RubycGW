@@ -759,3 +759,57 @@ Backflow runs use separate directories and method names, for example
 an old density-Jastrow-only run. Optimized values of
 \(\eta_t,\eta_{t1},\eta_{t2}\) are stored as real/imaginary columns in the
 summary CSV/JSON.
+
+
+## Plotting the projection benchmark
+
+After a projection scan finishes, generate the standard five comparison figures with
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/plot_projection_comparison.py \
+  results/backflow_hex18_N3_V2p5/comparison_all.csv
+\`\`\`
+
+By default the figures are written to
+
+\`\`\`text
+<comparison_all.csv parent>/plots/
+\`\`\`
+
+The script automatically detects whether the CSV contains the density-Jastrow
+or Backflow method names. It selects the lowest-energy seed for each method
+for the best-result plots.
+
+The five standard figures are:
+
+\`\`\`text
+best_energy_vs_ed.png
+best_observables_vs_ed.png
+best_fidelity.png
+pav_vap_rank_consistency.png
+pav_vap_energy_fidelity.png
+\`\`\`
+
+The observable comparison contains
+
+\[
+CO_{q,\max},\qquad S_{\rm BOW},\qquad
+S_{\rm LC+},\qquad S_{\rm LC-}.
+\]
+
+The script also writes
+
+\`\`\`text
+best_results_for_plotting.csv
+pav_vap_seed_ranking.csv
+\`\`\`
+
+for later plotting in Origin or other software.
+
+A different output directory can be specified with
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/plot_projection_comparison.py \
+  path/to/comparison_all.csv \
+  --output path/to/my_plots
+\`\`\`
