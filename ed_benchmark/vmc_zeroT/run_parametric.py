@@ -388,6 +388,7 @@ def run_full_vap_one(
     output_dir, jastrow_mode="distance",
     partner_chars=None, time_reversal_even=False,
     use_backflow=False, initial_params=None,
+    initial_tr_phase_override=None,
 ):
     """Full-orbital VAP-Slater-Jastrow baseline on Hex18.
 
@@ -428,7 +429,12 @@ def run_full_vap_one(
             eta0 = None
         seed_weight = float(initial_params.get("target_weight", np.nan))
         seed_jitter = 0.0
-    if seed_jitter > 0:
+    if initial_params is not None:
+        print(
+            f"[full VAP init] {seed_name}: warm start from previous stage",
+            flush=True,
+        )
+    elif seed_jitter > 0:
         print(
             f"[full VAP init] {seed_name}: sector {sector_id} had negligible weight; "
             f"orbital jitter={seed_jitter:.1e}, new w={seed_weight:.3e}",
@@ -444,8 +450,11 @@ def run_full_vap_one(
     # conjugate-sector pair), then choose the initial global phase that
     # maximizes the norm of its real component. This avoids accidental
     # cancellation when applying spinless T=K.
-    tr_phase0 = 0.0
-    if time_reversal_even:
+    tr_phase0 = (
+        float(initial_tr_phase_override)
+        if initial_tr_phase_override is not None else 0.0
+    )
+    if time_reversal_even and initial_tr_phase_override is None:
         base0 = initial_base_state_native(
             M0, native_H.states, native_H.g.Ns, native_H.nf
         )
