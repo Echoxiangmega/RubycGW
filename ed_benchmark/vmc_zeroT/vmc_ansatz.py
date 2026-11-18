@@ -147,6 +147,35 @@ def jastrow_channels(g, mode: str = "distance", n_shells: int = 4):
     raise ValueError(f"Unknown Jastrow mode: {mode}")
 
 
+
+def bond_backflow_channels(g):
+    """Three symmetric nearest-neighbor backflow channels: t, t1 and t2.
+
+    The backflow orbital deformation is
+        Q_BF[i,a](x) = Q[i,a]
+          + sum_k eta_k sum_j B_k[i,j] (n_j-nu) Q[j,a],
+    with complex eta_k and k in {t,t1,t2}.
+    """
+    ns = g.Ns
+    labels = ["t", "t1", "t2"]
+    mats = np.zeros((3, ns, ns), dtype=float)
+    counts = np.zeros(3, dtype=int)
+    kind_to_k = {name: k for k, name in enumerate(labels)}
+    seen = set()
+    for e in g.edges:
+        if e.kind not in kind_to_k:
+            continue
+        i, j = int(e.i), int(e.j)
+        key = tuple(sorted((i, j)))
+        if key in seen:
+            raise RuntimeError(f"Duplicate graph pair in backflow channels: {key}")
+        seen.add(key)
+        k = kind_to_k[e.kind]
+        mats[k, i, j] = mats[k, j, i] = 1.0
+        counts[k] += 1
+    return [f"eta_{x}" for x in labels], mats, counts
+
+
 def one_body_seed_hamiltonian(g, seed: str, seed_amplitude: float, star_formfactor) -> np.ndarray:
     """Auxiliary one-body Hamiltonian used only to initialize variational states."""
     ns = g.Ns
@@ -184,7 +213,12 @@ def one_body_seed(g, nf: int, seed: str, seed_amplitude: float, star_formfactor)
     return np.asarray(u[:, :nf], dtype=np.complex128)
 
 
-def build_netket_model(M0: np.ndarray, shell_matrices: np.ndarray, use_jastrow: bool):
+def build_netket_model(
+    M0: np.ndarray,
+    shell_matrices: np.ndarray,
+    use_jastrow: bool,
+    backflow_matrices: np.ndarray | None = None,
+):
     """Create a Flax-Linen log-wavefunction model lazily."""
     import jax
     import jax.numpy as jnp
@@ -193,7 +227,13 @@ def build_netket_model(M0: np.ndarray, shell_matrices: np.ndarray, use_jastrow: 
 
     M0 = np.asarray(M0, np.complex128)
     shells_np = np.asarray(shell_matrices, np.float64)
+    backflow_np = (
+        None if backflow_matrices is None
+        else np.asarray(backflow_matrices, np.float64)
+    )
     ns, nf = M0.shape
+    if backflow_np is not None and backflow_np.shape[1:] != (ns, ns):
+        raise ValueError("backflow_matrices must have shape (n_channels,Ns,Ns)")
 
     class LogSlaterDensityJastrow(nn.Module):
         @nn.compact
@@ -209,6 +249,15 @@ def build_netket_model(M0: np.ndarray, shell_matrices: np.ndarray, use_jastrow: 
                 )
             else:
                 v = None
+            if backflow_np is not None:
+                eta = self.param(
+                    "eta", nn.initializers.zeros_init(),
+                    (backflow_np.shape[0],), jnp.complex128
+                )
+                backflow = jnp.asarray(backflow_np)
+            else:
+                eta = None
+                backflow = None
 
             Q, _ = jnp.linalg.qr(M, mode="reduced")
             shells = jnp.asarray(shells_np)
@@ -217,10 +266,15 @@ def build_netket_model(M0: np.ndarray, shell_matrices: np.ndarray, use_jastrow: 
             @partial(jnp.vectorize, signature="(n)->()")
             def logpsi(x):
                 occupied = jnp.nonzero(x, size=nf)[0]
-                A = Q[occupied]
+                dn = x - filling
+                if backflow is not None:
+                    dQ = jnp.einsum("k,kij,j,ja->ia", eta, backflow, dn, Q)
+                    Qx = Q + dQ
+                else:
+                    Qx = Q
+                A = Qx[occupied]
                 logdet = nk.jax.logdet_cmplx(A)
                 if use_jastrow and shells.shape[0] > 0:
-                    dn = x - filling
                     features = 0.5 * jnp.einsum("i,sij,j->s", dn, shells, dn)
                     return logdet + jnp.dot(v, features)
                 return logdet
@@ -239,6 +293,7 @@ def build_projected_netket_model(
     partner_characters: np.ndarray | None = None,
     time_reversal_even: bool = False,
     initial_tr_phase: float = 0.0,
+    backflow_matrices: np.ndarray | None = None,
 ):
     """Create a symmetry-projected log wavefunction for variation after projection.
 
@@ -262,6 +317,10 @@ def build_projected_netket_model(
 
     M0 = np.asarray(M0, np.complex128)
     shells_np = np.asarray(shell_matrices, np.float64)
+    backflow_np = (
+        None if backflow_matrices is None
+        else np.asarray(backflow_matrices, np.float64)
+    )
     maps_np = np.asarray(site_maps, np.int32)
     chars_np = np.asarray(characters, np.complex128)
     partner_chars_np = (
@@ -269,6 +328,8 @@ def build_projected_netket_model(
         else np.asarray(partner_characters, np.complex128)
     )
     ns, nf = M0.shape
+    if backflow_np is not None and backflow_np.shape[1:] != (ns, ns):
+        raise ValueError("backflow_matrices must have shape (n_channels,Ns,Ns)")
     if maps_np.ndim != 2 or maps_np.shape[1] != ns:
         raise ValueError("site_maps must have shape (|G|, Ns)")
     if chars_np.shape != (maps_np.shape[0],):
@@ -290,6 +351,15 @@ def build_projected_netket_model(
                 )
             else:
                 v = None
+            if backflow_np is not None:
+                eta = self.param(
+                    "eta", nn.initializers.zeros_init(),
+                    (backflow_np.shape[0],), jnp.complex128
+                )
+                backflow = jnp.asarray(backflow_np)
+            else:
+                eta = None
+                backflow = None
 
             Q, _ = jnp.linalg.qr(M, mode="reduced")
             shells = jnp.asarray(shells_np)
@@ -309,10 +379,15 @@ def build_projected_netket_model(
 
             def base_logpsi(x):
                 occupied = jnp.nonzero(x, size=nf)[0]
-                A = Q[occupied]
+                dn = x - filling
+                if backflow is not None:
+                    dQ = jnp.einsum("k,kij,j,ja->ia", eta, backflow, dn, Q)
+                    Qx = Q + dQ
+                else:
+                    Qx = Q
+                A = Qx[occupied]
                 out = nk.jax.logdet_cmplx(A)
                 if use_jastrow and shells.shape[0] > 0:
-                    dn = x - filling
                     features = 0.5 * jnp.einsum("i,sij,j->s", dn, shells, dn)
                     out = out + jnp.dot(v, features)
                 return out
