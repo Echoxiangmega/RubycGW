@@ -407,6 +407,7 @@ def run_full_vap_one(
     M0_raw = one_body_seed(g, nf, seed_name, seed_amplitude, star)
     M0, seed_weight, seed_jitter = make_projectable_seed(
         M0_raw, native_H, group, chars,
+        partner_chars=partner_chars,
         rng_seed=rng_seed + 7919,
         min_weight=1e-8,
         initial_jitter=1e-4,
