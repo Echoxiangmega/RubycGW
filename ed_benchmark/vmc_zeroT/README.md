@@ -240,3 +240,72 @@ python ed_benchmark/vmc_zeroT/run_vap.py \
 The first VAP implementation uses the same ordinary translations x \(C_{3v}\)
 sector as PAV. Gauge-compensated \(C_6\) for \(t_1=-t_2\) remains a separate
 extension.
+
+
+## Symmetry-tied reduced one-body parameterization
+
+To test a scalable Varma-style parameterization before moving beyond Hex18,
+use the translation+C3 independent auxiliary Hamiltonian:
+
+\[
+h_{\rm var}=h_0+\sum_a\lambda_a D_a+
+\sum_b\left(x_b K_b^{R}+y_b K_b^{I}\right).
+\]
+
+Each \(b\) is one translation+C3 inequivalent bond orbit. The imaginary
+coefficient \(y_b\) is retained, so loop-current states are allowed. Mirrors
+and time reversal are not imposed. One uniform onsite-energy gauge direction
+is removed.
+
+First inspect and test the actual independent parameter count:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/test_parametric_ansatz.py
+\`\`\`
+
+Then run the three reduced families on the same Hex18 benchmark:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/run_parametric.py \
+  --nf 6 \
+  --t 1 --t1 0.5 --t2 -0.5 --V 2 \
+  --families param_slater param_sj param_vap_sj \
+  --seeds normal sd isd lc_same lc_opposite \
+  --n-samples 4096 \
+  --n-iter 300 \
+  --output results/parametric_hex18_N6_V2
+\`\`\`
+
+The three families are:
+
+- \`Param-Slater\`: reduced complex one-body Hamiltonian only;
+- \`Param-Slater-Jastrow\`: same reduced one-body parameters plus density Jastrow;
+- \`Param-VAP-Slater-Jastrow\`: the same reduced parameters optimized after
+  projection into the exact Hex18 ED ordinary-space-group sector.
+
+All final energies and observables are again reevaluated by full fixed-\(N\)
+enumeration. The main output is:
+
+\`\`\`text
+results/parametric_hex18_N6_V2/parametric_best.csv
+\`\`\`
+
+To compare the exact ED result, the previous full-orbital VAP result, and all
+three reduced families in one five-row table:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/compare_reduced.py \
+  --full-vap results/vap_hex18_N6_V2_multiseed \
+  --parametric results/parametric_hex18_N6_V2
+\`\`\`
+
+This writes:
+
+\`\`\`text
+results/parametric_hex18_N6_V2/comparison_ed_fullvap_parametric.csv
+results/parametric_hex18_N6_V2/comparison_ed_fullvap_parametric.json
+\`\`\`
+
+The comparison includes \(E\), \(E-E_{\rm ED}\), fidelity, CO/BOW/LC
+structure factors, opposite/same LC ratio, target-sector weight, variational
+parameter count, and wall time.
