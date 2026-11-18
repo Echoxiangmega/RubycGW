@@ -34,7 +34,7 @@ import core as native_core
 import observables as native_observables
 
 from benchmark_observables import benchmark_observables, ruby_star_formfactor
-from vmc_ansatz import minimum_image_shells, one_body_seed, build_netket_model
+from vmc_ansatz import jastrow_channels, one_body_seed, build_netket_model
 
 
 def _json_default(obj):
@@ -191,6 +191,7 @@ def run_vmc_one(
     g, nf, V, native_H, ed_gs, ed_E0, *, ansatz, seed_name, seed_amplitude,
     n_shells, n_samples, n_discard, n_chains, n_iter, learning_rate,
     diag_shift, rng_seed, chunk_size, output_dir, validate_hamiltonian=False,
+    jastrow_mode="distance",
 ):
     import jax
     jax.config.update("jax_enable_x64", True)
@@ -204,7 +205,9 @@ def run_vmc_one(
             hi, H_generic, native_H, g.Ns
         )
     star = ruby_star_formfactor(g)
-    distances, shells, shell_counts = minimum_image_shells(g, n_shells=n_shells)
+    jastrow_labels, distances, shells, shell_counts = jastrow_channels(
+        g, mode=jastrow_mode, n_shells=n_shells
+    )
     M0 = one_body_seed(g, nf, seed_name, seed_amplitude, star)
     model = build_netket_model(M0, shells, use_jastrow=(ansatz == "slater_jastrow"))
     sampler = nk.sampler.MetropolisFermionHop(hi, graph=graph, n_chains=n_chains)
@@ -280,6 +283,7 @@ def run_vmc_one(
         native_states=native_H.states,
         shell_distances=distances,
         shell_counts=shell_counts,
+        jastrow_labels=np.asarray(jastrow_labels),
         star_formfactor=star,
     )
     history = {}
@@ -311,7 +315,10 @@ def run_vmc_one(
         "n_chains": int(n_chains),
         "optimizer_engine": optimizer_engine,
         "hamiltonian_max_abs_diff": hamiltonian_max_abs_diff,
+        "jastrow_mode": jastrow_mode,
+        "jastrow_labels": ";".join(map(str, jastrow_labels)),
         "jastrow_shell_distances": ";".join(f"{x:.12g}" for x in distances),
+        "jastrow_channel_counts": ";".join(str(int(x)) for x in shell_counts),
         "time_build_s": setup_s,
         "time_jit_warmup_s": warmup_s,
         "time_solve_or_opt_s": opt_s,
@@ -374,6 +381,10 @@ def parser():
     )
     p.add_argument("--seed-amplitude", type=float, default=0.08)
     p.add_argument("--jastrow-shells", type=int, default=4)
+    p.add_argument(
+        "--jastrow-mode", choices=["distance", "bond_aware"], default="distance",
+        help="distance: old distance shells; bond_aware: separate t/t1/t2 bonds plus nonbond shells"
+    )
     p.add_argument("--n-samples", type=int, default=4096)
     p.add_argument("--n-discard", type=int, default=16)
     p.add_argument("--n-chains", type=int, default=16)
@@ -457,6 +468,7 @@ def main():
                 chunk_size=a.chunk_size,
                 output_dir=out,
                 validate_hamiltonian=(run_id == 1),
+                jastrow_mode=a.jastrow_mode,
             )
             row = add_ed_differences(row, ed_row)
             rows.append(row)
