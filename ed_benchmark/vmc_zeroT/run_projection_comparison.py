@@ -218,12 +218,14 @@ def spatial_pair_project(group, target, psi, tol=1e-14):
 
 
 def time_reversal_residual(psi):
-    """Gauge-invariant distance from a spinless T=K invariant ray."""
+    """Gauge-invariant direct distance from a spinless T=K invariant ray."""
     x = np.asarray(psi, complex)
     x /= np.linalg.norm(x)
-    # |x^T x|=1 iff x is real up to a global phase.
-    overlap = min(1.0, float(abs(np.dot(x, x))))
-    return float(np.sqrt(max(0.0, 2.0-2.0*overlap)))
+    s = np.dot(x, x)
+    if abs(s) < 1e-15:
+        return float(np.sqrt(2.0))
+    phase = s/abs(s)
+    return float(np.linalg.norm(x-phase*np.conj(x)))
 
 
 def target_support_weight(group, target, psi):
