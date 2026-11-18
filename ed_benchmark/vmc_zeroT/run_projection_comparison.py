@@ -187,6 +187,29 @@ def build_tr_targets(sectors, tol=1e-7):
     return targets
 
 
+
+def build_spatial_targets(sectors):
+    """One target per spatial irrep, with no time-reversal pairing."""
+    targets = []
+    for i, sec in enumerate(sectors):
+        q = sec["quantum_numbers"]
+        targets.append({
+            "target_id": len(targets),
+            "primary_sector_id": i,
+            "partner_sector_id": None,
+            "primary": sec,
+            "partner": None,
+            "characters": np.asarray(sec["characters"], complex),
+            "partner_characters": None,
+            "dimension": int(sec["dimension"]),
+            "k": q["momentum"]["name"],
+            "q": q["momentum"]["q"],
+            "c3": q["c3"]["label"],
+            "self_conjugate": True,
+        })
+    return targets
+
+
 def target_record(target):
     return {
         "target_id": int(target["target_id"]),
@@ -566,7 +589,10 @@ def main():
     group, group_name, sectors = build_ed_sectors(
         g, H, ed_gs, a.ed_degeneracy_tol
     )
-    tr_targets = build_tr_targets(sectors)
+    tr_targets = (
+        build_tr_targets(sectors)
+        if a.restore_time_reversal else build_spatial_targets(sectors)
+    )
     translation_group = build_translation_group(g, H.states)
     terr, tname = commutator_error(translation_group, H.operator, n_tests=2)
     if terr > 1e-9:
@@ -582,7 +608,7 @@ def main():
         "Ns": g.Ns,
         "spatial_projection_group": group_name,
         "spatial_sector_count": len(sectors),
-        "time_reversal_target_count": len(tr_targets),
+        "projection_target_count": len(tr_targets),
         "spinless_time_reversal": "complex conjugation K",
         "restore_time_reversal": bool(a.restore_time_reversal),
         "vap_stages": ["raw", "translations", "translations+rotations"] + (
