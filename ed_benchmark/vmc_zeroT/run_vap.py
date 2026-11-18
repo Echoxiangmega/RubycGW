@@ -80,6 +80,50 @@ def initial_base_state_native(M0, native_states, ns, nf):
     return out / nrm
 
 
+def make_projectable_seed(
+    M0, native_H, group, chars, *, rng_seed=0, min_weight=1e-8,
+    initial_jitter=1e-4, max_tries=8,
+):
+    """Ensure the unprojected seed has nonzero weight in the target irrep.
+
+    A symmetry-pure broken-symmetry seed can be exactly orthogonal to the
+    finite-torus ED irrep, so P_Gamma|Psi_0>=0 and VAP cannot start there.
+    We add the smallest deterministic complex orbital perturbation needed to
+    give the seed a finite target-sector component. This changes only the
+    initialization; the projected variational family and final symmetry are
+    unchanged.
+    """
+    M0 = np.asarray(M0, np.complex128)
+    base0 = initial_base_state_native(
+        M0, native_H.states, native_H.g.Ns, native_H.nf
+    )
+    _, w0 = project_to_characters(group, chars, base0)
+    if w0 >= min_weight:
+        return M0, float(w0), 0.0
+
+    rng = np.random.default_rng(int(rng_seed))
+    scale = float(initial_jitter)
+    for _ in range(max_tries):
+        noise = (
+            rng.normal(size=M0.shape) + 1j*rng.normal(size=M0.shape)
+        ) / np.sqrt(2.0)
+        trial = M0 + scale * noise
+        q, _ = np.linalg.qr(trial, mode="reduced")
+        base = initial_base_state_native(
+            q, native_H.states, native_H.g.Ns, native_H.nf
+        )
+        _, w = project_to_characters(group, chars, base)
+        if w >= min_weight:
+            return np.asarray(q, np.complex128), float(w), scale
+        scale *= 10.0
+
+    raise RuntimeError(
+        "Could not construct a projectable VAP seed after deterministic "
+        f"orbital jitter; initial target weight={w0:.3e}, "
+        f"last jitter scale={scale/10:.3e}."
+    )
+
+
 def validate_initial_projected_state(
     vstate, hi, native_H, M0, group, chars, *, tol=2e-8
 ):
@@ -121,7 +165,26 @@ def run_one(
     hi, _, H_fast, graph = make_netket_hamiltonian(g, nf, V)
     star = ruby_star_formfactor(g)
     distances, shells, shell_counts = minimum_image_shells(g, n_shells=n_shells)
-    M0 = one_body_seed(g, nf, seed_name, seed_amplitude, star)
+    M0_raw = one_body_seed(g, nf, seed_name, seed_amplitude, star)
+    M0, initial_target_weight_prebuild, seed_jitter = make_projectable_seed(
+        M0_raw, native_H, group, chars,
+        rng_seed=rng_seed + 7919,
+        min_weight=1e-8,
+        initial_jitter=1e-4,
+    )
+    if seed_jitter > 0:
+        print(
+            f"[VAP init] seed={seed_name} had zero/negligible target-sector weight; "
+            f"applied complex orbital jitter={seed_jitter:.1e}, "
+            f"new w={initial_target_weight_prebuild:.3e}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[VAP init] seed={seed_name} target-sector weight="
+            f"{initial_target_weight_prebuild:.6f}",
+            flush=True,
+        )
     maps = np.asarray([op.site_map for op in group], dtype=np.int32)
     model = build_projected_netket_model(
         M0,
@@ -236,7 +299,11 @@ def run_one(
         "n_chains": int(n_chains),
         "optimizer_engine": optimizer_engine,
         "initial_projection_validation_overlap": validation_overlap,
-        "initial_unprojected_sector_weight": initial_target_weight,
+        "initial_unprojected_sector_weight": (
+            initial_target_weight if initial_target_weight is not None
+            else initial_target_weight_prebuild
+        ),
+        "initial_seed_orbital_jitter": float(seed_jitter),
         "jastrow_shell_distances": ";".join(f"{x:.12g}" for x in distances),
         "time_build_s": setup_s,
         "time_projection_validation_s": validation_s,
