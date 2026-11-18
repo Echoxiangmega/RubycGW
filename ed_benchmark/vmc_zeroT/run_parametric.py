@@ -637,7 +637,9 @@ def run_full_vap_one(
         "time_reversal_residual": tr_residual,
         "initial_tr_phase": float(tr_phase0),
         "target_has_tr_partner": bool(partner_chars is not None),
-        "initial_target_sector_weight": float(seed_weight),
+        "initial_target_sector_weight": (
+            None if seed_weight is None else float(seed_weight)
+        ),
         "initial_seed_parameter_jitter": float(seed_jitter),
         "orbital_parameterization": "full complex Ns x Nf orbital matrix + QR",
         "n_parameters": int(vstate.n_parameters),
