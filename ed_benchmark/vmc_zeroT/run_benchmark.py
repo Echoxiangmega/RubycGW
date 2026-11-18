@@ -34,7 +34,9 @@ import core as native_core
 import observables as native_observables
 
 from benchmark_observables import benchmark_observables, ruby_star_formfactor
-from vmc_ansatz import jastrow_channels, one_body_seed, build_netket_model
+from vmc_ansatz import (
+    jastrow_channels, bond_backflow_channels, one_body_seed, build_netket_model
+)
 
 
 def _json_default(obj):
@@ -191,7 +193,8 @@ def run_vmc_one(
     g, nf, V, native_H, ed_gs, ed_E0, *, ansatz, seed_name, seed_amplitude,
     n_shells, n_samples, n_discard, n_chains, n_iter, learning_rate,
     diag_shift, rng_seed, chunk_size, output_dir, validate_hamiltonian=False,
-    jastrow_mode="distance",
+    jastrow_mode="distance", use_backflow=False,
+    method_name=None, dir_prefix=None,
 ):
     import jax
     jax.config.update("jax_enable_x64", True)
@@ -209,7 +212,13 @@ def run_vmc_one(
         g, mode=jastrow_mode, n_shells=n_shells
     )
     M0 = one_body_seed(g, nf, seed_name, seed_amplitude, star)
-    model = build_netket_model(M0, shells, use_jastrow=(ansatz == "slater_jastrow"))
+    bf_labels, bf_mats, bf_counts = bond_backflow_channels(g)
+    model = build_netket_model(
+        M0,
+        shells,
+        use_jastrow=(ansatz == "slater_jastrow"),
+        backflow_matrices=(bf_mats if use_backflow else None),
+    )
     sampler = nk.sampler.MetropolisFermionHop(hi, graph=graph, n_chains=n_chains)
     vstate = nk.vqs.MCState(
         sampler,
@@ -275,7 +284,9 @@ def run_vmc_one(
     fidelity = float(np.sum(np.abs(overlap) ** 2).real)
     post_s = time.perf_counter() - tp
 
-    d = output_dir / f"{ansatz}__{seed_name}"
+    if dir_prefix is None:
+        dir_prefix = ansatz
+    d = output_dir / f"{dir_prefix}__{seed_name}"
     d.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         d / "final_state.npz",
@@ -296,8 +307,20 @@ def run_vmc_one(
         pass
     atomic_json(d / "history.json", history)
 
+    eta_opt = None
+    if use_backflow:
+        try:
+            eta_opt = np.asarray(vstate.parameters["eta"], np.complex128)
+        except Exception:
+            eta_opt = None
+
+    if method_name is None:
+        method_name = "VMC-Slater" if ansatz == "slater" else "VMC-Slater-Jastrow"
+        if use_backflow:
+            method_name += "-Backflow"
+
     row = {
-        "method": "VMC-Slater" if ansatz == "slater" else "VMC-Slater-Jastrow",
+        "method": method_name,
         "seed": seed_name,
         "E": E_exact,
         "E_per_site": E_exact / g.Ns,
@@ -319,6 +342,18 @@ def run_vmc_one(
         "jastrow_labels": ";".join(map(str, jastrow_labels)),
         "jastrow_shell_distances": ";".join(f"{x:.12g}" for x in distances),
         "jastrow_channel_counts": ";".join(str(int(x)) for x in shell_counts),
+        "backflow_enabled": bool(use_backflow),
+        "backflow_labels": ";".join(bf_labels) if use_backflow else "",
+        "backflow_channel_counts": (
+            ";".join(str(int(x)) for x in bf_counts) if use_backflow else ""
+        ),
+        "n_backflow_parameters_complex": int(len(bf_labels) if use_backflow else 0),
+        "backflow_eta_real": (
+            "" if eta_opt is None else ";".join(f"{z.real:.16g}" for z in eta_opt)
+        ),
+        "backflow_eta_imag": (
+            "" if eta_opt is None else ";".join(f"{z.imag:.16g}" for z in eta_opt)
+        ),
         "time_build_s": setup_s,
         "time_jit_warmup_s": warmup_s,
         "time_solve_or_opt_s": opt_s,
