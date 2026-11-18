@@ -36,12 +36,8 @@ def minimum_image_shells(g, n_shells: int = 4, tol: float = 1e-8):
     return np.asarray(distances), mats, counts
 
 
-def one_body_seed(g, nf: int, seed: str, seed_amplitude: float, star_formfactor) -> np.ndarray:
-    """Return occupied orbitals of a physically seeded auxiliary one-body H.
-
-    The orbitals are initial conditions only. During VMC the full complex
-    orbital matrix is variational; it is not constrained by HF self-consistency.
-    """
+def one_body_seed_hamiltonian(g, seed: str, seed_amplitude: float, star_formfactor) -> np.ndarray:
+    """Auxiliary one-body Hamiltonian used only to initialize variational states."""
     ns = g.Ns
     h = np.zeros((ns, ns), complex)
     for e in g.edges:
@@ -67,7 +63,12 @@ def one_body_seed(g, nf: int, seed: str, seed_amplitude: float, star_formfactor)
                 h[j, i] -= 1j * chirality * amp
     elif s != "normal":
         raise ValueError(f"Unknown VMC seed: {seed}")
+    return h
 
+
+def one_body_seed(g, nf: int, seed: str, seed_amplitude: float, star_formfactor) -> np.ndarray:
+    """Return occupied orbitals of the physically seeded auxiliary one-body H."""
+    h = one_body_seed_hamiltonian(g, seed, seed_amplitude, star_formfactor)
     _, u = np.linalg.eigh(h)
     return np.asarray(u[:, :nf], dtype=np.complex128)
 
