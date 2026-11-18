@@ -14,7 +14,7 @@ import geometry as native_geometry
 from benchmark_observables import ruby_star_formfactor
 from vmc_ansatz import minimum_image_shells, one_body_seed, build_projected_netket_model
 from run_benchmark import make_netket_hamiltonian, reorder_netket_vector_to_native, solve_ed
-from run_vap import initial_base_state_native
+from run_vap import initial_base_state_native, make_projectable_seed
 from symmetry_projection import (
     build_ordinary_space_group,
     characterize_unique_state,
@@ -38,7 +38,21 @@ def main():
     hi, _, _, graph = make_netket_hamiltonian(g, 6, 2.0)
     star = ruby_star_formfactor(g)
     _, shells, _ = minimum_image_shells(g, n_shells=4)
-    M0 = one_body_seed(g, 6, "lc_same", 0.08, star)
+    print("initial seed target-sector weights:")
+    raw = {}
+    for seed in ("normal", "sd", "isd", "lc_same", "lc_opposite"):
+        Mseed = one_body_seed(g, 6, seed, 0.08, star)
+        base_seed = initial_base_state_native(Mseed, H.states, g.Ns, 6)
+        _, wseed = project_to_characters(group, chars, base_seed)
+        raw[seed] = float(wseed)
+        print(f"  {seed:12s} w={wseed:.12g}")
+
+    M0_raw = one_body_seed(g, 6, "lc_same", 0.08, star)
+    M0, w_start, jitter = make_projectable_seed(
+        M0_raw, H, group, chars, rng_seed=2718,
+        min_weight=1e-8, initial_jitter=1e-4
+    )
+    print(f"lc_same projectable initialization: w={w_start:.12g}, jitter={jitter:.3e}")
     maps = np.asarray([op.site_map for op in group], dtype=np.int32)
 
     model = build_projected_netket_model(
@@ -55,7 +69,7 @@ def main():
 
     base = initial_base_state_native(M0, H.states, g.Ns, 6)
     psi_ref, weight = project_to_characters(group, chars, base)
-    assert psi_ref is not None
+    assert psi_ref is not None, "projectable-seed helper failed"
     overlap = abs(np.vdot(psi_ref, psi_model))
     residual = projected_sector_residual(group, chars, psi_model)
 
