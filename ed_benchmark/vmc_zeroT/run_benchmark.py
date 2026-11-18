@@ -37,9 +37,30 @@ from benchmark_observables import benchmark_observables, ruby_star_formfactor
 from vmc_ansatz import minimum_image_shells, one_body_seed, build_netket_model
 
 
+def _json_default(obj):
+    """Serialize NumPy/JAX scalar and array types in metadata/results."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.complexfloating):
+        return {"real": float(np.real(obj)), "imag": float(np.imag(obj))}
+    # JAX arrays and other array-like objects used only in metadata/results.
+    if hasattr(obj, "tolist"):
+        return obj.tolist()
+    raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+
+
 def atomic_json(path: Path, obj) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(obj, indent=2, allow_nan=False), encoding="utf-8")
+    tmp.write_text(
+        json.dumps(obj, indent=2, allow_nan=False, default=_json_default),
+        encoding="utf-8",
+    )
     tmp.replace(path)
 
 
