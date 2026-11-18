@@ -57,10 +57,31 @@ def _json_default(obj):
     raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
 
+def _sanitize_json_nonfinite(obj):
+    """Recursively replace NaN/Inf metadata by None before strict JSON output."""
+    if isinstance(obj, dict):
+        return {k: _sanitize_json_nonfinite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_json_nonfinite(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return _sanitize_json_nonfinite(obj.tolist())
+    if isinstance(obj, (float, np.floating)):
+        x = float(obj)
+        return x if np.isfinite(x) else None
+    if isinstance(obj, np.complexfloating):
+        z = complex(obj)
+        return {
+            "real": float(z.real) if np.isfinite(z.real) else None,
+            "imag": float(z.imag) if np.isfinite(z.imag) else None,
+        }
+    return obj
+
+
 def atomic_json(path: Path, obj) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
+    clean = _sanitize_json_nonfinite(obj)
     tmp.write_text(
-        json.dumps(obj, indent=2, allow_nan=False, default=_json_default),
+        json.dumps(clean, indent=2, allow_nan=False, default=_json_default),
         encoding="utf-8",
     )
     tmp.replace(path)
