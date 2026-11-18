@@ -18,7 +18,7 @@ from run_projection_comparison import (
     build_ed_sectors,
     build_tr_targets,
     spatial_pair_project,
-    restore_time_reversal_lowest,
+    restore_time_reversal_pav,
     target_support_residual,
     time_reversal_residual,
     one_lanczos_step,
@@ -41,7 +41,7 @@ def main():
 
     pair,w=spatial_pair_project(group,target,x)
     assert pair is not None and w>0
-    y,info=restore_time_reversal_lowest(pair,H)
+    y,info=restore_time_reversal_pav(pair,H)
 
     tr0=time_reversal_residual(y)
     sp0=target_support_residual(group,target,y)
