@@ -13,12 +13,16 @@ parameter merely because they have the same Euclidean distance.
 
 Methods:
   ED
+  Raw-Slater-Jastrow
+      optimized unrestricted full complex Slater x Jastrow before projection.
   PAV-Slater-Jastrow
-      optimize the full unrestricted Slater x Jastrow state first, then
-      project afterward into each exact ED ground symmetry sector.
+      project the optimized raw state afterward into an exact ED ground sector.
+  PAV-Slater-Jastrow+1LS
+      one exact Lanczos/Krylov step applied to the PAV state.
   Full-VAP-Slater-Jastrow
-      optimize the same unrestricted Slater x Jastrow state directly after
-      projection into each exact ED ground symmetry sector.
+      optimize the unrestricted Slater x Jastrow directly after projection.
+  Full-VAP-Slater-Jastrow+1LS
+      one exact Lanczos/Krylov step applied to the optimized VAP state.
 
 For a unique ED ground state the full target group is ordinary T x C3v.
 For a degenerate ED ground manifold, target sectors are the ordinary abelian
@@ -60,8 +64,11 @@ from symmetry_projection import (
 
 METHOD_ORDER = [
     "ED",
+    "Raw-Slater-Jastrow",
     "PAV-Slater-Jastrow",
+    "PAV-Slater-Jastrow+1LS",
     "Full-VAP-Slater-Jastrow",
+    "Full-VAP-Slater-Jastrow+1LS",
 ]
 
 
@@ -166,6 +173,125 @@ def projected_row(
         **obs.as_dict(),
     }
     return add_ed_differences(row, ed_row), psi_p
+
+
+
+def exact_state_row(
+    *, method, seed, psi, H, ed_gs, ed_row,
+    target_k="mixed", target_q=None, target_c3="mixed",
+    projection="none", extra=None,
+):
+    """Exact full-basis diagnostics for any normalized Hex18 state."""
+    psi = np.asarray(psi, np.complex128)
+    psi = psi / np.linalg.norm(psi)
+    Hpsi = H.operator @ psi
+    E = float(np.vdot(psi, Hpsi).real)
+    variance = float(max(0.0, np.vdot(Hpsi, Hpsi).real - E**2))
+    obs = benchmark_observables(H.g, H.states, psi, native_observables)
+    fidelity = float(np.sum(np.abs(ed_gs.conj().T @ psi)**2).real)
+    row = {
+        "method": method,
+        "seed": seed,
+        "projection": projection,
+        "target_k": target_k,
+        "target_q": None if target_q is None else json.dumps(target_q),
+        "target_c3": target_c3,
+        "E": E,
+        "E_per_site": E/H.g.Ns,
+        "exact_energy_variance": variance,
+        "exact_energy_variance_per_site": variance/H.g.Ns,
+        "fidelity_ground_subspace": fidelity,
+        **obs.as_dict(),
+    }
+    if extra:
+        row.update(extra)
+    return add_ed_differences(row, ed_row)
+
+
+def one_lanczos_step(psi, H, *, tol=1e-13):
+    """Lowest state in span{|psi>, H|psi>} using exact full-basis algebra.
+
+    Uses the normalized residual r=(H-E)|psi>, which is orthogonal to psi.
+    This is numerically equivalent to optimizing (a+b H)|psi> but avoids a
+    generalized-eigenproblem conditioning issue when psi is already close to
+    an eigenstate.
+    """
+    psi = np.asarray(psi, np.complex128)
+    psi = psi / np.linalg.norm(psi)
+    Hpsi = H.operator @ psi
+    E0 = float(np.vdot(psi, Hpsi).real)
+    residual = Hpsi - E0*psi
+    sigma = float(np.linalg.norm(residual))
+
+    if sigma < tol:
+        return psi.copy(), {
+            "lanczos_improved": False,
+            "lanczos_residual_norm_before": sigma,
+            "lanczos_energy_before": E0,
+            "lanczos_energy_after": E0,
+            "lanczos_delta_E": 0.0,
+            "lanczos_krylov_dim": 1,
+            "lanczos_alpha_H": 0.0,
+        }
+
+    q1 = residual/sigma
+    Hq1 = H.operator @ q1
+    h11 = float(np.vdot(q1, Hq1).real)
+    K = np.array([[E0, sigma], [sigma, h11]], dtype=np.float64)
+    evals, vecs = np.linalg.eigh(K)
+    coeff = vecs[:, 0]
+    psi_ls = coeff[0]*psi + coeff[1]*q1
+    psi_ls /= np.linalg.norm(psi_ls)
+    Els = float(np.vdot(psi_ls, H.operator @ psi_ls).real)
+
+    # Express the optimized vector as A*(1+alpha_H H)|psi> when possible.
+    denom = coeff[0] - coeff[1]*E0/sigma
+    alpha_H = None
+    if abs(denom) > 1e-14:
+        alpha_H = float(np.real((coeff[1]/sigma)/denom))
+
+    if Els > E0 + 1e-10:
+        raise RuntimeError(
+            f"One-Lanczos variational energy increased: {E0:.12g} -> {Els:.12g}"
+        )
+    return psi_ls, {
+        "lanczos_improved": True,
+        "lanczos_residual_norm_before": sigma,
+        "lanczos_energy_before": E0,
+        "lanczos_energy_after": Els,
+        "lanczos_delta_E": Els-E0,
+        "lanczos_krylov_dim": 2,
+        "lanczos_alpha_H": alpha_H,
+        "lanczos_krylov_h00": E0,
+        "lanczos_krylov_h01": sigma,
+        "lanczos_krylov_h11": h11,
+    }
+
+
+def lanczos_row(
+    *, base_method, seed, psi, H, ed_gs, ed_row,
+    target_k, target_q, target_c3, projection,
+    group=None, characters=None, extra=None,
+):
+    psi_ls, info = one_lanczos_step(psi, H)
+    row = exact_state_row(
+        method=base_method + "+1LS",
+        seed=seed,
+        psi=psi_ls,
+        H=H,
+        ed_gs=ed_gs,
+        ed_row=ed_row,
+        target_k=target_k,
+        target_q=target_q,
+        target_c3=target_c3,
+        projection=projection + " + one exact Lanczos step",
+        extra={**(extra or {}), **info},
+    )
+    if group is not None and characters is not None:
+        row["projected_sector_residual"] = float(
+            projected_sector_residual(group, characters, psi_ls)
+        )
+    return row, psi_ls
 
 
 def load_summary_state(directory, H, *, expected_jastrow_mode):
@@ -442,7 +568,7 @@ def main():
     write_csv(out/"comparison_best.csv", best)
     atomic_json(out/"comparison_best.json", best)
 
-    print("\n=== ED / Full PAV / Full VAP ===")
+    print("\n=== ED / Raw SJ / PAV / PAV+1LS / Full VAP / Full VAP+1LS ===")
     for r in best:
         print(
             f"{r['method']:28s} seed={str(r.get('seed','')):11s} "
