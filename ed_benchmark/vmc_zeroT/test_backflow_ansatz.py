@@ -19,6 +19,7 @@ from vmc_ansatz import (
     build_netket_model,
 )
 from run_benchmark import make_netket_hamiltonian
+from symmetry_projection import ordinary_space_group_site_maps
 
 
 def main():
@@ -39,6 +40,14 @@ def main():
     total=np.sum(bf,axis=0)
     iu=np.triu_indices(18,k=1)
     assert np.max(total[iu])<=1.0+1e-14
+
+    # Each bond-type channel must be covariant under every spatial projector
+    # operation used by the Hex18 benchmark.
+    for name,p in ordinary_space_group_site_maps(g):
+        p=np.asarray(p,int)
+        for k,lab in enumerate(labels):
+            transformed=bf[k][np.ix_(p,p)]
+            assert np.max(np.abs(transformed-bf[k]))<1e-14,(name,lab)
 
     # At eta=0, the backflow model must be exactly the old SJ model.
     hi,_,_,graph=make_netket_hamiltonian(g,3,2.5)
