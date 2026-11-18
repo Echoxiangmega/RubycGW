@@ -28,16 +28,16 @@ def main():
     import netket as nk
 
     g=geometry.RubyPBC("ring3",t=1.0,t1=0.5,t2=-0.5)
-    H,_,gs,_=solve_ed(g,3,2.5,k=12,degeneracy_tol=1e-8)
+    H,_,gs,_=solve_ed(g,6,2.0,k=8,degeneracy_tol=1e-8)
     tg=build_translation_group(g,H.states)
 
     # Pick one ED ground vector merely to define a translation target.
     psi=np.asarray(gs[:,0],complex)
     chars=characterize_unique_state(tg,psi,tol=1e-8)
 
-    hi,_,_,graph=make_netket_hamiltonian(g,3,2.5)
+    hi,_,_,graph=make_netket_hamiltonian(g,6,2.0)
     star=ruby_star_formfactor(g)
-    M0=one_body_seed(g,3,"normal",0.08,star)
+    M0=one_body_seed(g,6,"normal",0.08,star)
     _,_,shells,_=jastrow_channels(g,mode="bond_aware",n_shells=4)
     _,bf,_=bond_backflow_channels(g)
 
