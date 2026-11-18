@@ -10,6 +10,7 @@ from pathlib import Path
 METHOD_ORDER = [
     "ED",
     "VAP-Slater-Jastrow",
+    "Full-VAP-Slater-Jastrow",
     "Param-Slater",
     "Param-Slater-Jastrow",
     "Param-VAP-Slater-Jastrow",
@@ -37,7 +38,7 @@ def main():
 
     full = Path(a.full_vap).resolve()
     red = Path(a.parametric).resolve()
-    full_rows = read_csv(full / "vap_best.csv")
+    full_rows = read_csv(full / "vap_best.csv") if (full / "vap_best.csv").exists() else []
     red_rows = read_csv(red / "parametric_best.csv")
 
     by = {}
@@ -47,13 +48,15 @@ def main():
             if m not in by or fval(r.get("E"), 1e300) < fval(by[m].get("E"), 1e300):
                 by[m] = r
 
-    missing = [m for m in METHOD_ORDER if m not in by]
+    required = ["ED", "Param-Slater", "Param-Slater-Jastrow", "Param-VAP-Slater-Jastrow"]
+    missing = [m for m in required if m not in by]
     if missing:
-        raise RuntimeError(f"Missing methods in supplied results: {missing}")
+        raise RuntimeError(f"Missing required methods in supplied results: {missing}")
+    order = [m for m in METHOD_ORDER if m in by]
 
     edE = fval(by["ED"]["E"])
     outrows = []
-    for m in METHOD_ORDER:
+    for m in order:
         r = by[m]
         E = fval(r.get("E"))
         row = {
