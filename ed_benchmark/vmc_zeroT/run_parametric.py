@@ -46,7 +46,9 @@ from run_benchmark import (
 from run_vap import initial_base_state_native
 from symmetry_projection import (
     build_ordinary_space_group,
+    build_translation_c3_group,
     characterize_unique_state,
+    decompose_ground_manifold_abelian,
     project_to_characters,
     projected_sector_residual,
     commutator_error,
@@ -84,6 +86,24 @@ def target_sector_weight(basis, params, native_H, group, chars):
     return float(w)
 
 
+def union_sector_weight(basis, params, native_H, group, sectors):
+    """Total weight in the direct sum of all ED-ground symmetry sectors."""
+    psi = exact_state_from_tied_params(basis, params, native_H)
+    total = 0.0
+    for sec in sectors:
+        _, w = project_to_characters(group, sec["characters"], psi)
+        total += float(w)
+    return float(min(max(total, 0.0), 1.0))
+
+
+def state_union_sector_weight(psi, group, sectors):
+    total = 0.0
+    for sec in sectors:
+        _, w = project_to_characters(group, sec["characters"], psi)
+        total += float(w)
+    return float(min(max(total, 0.0), 1.0))
+
+
 def make_projectable_tied_params(
     basis, params, native_H, group, chars, *, rng_seed,
     min_weight=1e-8, initial_jitter=1e-4, max_tries=8,
@@ -112,6 +132,7 @@ def make_projectable_tied_params(
 
 def run_one(
     g, nf, V, native_H, ed_gs, ed_E0, group, chars, basis, *,
+    ground_sectors, sector_id=None, sector_dim=None,
     family, seed_name, seed_amplitude, n_shells, n_samples, n_discard,
     n_chains, n_iter, learning_rate, diag_shift, rng_seed, chunk_size,
     output_dir,
@@ -130,7 +151,12 @@ def run_one(
     h_seed = one_body_seed_hamiltonian(g, seed_name, seed_amplitude, star)
     init_params = seed_tied_parameters(basis, h_seed)
 
-    seed_weight = target_sector_weight(basis, init_params, native_H, group, chars)
+    if projected:
+        seed_weight = target_sector_weight(basis, init_params, native_H, group, chars)
+    else:
+        seed_weight = union_sector_weight(
+            basis, init_params, native_H, group, ground_sectors
+        )
     seed_jitter = 0.0
     if projected and seed_weight < 1e-8:
         init_params, seed_weight, seed_jitter = make_projectable_tied_params(
@@ -140,12 +166,20 @@ def run_one(
             initial_jitter=1e-4,
         )
         print(
-            f"[param init] {seed_name}: target weight was negligible; "
+            f"[param init] {seed_name}: target sector {sector_id} weight was negligible; "
             f"jitter={seed_jitter:.1e}, new w={seed_weight:.3e}",
             flush=True,
         )
+    elif projected:
+        print(
+            f"[param init] {seed_name}: target sector {sector_id} w={seed_weight:.6f}",
+            flush=True,
+        )
     else:
-        print(f"[param init] {seed_name}: target-sector w={seed_weight:.6f}", flush=True)
+        print(
+            f"[param init] {seed_name}: total ED-ground-sector weight={seed_weight:.6f}",
+            flush=True,
+        )
 
     maps = np.asarray([op.site_map for op in group], np.int32) if projected else None
     pchars = np.asarray(chars, complex) if projected else None
@@ -208,10 +242,14 @@ def run_one(
     E_exact = float(np.vdot(psi, native_H.operator @ psi).real)
     obs = benchmark_observables(g, native_H.states, psi, native_observables)
     fidelity = float(np.sum(np.abs(ed_gs.conj().T @ psi) ** 2).real)
-    psi_proj, final_sector_weight = project_to_characters(group, chars, psi)
-    sector_residual = (
-        projected_sector_residual(group, chars, psi) if projected else None
-    )
+    if projected:
+        _, final_sector_weight = project_to_characters(group, chars, psi)
+        sector_residual = projected_sector_residual(group, chars, psi)
+    else:
+        final_sector_weight = state_union_sector_weight(
+            psi, group, ground_sectors
+        )
+        sector_residual = None
     post_s = time.perf_counter() - tp
 
     method = {
@@ -219,7 +257,8 @@ def run_one(
         "param_sj": "Param-Slater-Jastrow",
         "param_vap_sj": "Param-VAP-Slater-Jastrow",
     }[family]
-    d = output_dir / f"{family}__{seed_name}"
+    suffix = f"__sector{sector_id}" if projected and sector_id is not None else ""
+    d = output_dir / f"{family}{suffix}__{seed_name}"
     d.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         d / "final_state.npz",
@@ -242,12 +281,15 @@ def run_one(
         "method": method,
         "seed": seed_name,
         "family": family,
+        "target_sector_id": sector_id,
+        "target_sector_ground_dimension": sector_dim,
         "E": E_exact,
         "E_per_site": E_exact / g.Ns,
         "delta_E_vs_ED": E_exact - ed_E0,
         "relative_E_error": abs((E_exact-ed_E0)/ed_E0) if ed_E0 else None,
         "fidelity_ground_subspace": fidelity,
         "target_sector_weight": float(final_sector_weight),
+        "ground_manifold_dimension": int(ed_gs.shape[1]),
         "projected_sector_residual": sector_residual,
         "initial_target_sector_weight": float(seed_weight),
         "initial_seed_parameter_jitter": float(seed_jitter),
@@ -321,14 +363,39 @@ def main():
     H, evals, ed_gs, ed_row = solve_ed(
         g, a.nf, a.V, k=a.ed_k, degeneracy_tol=a.ed_degeneracy_tol
     )
-    if ed_gs.shape[1] != 1:
-        raise RuntimeError("Current parameterized comparison assumes unique Hex18 ED ground state")
+    if ed_row.get("ground_manifold_truncated"):
+        raise RuntimeError(
+            "ED ground manifold fills all requested --ed-k states; increase --ed-k "
+            "before doing symmetry decomposition."
+        )
 
-    group = build_ordinary_space_group(g, H.states)
-    err, name = commutator_error(group, H.operator, n_tests=2)
-    if err > 1e-9:
-        raise RuntimeError(f"space-group/H mismatch: {name} {err:.3e}")
-    chars = characterize_unique_state(group, ed_gs[:, 0], tol=1e-8)
+    # Unique grounds keep the stronger ordinary T x C3v projector used before.
+    # Degenerate grounds are decomposed in the abelian T x C3 subgroup so every
+    # target branch has a well-defined 1D character.
+    if ed_gs.shape[1] == 1:
+        group = build_ordinary_space_group(g, H.states)
+        err, name = commutator_error(group, H.operator, n_tests=2)
+        if err > 1e-9:
+            raise RuntimeError(f"space-group/H mismatch: {name} {err:.3e}")
+        chars = characterize_unique_state(group, ed_gs[:, 0], tol=1e-8)
+        ground_sectors = [{
+            "characters": chars,
+            "basis": ed_gs,
+            "dimension": 1,
+            "residual": 0.0,
+        }]
+        projection_group_name = "ordinary translations x C3v"
+    else:
+        group = build_translation_c3_group(g, H.states)
+        err, name = commutator_error(group, H.operator, n_tests=2)
+        if err > 1e-9:
+            raise RuntimeError(f"T x C3/H mismatch: {name} {err:.3e}")
+        ground_sectors = decompose_ground_manifold_abelian(
+            group, ed_gs, tol=max(1e-8, 10*a.ed_degeneracy_tol)
+        )
+        projection_group_name = "ordinary translations x C3"
+        if not ground_sectors:
+            raise RuntimeError("Failed to identify any symmetry sector in ED ground manifold")
 
     basis = build_symmetry_tied_basis(g)
     metadata = {
@@ -342,10 +409,37 @@ def main():
         "n_one_body_parameters": basis.n_one_body_parameters,
         "subgroup_order": len(basis.subgroup_maps),
         "subgroup": "primitive translations x C3",
-        "projected_group": "ordinary translations x C3v",
+        "projected_group": projection_group_name,
+        "ed_ground_manifold_dimension": int(ed_gs.shape[1]),
+        "ed_ground_sector_count": int(len(ground_sectors)),
     }
     atomic_json(out / "parameterization.json", metadata)
     atomic_json(out / "settings.json", vars(a))
+    atomic_json(
+        out / "ed_ground_sectors.json",
+        {
+            "group": projection_group_name,
+            "ground_manifold_dimension": int(ed_gs.shape[1]),
+            "sector_count": int(len(ground_sectors)),
+            "sectors": [
+                {
+                    "sector_id": i,
+                    "dimension": int(sec["dimension"]),
+                    "residual": float(sec["residual"]),
+                    "characters": [
+                        {
+                            "operation": op.name,
+                            "real": float(ch.real),
+                            "imag": float(ch.imag),
+                            "phase_over_pi": float(np.angle(ch)/np.pi),
+                        }
+                        for op, ch in zip(group, sec["characters"])
+                    ],
+                }
+                for i, sec in enumerate(ground_sectors)
+            ],
+        },
+    )
 
     ed = dict(ed_row)
     ed["method"] = "ED"
@@ -355,38 +449,64 @@ def main():
         f"[parametric] site_orbits={len(basis.site_orbits)}, "
         f"bond_orbits={basis.n_bond}, one-body parameters={basis.n_one_body_parameters}"
     )
-    print(f"[ED] E0={ed['E']:.12g}, F=1")
+    print(
+        f"[ED] E0={ed['E']:.12g}, ground_dim={ed_gs.shape[1]}, "
+        f"ground_symmetry_sectors={len(ground_sectors)}, F_groundspace=1"
+    )
+    for i, sec in enumerate(ground_sectors):
+        print(
+            f"  [ED sector {i}] dim={sec['dimension']} "
+            f"residual={sec['residual']:.2e}"
+        )
 
     run_id = 0
     for family in a.families:
-        for seed in a.seeds:
-            run_id += 1
-            print(f"\n[run {run_id}] {family}, seed={seed}", flush=True)
-            row = run_one(
-                g, a.nf, a.V, H, ed_gs, float(evals[0]), group, chars, basis,
-                family=family,
-                seed_name=seed,
-                seed_amplitude=a.seed_amplitude,
-                n_shells=a.jastrow_shells,
-                n_samples=a.n_samples,
-                n_discard=a.n_discard,
-                n_chains=a.n_chains,
-                n_iter=a.n_iter,
-                learning_rate=a.learning_rate,
-                diag_shift=a.diag_shift,
-                rng_seed=a.rng_seed + 1009*run_id,
-                chunk_size=a.chunk_size,
-                output_dir=out,
+        targets = (
+            list(enumerate(ground_sectors))
+            if family == "param_vap_sj"
+            else [(None, None)]
+        )
+        for sector_id, sec in targets:
+            chars = (
+                sec["characters"] if sec is not None
+                else ground_sectors[0]["characters"]
             )
-            rows.append(row)
-            write_csv(out / "parametric_all.csv", rows)
-            print(
-                f"[result] E={row['E']:.12g}, dE={row['delta_E_vs_ED']:.4e}, "
-                f"F={row['fidelity_ground_subspace']:.6f}, "
-                f"w={row['target_sector_weight']:.6f}, "
-                f"SLC-/SLC+={row['S_LC_opposite']/max(row['S_LC_same'],1e-15):.3g}, "
-                f"time={row['time_total_s']:.1f}s"
-            )
+            sector_dim = int(sec["dimension"]) if sec is not None else None
+            for seed in a.seeds:
+                run_id += 1
+                sector_txt = f", sector={sector_id}" if sector_id is not None else ""
+                print(
+                    f"\n[run {run_id}] {family}, seed={seed}{sector_txt}",
+                    flush=True,
+                )
+                row = run_one(
+                    g, a.nf, a.V, H, ed_gs, float(evals[0]), group, chars, basis,
+                    ground_sectors=ground_sectors,
+                    sector_id=sector_id,
+                    sector_dim=sector_dim,
+                    family=family,
+                    seed_name=seed,
+                    seed_amplitude=a.seed_amplitude,
+                    n_shells=a.jastrow_shells,
+                    n_samples=a.n_samples,
+                    n_discard=a.n_discard,
+                    n_chains=a.n_chains,
+                    n_iter=a.n_iter,
+                    learning_rate=a.learning_rate,
+                    diag_shift=a.diag_shift,
+                    rng_seed=a.rng_seed + 1009*run_id,
+                    chunk_size=a.chunk_size,
+                    output_dir=out,
+                )
+                rows.append(row)
+                write_csv(out / "parametric_all.csv", rows)
+                print(
+                    f"[result] E={row['E']:.12g}, dE={row['delta_E_vs_ED']:.4e}, "
+                    f"F_groundspace={row['fidelity_ground_subspace']:.6f}, "
+                    f"w={row['target_sector_weight']:.6f}, "
+                    f"SLC-/SLC+={row['S_LC_opposite']/max(row['S_LC_same'],1e-15):.3g}, "
+                    f"time={row['time_total_s']:.1f}s"
+                )
 
     best = [ed]
     for method in ("Param-Slater", "Param-Slater-Jastrow", "Param-VAP-Slater-Jastrow"):
