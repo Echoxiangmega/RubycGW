@@ -813,3 +813,59 @@ python ed_benchmark/vmc_zeroT/plot_projection_comparison.py \
   path/to/comparison_all.csv \
   --output path/to/my_plots
 \`\`\`
+
+
+## Staged VAP warm start
+
+The projection benchmark now follows the staged optimization strategy
+
+\[
+\mathrm{Raw}
+\rightarrow
+\mathrm{translations}
+\rightarrow
+\mathrm{translations+rotations}
+\rightarrow
+[\mathrm{spinless\ time\ reversal}],
+\]
+
+with the optimized \(M\), density-Jastrow \(v\), and backflow \(\eta\)
+parameters transferred from one stage to the next.
+
+The default iteration budget after the Raw optimization is
+
+\`\`\`text
+--vap-translation-iter 100
+--vap-rotation-iter 100
+--vap-tr-iter 100
+\`\`\`
+
+so the three projected stages together use 300 iterations by default.
+They can be changed independently.
+
+Time reversal is restored by default. To stop after the spatial stages use
+
+\`\`\`text
+--no-restore-time-reversal
+\`\`\`
+
+and to request it explicitly use
+
+\`\`\`text
+--restore-time-reversal
+\`\`\`
+
+When time reversal is disabled, conjugate momentum/point-group sectors are
+kept as separate spatial targets rather than being merged into a TR pair.
+
+Because staged VAP requires the optimized Raw parameters, older result
+directories created before parameter checkpointing cannot be used as Raw
+warm starts. Run each Raw seed once without \`--resume\` to create
+\`variational_M\`, \`variational_v\`, and \`variational_eta\` in
+\`final_state.npz\`. Subsequent runs can use \`--resume\`.
+
+A light regression test for parameter transfer is
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/test_staged_vap_warmstart.py
+\`\`\`
