@@ -243,8 +243,9 @@ def decompose_ground_manifold_abelian(group, psi_states, tol=1e-7):
         new_blocks = []
         for B in blocks:
             m = B.conj().T @ M @ B
-            m = 0.5 * (m + np.linalg.inv(m).conj().T) if m.size else m
-            # M is unitary/normal; eig is safer than eigh because eigenvalues are phases.
+            # Exact symmetry matrices are unitary and mutually commuting.
+            # Diagonalize the restricted normal matrix directly; do not
+            # Hermitianize it because its eigenvalues are generally phases.
             vals, U = np.linalg.eig(m)
             # Normalize phases and orthonormalize eigenvectors within clusters.
             vals = np.asarray([z/abs(z) if abs(z) else 1+0j for z in vals])
