@@ -464,6 +464,35 @@ def main():
         else:
             print(f"\n[resume full raw SJ] seed={seed}", flush=True)
 
+        raw_row = exact_state_row(
+            method="Raw-Slater-Jastrow",
+            seed=seed,
+            psi=psi,
+            H=H,
+            ed_gs=ed_gs,
+            ed_row=ed_row,
+            target_k="mixed",
+            target_q=None,
+            target_c3="mixed",
+            projection="none",
+            extra={
+                "jastrow_mode": a.jastrow_mode,
+                "jastrow_labels": ";".join(map(str, jlabels)),
+                "jastrow_channel_counts": ";".join(str(int(x)) for x in jcounts),
+                "n_parameters": summary.get("n_parameters"),
+                "time_total_s": summary.get("time_total_s"),
+                "mc_E": summary.get("mc_E"),
+                "mc_E_error": summary.get("mc_E_error"),
+            },
+        )
+        rows.append(raw_row)
+        print(
+            f"[RAW] seed={seed:11s} E={raw_row['E']:.10f} "
+            f"F={raw_row['fidelity_ground_subspace']:.6f} "
+            f"var={raw_row['exact_energy_variance']:.4g}",
+            flush=True,
+        )
+
         for sid, sec in enumerate(sectors):
             result = projected_row(
                 seed=seed, psi=psi, H=H, ed_gs=ed_gs, ed_row=ed_row,
@@ -497,6 +526,46 @@ def main():
                 f"k={row['target_k']:6s} w={row['symmetry_sector_weight']:.6f} "
                 f"E={row['E']:.10f} F={row['fidelity_ground_subspace']:.6f} "
                 f"var={row['exact_energy_variance']:.4g}",
+                flush=True,
+            )
+
+            ls_row, ls_psi = lanczos_row(
+                base_method="PAV-Slater-Jastrow",
+                seed=seed,
+                psi=ppsi,
+                H=H,
+                ed_gs=ed_gs,
+                ed_row=ed_row,
+                target_k=row["target_k"],
+                target_q=sec["quantum_numbers"]["momentum"]["q"],
+                target_c3=row["target_c3"],
+                projection=group_name,
+                group=group,
+                characters=sec["characters"],
+                extra={
+                    "target_sector_id": sid,
+                    "target_sector_ground_dimension": int(sec["dimension"]),
+                    "symmetry_sector_weight": row["symmetry_sector_weight"],
+                    "jastrow_mode": a.jastrow_mode,
+                    "jastrow_labels": ";".join(map(str, jlabels)),
+                    "jastrow_channel_counts": ";".join(str(int(x)) for x in jcounts),
+                },
+            )
+            rows.append(ls_row)
+            lsd = out/f"pav_1ls__sector{sid}__{seed}"
+            lsd.mkdir(parents=True, exist_ok=True)
+            atomic_json(lsd/"summary.json", ls_row)
+            np.savez_compressed(
+                lsd/"final_state.npz",
+                psi_native=ls_psi,
+                native_states=H.states,
+                jastrow_labels=np.asarray(jlabels),
+            )
+            print(
+                f"[PAV+1LS] seed={seed:11s} sector={sid} "
+                f"E={ls_row['E']:.10f} F={ls_row['fidelity_ground_subspace']:.6f} "
+                f"var={ls_row['exact_energy_variance']:.4g} "
+                f"dE_LS={ls_row['lanczos_delta_E']:.3e}",
                 flush=True,
             )
         write_csv(out/"comparison_all.csv", rows)
@@ -554,6 +623,51 @@ def main():
                 row["target_c3"] = qn["c3"]["label"]
                 row["target_c3_m"] = qn["c3"]["m"]
                 rows.append(row)
+
+                vap_summary, vap_psi = load_summary_state(
+                    d, H, expected_jastrow_mode=a.jastrow_mode
+                )
+                if vap_psi is None:
+                    raise RuntimeError(f"Missing VAP state for Lanczos step: {d}")
+                ls_row, ls_psi = lanczos_row(
+                    base_method="Full-VAP-Slater-Jastrow",
+                    seed=seed,
+                    psi=vap_psi,
+                    H=H,
+                    ed_gs=ed_gs,
+                    ed_row=ed_row,
+                    target_k=qn["momentum"]["name"],
+                    target_q=qn["momentum"]["q"],
+                    target_c3=qn["c3"]["label"],
+                    projection=group_name,
+                    group=group,
+                    characters=sec["characters"],
+                    extra={
+                        "target_sector_id": sid,
+                        "target_sector_ground_dimension": int(sec["dimension"]),
+                        "symmetry_sector_weight": row.get("target_sector_weight", 1.0),
+                        "jastrow_mode": a.jastrow_mode,
+                        "jastrow_labels": ";".join(map(str, jlabels)),
+                        "jastrow_channel_counts": ";".join(str(int(x)) for x in jcounts),
+                    },
+                )
+                rows.append(ls_row)
+                lsd = out/f"full_vap_1ls__sector{sid}__{seed}"
+                lsd.mkdir(parents=True, exist_ok=True)
+                atomic_json(lsd/"summary.json", ls_row)
+                np.savez_compressed(
+                    lsd/"final_state.npz",
+                    psi_native=ls_psi,
+                    native_states=H.states,
+                    jastrow_labels=np.asarray(jlabels),
+                )
+                print(
+                    f"[Full VAP+1LS] seed={seed:11s} sector={sid} "
+                    f"E={ls_row['E']:.10f} F={ls_row['fidelity_ground_subspace']:.6f} "
+                    f"var={ls_row['exact_energy_variance']:.4g} "
+                    f"dE_LS={ls_row['lanczos_delta_E']:.3e}",
+                    flush=True,
+                )
                 write_csv(out/"comparison_all.csv", rows)
 
     best = [ed]
