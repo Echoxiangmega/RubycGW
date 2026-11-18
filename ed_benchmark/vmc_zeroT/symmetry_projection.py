@@ -298,3 +298,154 @@ def decompose_ground_manifold_abelian(group, psi_states, tol=1e-7):
             found["dimension"] = int(W.shape[1])
             found["residual"] = max(found["residual"], sec["residual"])
     return merged
+
+
+def c3_site_maps(g):
+    """Ordinary C3 subgroup only: E, C3, C3^2."""
+    ident = np.arange(g.Ns, dtype=np.int64)
+    c3 = g.point_maps().get("C3")
+    if c3 is None:
+        raise RuntimeError("ordinary C3 unavailable")
+    c3 = np.asarray(c3, dtype=np.int64)
+    return [
+        ("E", ident),
+        ("C3", c3),
+        ("C3^2", compose_site_maps(c3, c3)),
+    ]
+
+
+def build_c3_group(g, states):
+    return [
+        second_quantize_site_map(states, g.Ns, p, name=name)
+        for name, p in c3_site_maps(g)
+    ]
+
+
+def _find_group_operation(group, site_map):
+    target = np.asarray(site_map, dtype=np.int64)
+    for i, op in enumerate(group):
+        if np.array_equal(np.asarray(op.site_map, dtype=np.int64), target):
+            return i
+    return None
+
+
+def momentum_from_characters(g, group, characters, tol=1e-6):
+    """Identify the finite-torus momentum from pure-translation characters.
+
+    Reciprocal coordinates q are in primitive reciprocal-lattice units and
+    obey U_T(R)|psi> = exp[-2*pi*i*q.R]|psi> in the convention used here.
+    Returns a dictionary. If the supplied group has no complete primitive
+    translation subgroup (for example C3-only), name is 'unfixed'.
+    """
+    chars = np.asarray(characters, complex)
+    observations = []
+    # Use all finite-torus translation representatives, including identity.
+    for R in g.reps:
+        p = np.asarray(g.translate(R), dtype=np.int64)
+        idx = _find_group_operation(group, p)
+        if idx is None:
+            continue
+        observations.append((tuple(map(int, R)), chars[idx]))
+
+    if len(observations) < len(g.reps):
+        return {
+            "name": "unfixed",
+            "q": None,
+            "error": None,
+            "translation_characters": [
+                {
+                    "R": list(R),
+                    "real": float(z.real),
+                    "imag": float(z.imag),
+                    "phase_over_pi": float(np.angle(z)/np.pi),
+                }
+                for R, z in observations
+            ],
+        }
+
+    candidates = []
+    for q in g.permitted_momenta():
+        qv = np.asarray(q, float)
+        err = 0.0
+        for R, z in observations:
+            pred = np.exp(-2j*np.pi*np.dot(qv, np.asarray(R, float)))
+            err = max(err, float(abs(pred-z)))
+        candidates.append((err, tuple(float(x) for x in q)))
+    candidates.sort(key=lambda x: x[0])
+    err, q = candidates[0]
+    if err > tol:
+        return {
+            "name": "unknown",
+            "q": list(q),
+            "error": float(err),
+            "translation_characters": [
+                {
+                    "R": list(R),
+                    "real": float(z.real),
+                    "imag": float(z.imag),
+                    "phase_over_pi": float(np.angle(z)/np.pi),
+                }
+                for R, z in observations
+            ],
+        }
+
+    qarr = np.mod(np.asarray(q, float), 1.0)
+    if np.linalg.norm(qarr - np.rint(qarr)) < tol:
+        name = "Gamma"
+    elif g.name == "ring3":
+        # The two nonzero momenta are the K/K' pair. Assign K to the first
+        # canonical permitted momentum and K' to its time-reversed partner.
+        nonzero = [
+            tuple(float(x) for x in qq)
+            for qq in g.permitted_momenta()
+            if np.linalg.norm(np.mod(np.asarray(qq),1.0)-np.rint(np.mod(np.asarray(qq),1.0))) >= tol
+        ]
+        nonzero = sorted(nonzero)
+        name = "K" if tuple(q) == nonzero[0] else "K'"
+    else:
+        name = "q=(" + ",".join(f"{x:.6g}" for x in q) + ")"
+
+    return {
+        "name": name,
+        "q": list(q),
+        "error": float(err),
+        "translation_characters": [
+            {
+                "R": list(R),
+                "real": float(z.real),
+                "imag": float(z.imag),
+                "phase_over_pi": float(np.angle(z)/np.pi),
+            }
+            for R, z in observations
+        ],
+    }
+
+
+def c3_from_characters(g, group, characters, tol=1e-6):
+    """Return C3 eigenvalue label m=0,1,2 with chi(C3)=exp(-2*pi*i*m/3)."""
+    c3 = g.point_maps().get("C3")
+    if c3 is None:
+        return {"m": None, "label": "unavailable", "character": None}
+    idx = _find_group_operation(group, c3)
+    if idx is None:
+        return {"m": None, "label": "unfixed", "character": None}
+    z = complex(np.asarray(characters, complex)[idx])
+    candidates = [(abs(z-np.exp(-2j*np.pi*m/3)), m) for m in range(3)]
+    err, m = min(candidates)
+    return {
+        "m": int(m) if err < tol else None,
+        "label": f"C3:m{m}" if err < tol else "C3:unknown",
+        "error": float(err),
+        "character": {
+            "real": float(z.real),
+            "imag": float(z.imag),
+            "phase_over_pi": float(np.angle(z)/np.pi),
+        },
+    }
+
+
+def sector_quantum_numbers(g, group, characters):
+    return {
+        "momentum": momentum_from_characters(g, group, characters),
+        "c3": c3_from_characters(g, group, characters),
+    }
