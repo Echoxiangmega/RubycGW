@@ -387,7 +387,7 @@ def run_full_vap_one(
     n_chains, n_iter, learning_rate, diag_shift, rng_seed, chunk_size,
     output_dir, jastrow_mode="distance",
     partner_chars=None, time_reversal_even=False,
-    use_backflow=False,
+    use_backflow=False, initial_params=None,
 ):
     """Full-orbital VAP-Slater-Jastrow baseline on Hex18.
 
@@ -407,14 +407,27 @@ def run_full_vap_one(
     )
     bf_labels, bf_mats, bf_counts = bond_backflow_channels(g)
 
-    M0_raw = one_body_seed(g, nf, seed_name, seed_amplitude, star)
-    M0, seed_weight, seed_jitter = make_projectable_seed(
-        M0_raw, native_H, group, chars,
-        partner_chars=partner_chars,
-        rng_seed=rng_seed + 7919,
-        min_weight=1e-8,
-        initial_jitter=1e-4,
-    )
+    if initial_params is None:
+        M0_raw = one_body_seed(g, nf, seed_name, seed_amplitude, star)
+        M0, seed_weight, seed_jitter = make_projectable_seed(
+            M0_raw, native_H, group, chars,
+            partner_chars=partner_chars,
+            rng_seed=rng_seed + 7919,
+            min_weight=1e-8,
+            initial_jitter=1e-4,
+        )
+        v0 = None
+        eta0 = None
+    else:
+        M0 = np.asarray(initial_params["M"], np.complex128)
+        v0 = np.asarray(initial_params.get("v", []), np.float64)
+        eta0 = np.asarray(initial_params.get("eta", []), np.complex128)
+        if v0.size == 0:
+            v0 = None
+        if eta0.size == 0:
+            eta0 = None
+        seed_weight = float(initial_params.get("target_weight", np.nan))
+        seed_jitter = 0.0
     if seed_jitter > 0:
         print(
             f"[full VAP init] {seed_name}: sector {sector_id} had negligible weight; "
@@ -463,6 +476,8 @@ def run_full_vap_one(
         time_reversal_even=time_reversal_even,
         initial_tr_phase=tr_phase0,
         backflow_matrices=(bf_mats if use_backflow else None),
+        initial_v=v0,
+        initial_eta=eta0,
     )
     sampler = nk.sampler.MetropolisFermionHop(hi, graph=graph, n_chains=n_chains)
     vstate = nk.vqs.MCState(
@@ -542,6 +557,20 @@ def run_full_vap_one(
 
     d = output_dir / f"{dir_prefix}__sector{sector_id}__{seed_name}"
     d.mkdir(parents=True, exist_ok=True)
+    params_np = vstate.parameters
+    M_opt = np.asarray(params_np["M"], np.complex128)
+    v_opt = (
+        np.asarray(params_np["v"], np.float64)
+        if "v" in params_np else np.empty(0, dtype=np.float64)
+    )
+    eta_saved = (
+        np.asarray(params_np["eta"], np.complex128)
+        if "eta" in params_np else np.empty(0, dtype=np.complex128)
+    )
+    tr_phase_saved = (
+        np.asarray(params_np["tr_phase"], np.float64)
+        if "tr_phase" in params_np else np.asarray(np.nan, dtype=np.float64)
+    )
     np.savez_compressed(
         d / "final_state.npz",
         psi_native=psi,
@@ -550,6 +579,10 @@ def run_full_vap_one(
         shell_counts=shell_counts,
         jastrow_labels=np.asarray(jastrow_labels),
         star_formfactor=star,
+        variational_M=M_opt,
+        variational_v=v_opt,
+        variational_eta=eta_saved,
+        variational_tr_phase=tr_phase_saved,
     )
     history = {}
     try:
