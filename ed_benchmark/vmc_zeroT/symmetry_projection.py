@@ -175,3 +175,125 @@ def commutator_error(group, H, n_tests=2, seed=2601):
             if err > worst:
                 worst, worst_name = err, op.name
     return worst, worst_name
+
+
+def translation_c3_site_maps(g):
+    """Unique ordinary primitive translations times C3 rotations (abelian on ring3)."""
+    ident = np.arange(g.Ns, dtype=np.int64)
+    c3 = g.point_maps().get("C3")
+    if c3 is None:
+        raise RuntimeError("ordinary C3 unavailable")
+    c3 = np.asarray(c3, dtype=np.int64)
+    point = [ident, c3, compose_site_maps(c3, c3)]
+    out = {}
+    for R in g.reps:
+        tr = np.asarray(g.translate(R), dtype=np.int64)
+        for p in point:
+            q = compose_site_maps(p, tr)
+            out.setdefault(tuple(map(int, q)), (f"C3xT{tuple(map(int,R))}", q))
+    return list(out.values())
+
+
+def build_translation_c3_group(g, states):
+    return [
+        second_quantize_site_map(states, g.Ns, p, name=name)
+        for name, p in translation_c3_site_maps(g)
+    ]
+
+
+def _cluster_unit_circle_eigenvalues(vals, tol=1e-7):
+    """Group nearly equal unit-circle eigenvalues into index lists."""
+    groups = []
+    used = np.zeros(len(vals), dtype=bool)
+    for i, z in enumerate(vals):
+        if used[i]:
+            continue
+        idx = [j for j, w in enumerate(vals) if (not used[j]) and abs(z-w) < tol]
+        for j in idx:
+            used[j] = True
+        groups.append(idx)
+    return groups
+
+
+def decompose_ground_manifold_abelian(group, psi_states, tol=1e-7):
+    """Decompose a complete degenerate ground manifold into 1D abelian sectors.
+
+    Returns one record per distinct character sector. A sector may have
+    multiplicity >1 if the ground manifold contains an accidental degeneracy
+    within the same symmetry irrep.
+    """
+    V = np.asarray(psi_states, complex)
+    if V.ndim == 1:
+        V = V[:, None]
+    V, _ = np.linalg.qr(V)
+    d = V.shape[1]
+    # Coefficient-space blocks spanning simultaneous eigenspaces.
+    blocks = [np.eye(d, dtype=complex)]
+
+    for op in group:
+        UV = np.column_stack([op.apply(V[:, j]) for j in range(d)])
+        M = V.conj().T @ UV
+        # Ground manifold must be invariant under every exact symmetry.
+        leak = np.linalg.norm(UV - V @ M)
+        if leak > 100*tol:
+            raise RuntimeError(
+                f"Ground manifold incomplete under {op.name}: leakage={leak:.3e}"
+            )
+
+        new_blocks = []
+        for B in blocks:
+            m = B.conj().T @ M @ B
+            m = 0.5 * (m + np.linalg.inv(m).conj().T) if m.size else m
+            # M is unitary/normal; eig is safer than eigh because eigenvalues are phases.
+            vals, U = np.linalg.eig(m)
+            # Normalize phases and orthonormalize eigenvectors within clusters.
+            vals = np.asarray([z/abs(z) if abs(z) else 1+0j for z in vals])
+            for idx in _cluster_unit_circle_eigenvalues(vals, tol=tol):
+                C = B @ U[:, idx]
+                C, _ = np.linalg.qr(C)
+                new_blocks.append(C)
+        blocks = new_blocks
+
+    sectors = []
+    for B in blocks:
+        W = V @ B
+        W, _ = np.linalg.qr(W)
+        chars = []
+        residual = 0.0
+        for op in group:
+            UW = np.column_stack([op.apply(W[:, j]) for j in range(W.shape[1])])
+            m = W.conj().T @ UW
+            chi = np.trace(m) / W.shape[1]
+            if abs(chi) < 1e-12:
+                raise RuntimeError(f"Failed to identify character for {op.name}")
+            chi /= abs(chi)
+            residual = max(residual, float(np.linalg.norm(UW - chi*W)))
+            chars.append(chi)
+        if residual > 100*tol:
+            raise RuntimeError(
+                f"Ground-sector block is not a 1D character sector: residual={residual:.3e}"
+            )
+        sectors.append({
+            "characters": np.asarray(chars, np.complex128),
+            "basis": W,
+            "dimension": int(W.shape[1]),
+            "residual": float(residual),
+        })
+
+    # Deduplicate blocks with numerically identical characters.
+    merged = []
+    for sec in sectors:
+        found = None
+        for m in merged:
+            if np.max(np.abs(m["characters"]-sec["characters"])) < 10*tol:
+                found = m
+                break
+        if found is None:
+            merged.append(sec)
+        else:
+            W = np.column_stack([found["basis"], sec["basis"]])
+            W, _ = np.linalg.qr(W)
+            found["basis"] = W
+            found["dimension"] = int(W.shape[1])
+            found["residual"] = max(found["residual"], sec["residual"])
+    return merged
