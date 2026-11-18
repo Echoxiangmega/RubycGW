@@ -32,6 +32,7 @@ import observables as native_observables
 from benchmark_observables import benchmark_observables, ruby_star_formfactor
 from vmc_ansatz import (
     minimum_image_shells,
+    jastrow_channels,
     one_body_seed_hamiltonian,
     one_body_seed,
     build_projected_netket_model,
@@ -383,7 +384,7 @@ def run_full_vap_one(
     projection_name="target symmetry sector",
     seed_name, seed_amplitude, n_shells, n_samples, n_discard,
     n_chains, n_iter, learning_rate, diag_shift, rng_seed, chunk_size,
-    output_dir,
+    output_dir, jastrow_mode="distance",
 ):
     """Full-orbital VAP-Slater-Jastrow baseline on Hex18.
 
@@ -398,7 +399,9 @@ def run_full_vap_one(
     t0 = time.perf_counter()
     hi, _, H_fast, graph = make_netket_hamiltonian(g, nf, V)
     star = ruby_star_formfactor(g)
-    distances, shells, shell_counts = minimum_image_shells(g, n_shells=n_shells)
+    jastrow_labels, distances, shells, shell_counts = jastrow_channels(
+        g, mode=jastrow_mode, n_shells=n_shells
+    )
 
     M0_raw = one_body_seed(g, nf, seed_name, seed_amplitude, star)
     M0, seed_weight, seed_jitter = make_projectable_seed(
@@ -491,6 +494,7 @@ def run_full_vap_one(
         native_states=native_H.states,
         shell_distances=distances,
         shell_counts=shell_counts,
+        jastrow_labels=np.asarray(jastrow_labels),
         star_formfactor=star,
     )
     history = {}
@@ -524,6 +528,9 @@ def run_full_vap_one(
         "n_parameters": int(vstate.n_parameters),
         "n_one_body_parameters": int(g.Ns * nf),
         "n_jastrow_parameters": int(len(distances)),
+        "jastrow_mode": jastrow_mode,
+        "jastrow_labels": ";".join(map(str, jastrow_labels)),
+        "jastrow_channel_counts": ";".join(str(int(x)) for x in shell_counts),
         "mc_E": float(np.real(final_stats.mean)),
         "mc_E_error": stats_error(final_stats),
         "mc_variance": (
