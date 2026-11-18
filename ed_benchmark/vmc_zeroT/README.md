@@ -697,3 +697,65 @@ Regression test:
 \`\`\`bash
 python ed_benchmark/vmc_zeroT/test_time_reversal_benchmark.py
 \`\`\`
+
+
+## Bond-aware complex backflow
+
+The recommended next correlator is a scalable three-channel backflow on top of
+the unrestricted full Slater determinant and bond-aware density Jastrow:
+
+\[
+Q^{\rm BF}_{i\alpha}(x)
+=
+Q_{i\alpha}
++
+\sum_{a\in\{t,t_1,t_2\}}\eta_a
+\sum_j B^{(a)}_{ij}(n_j-\nu)Q_{j\alpha}.
+\]
+
+The three \(\eta_a\) are independent complex variational parameters. The
+backflow therefore changes the configuration-dependent determinant amplitude
+and phase while adding only six real variational degrees of freedom,
+independent of system size.
+
+The first implementation deliberately does not include triangle/chiral
+backflow channels, so the effect of ordinary bond backflow can be isolated.
+
+Regression test:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/test_backflow_ansatz.py
+\`\`\`
+
+It verifies the channel counts \(18,9,9\) for \(t,t_1,t_2\) on Hex18 and
+checks that \(\eta=0\) reproduces the previous Slater-Jastrow wavefunction.
+
+The projection benchmark now supports
+
+\`\`\`text
+--correlator sj
+--correlator backflow
+\`\`\`
+
+and defaults to \`backflow\`. For example:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/run_projection_comparison.py \
+  --nf 3 \
+  --t 1 --t1 0.5 --t2 -0.5 --V 2.5 \
+  --seeds normal sd isd lc_same lc_opposite \
+  --correlator backflow \
+  --jastrow-mode bond_aware \
+  --jastrow-shells 4 \
+  --n-samples 4096 \
+  --n-iter 300 \
+  --ed-k 12 \
+  --output results/backflow_hex18_N3_V2p5
+\`\`\`
+
+Backflow runs use separate directories and method names, for example
+\`Raw-Slater-Jastrow-Backflow\` and
+\`Full-VAP-TR-Slater-Jastrow-Backflow\`, so \`--resume\` cannot silently reuse
+an old density-Jastrow-only run. Optimized values of
+\(\eta_t,\eta_{t1},\eta_{t2}\) are stored as real/imaginary columns in the
+summary CSV/JSON.
