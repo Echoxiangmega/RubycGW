@@ -177,6 +177,23 @@ def commutator_error(group, H, n_tests=2, seed=2601):
     return worst, worst_name
 
 
+
+def translation_site_maps(g):
+    """Unique ordinary finite-torus translations only."""
+    out = {}
+    for R in g.reps:
+        p = np.asarray(g.translate(R), dtype=np.int64)
+        out.setdefault(tuple(map(int, p)), (f"T{tuple(map(int,R))}", p))
+    return list(out.values())
+
+
+def build_translation_group(g, states):
+    return [
+        second_quantize_site_map(states, g.Ns, p, name=name)
+        for name, p in translation_site_maps(g)
+    ]
+
+
 def translation_c3_site_maps(g):
     """Unique ordinary primitive translations times C3 rotations (abelian on ring3)."""
     ident = np.arange(g.Ns, dtype=np.int64)
