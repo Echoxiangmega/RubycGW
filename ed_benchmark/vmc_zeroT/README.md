@@ -432,3 +432,86 @@ python ed_benchmark/vmc_zeroT/run_parametric.py ... --resume
 
 Existing per-run \`summary.json\` files are reused. Skipped unreachable branches
 are also remembered on subsequent resumes.
+
+
+## ED / PAV / full-VAP / C3-constrained PAV/VAP comparison
+
+Use \`run_projection_comparison.py\` to compare five methods on exactly the same
+Hex18 Hamiltonian and Jastrow-shell definition:
+
+1. \`ED\`
+2. \`PAV-Slater-Jastrow\`: full unrestricted complex Slater x Jastrow,
+   optimized without symmetry restoration and projected afterward.
+3. \`Full-VAP-Slater-Jastrow\`: the same full orbital matrix optimized after
+   projection.
+4. \`C3-PAV-Slater-Jastrow\`: the base occupied subspace is constrained to
+   preserve ordinary C3 but primitive translations are free to break; it is
+   optimized first and then projected into the full ED target sector.
+5. \`C3-VAP-Slater-Jastrow\`: the same C3-constrained, translation-breaking
+   base ansatz optimized directly after the full target-sector projection.
+
+The C3-constrained ansatz does not use an auxiliary-Hamiltonian eigendecomposition
+during optimization and does not use the fixed-tangent approximation. The
+occupied orbitals are arbitrary complex subspaces inside the one-particle C3
+eigenspaces. The code prints the discrete C3 occupation counts and the physical
+orbital degrees of freedom for every branch.
+
+The full target symmetry sector is:
+- unique ED ground: ordinary translations x C3v;
+- degenerate ED ground multiplet: the ordinary T x C3 sectors actually present
+  in the exact ground space.
+
+Every ED full sector is printed with an explicit finite-torus momentum label
+\`Gamma\`, \`K\`, or \`K'\`, its reciprocal coordinates, and the C3 character.
+
+First test the C3 orbital construction:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/test_c3_constrained_ansatz.py
+\`\`\`
+
+For the current Nf=3, V=2.5 point, start with one seed because the VAP branches
+multiply by the number of ED ground symmetry sectors:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/run_projection_comparison.py \
+  --nf 3 \
+  --t 1 --t1 0.5 --t2 -0.5 --V 2.5 \
+  --seeds normal \
+  --n-samples 4096 \
+  --n-iter 300 \
+  --ed-k 12 \
+  --output results/projection_compare_hex18_N3_V2p5
+\`\`\`
+
+Then add more seeds with \`--resume\`:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/run_projection_comparison.py \
+  --nf 3 \
+  --t 1 --t1 0.5 --t2 -0.5 --V 2.5 \
+  --seeds normal sd isd lc_same lc_opposite \
+  --n-samples 4096 \
+  --n-iter 300 \
+  --ed-k 12 \
+  --output results/projection_compare_hex18_N3_V2p5 \
+  --resume
+\`\`\`
+
+Main outputs:
+
+\`\`\`text
+ed_projection_sectors.json
+projection_comparison_all.csv
+projection_comparison_best.csv
+projection_comparison_best.json
+\`\`\`
+
+The best table contains \(E\), \(E-E_{\rm ED}\), ground-subspace fidelity,
+exact post-enumeration energy variance, CO/BOW/LC observables, target momentum,
+and C3 character.
+
+For this first comparison all methods deliberately use the same distance-shell
+density Jastrow. Bond-aware \(v_t,v_{t1},v_{t2}\) parameters should be tested
+as a separate controlled extension rather than mixed into the C3 constraint
+comparison.
