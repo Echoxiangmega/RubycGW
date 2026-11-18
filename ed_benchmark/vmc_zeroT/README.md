@@ -408,3 +408,27 @@ python ed_benchmark/vmc_zeroT/run_parametric.py \
 
 The best full-VAP row is written together with the reduced families to
 \`parametric_best.csv\`.
+
+
+### Resuming interrupted reduced/VAP scans and unreachable sectors
+
+For degenerate ED ground manifolds, a fixed reduced orbital tangent manifold
+can be exactly orthogonal to one of the target symmetry sectors. In that case
+increasing the initialization jitter cannot create a nonzero projected state.
+Such a seed-sector branch is now recorded as
+
+\`\`\`text
+status = unreachable_target_sector
+\`\`\`
+
+and skipped instead of aborting the whole scan. This is a property of the
+reduced variational manifold, not a Monte Carlo failure.
+
+Long interrupted jobs can be resumed without recomputing completed branches:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/run_parametric.py ... --resume
+\`\`\`
+
+Existing per-run \`summary.json\` files are reused. Skipped unreachable branches
+are also remembered on subsequent resumes.
