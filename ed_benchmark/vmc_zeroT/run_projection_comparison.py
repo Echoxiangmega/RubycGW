@@ -691,11 +691,6 @@ def main():
                     "backflow_channel_counts": summary.get("backflow_channel_counts", ""),
                     "backflow_eta_real": summary.get("backflow_eta_real", ""),
                     "backflow_eta_imag": summary.get("backflow_eta_imag", ""),
-                    "backflow_enabled": use_backflow,
-                    "backflow_labels": summary.get("backflow_labels", ""),
-                    "backflow_channel_counts": summary.get("backflow_channel_counts", ""),
-                    "backflow_eta_real": summary.get("backflow_eta_real", ""),
-                    "backflow_eta_imag": summary.get("backflow_eta_imag", ""),
                 },
             )
             rows.append(row)
@@ -724,6 +719,11 @@ def main():
                     "jastrow_mode": a.jastrow_mode,
                     "jastrow_labels": ";".join(map(str,jlabels)),
                     "jastrow_channel_counts": ";".join(str(int(x)) for x in jcounts),
+                    "backflow_enabled": use_backflow,
+                    "backflow_labels": summary.get("backflow_labels", ""),
+                    "backflow_channel_counts": summary.get("backflow_channel_counts", ""),
+                    "backflow_eta_real": summary.get("backflow_eta_real", ""),
+                    "backflow_eta_imag": summary.get("backflow_eta_imag", ""),
                 },
             )
             rows.append(ls_row)
@@ -818,6 +818,11 @@ def main():
                         "jastrow_mode": a.jastrow_mode,
                         "jastrow_labels": ";".join(map(str,jlabels)),
                         "jastrow_channel_counts": ";".join(str(int(x)) for x in jcounts),
+                        "backflow_enabled": use_backflow,
+                        "backflow_labels": row.get("backflow_labels", ""),
+                        "backflow_channel_counts": row.get("backflow_channel_counts", ""),
+                        "backflow_eta_real": row.get("backflow_eta_real", ""),
+                        "backflow_eta_imag": row.get("backflow_eta_imag", ""),
                     },
                 )
                 rows.append(ls_row)
