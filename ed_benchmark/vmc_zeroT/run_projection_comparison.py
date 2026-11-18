@@ -44,6 +44,7 @@ from run_parametric import run_full_vap_one
 from symmetry_projection import (
     build_ordinary_space_group,
     build_translation_c3_group,
+    build_translation_group,
     characterize_unique_state,
     decompose_ground_manifold_abelian,
     project_to_characters,
@@ -52,15 +53,16 @@ from symmetry_projection import (
 )
 
 
-def method_names(use_backflow: bool):
+def method_names(use_backflow: bool, restore_time_reversal: bool):
     suffix = "-Backflow" if use_backflow else ""
+    sym = "TR" if restore_time_reversal else "Spatial"
     return {
         "ed": "ED",
         "raw": "Raw-Slater-Jastrow" + suffix,
-        "pav": "PAV-TR-Slater-Jastrow" + suffix,
-        "pav_ls": "PAV-TR-Slater-Jastrow" + suffix + "+1LS",
-        "vap": "Full-VAP-TR-Slater-Jastrow" + suffix,
-        "vap_ls": "Full-VAP-TR-Slater-Jastrow" + suffix + "+1LS",
+        "pav": f"PAV-{sym}-Slater-Jastrow" + suffix,
+        "pav_ls": f"PAV-{sym}-Slater-Jastrow" + suffix + "+1LS",
+        "vap": f"Full-VAP-{sym}-Slater-Jastrow" + suffix,
+        "vap_ls": f"Full-VAP-{sym}-Slater-Jastrow" + suffix + "+1LS",
     }
 
 
@@ -434,6 +436,36 @@ def load_summary_state(
     return summary, psi
 
 
+def load_variational_params(directory):
+    wf = directory/"final_state.npz"
+    if not wf.exists():
+        return None
+    with np.load(wf, allow_pickle=False) as z:
+        if "variational_M" not in z.files:
+            return None
+        return {
+            "M": np.asarray(z["variational_M"], np.complex128),
+            "v": (
+                np.asarray(z["variational_v"], np.float64)
+                if "variational_v" in z.files else np.empty(0, float)
+            ),
+            "eta": (
+                np.asarray(z["variational_eta"], np.complex128)
+                if "variational_eta" in z.files else np.empty(0, complex)
+            ),
+        }
+
+
+def translation_target(group_t, target, restore_time_reversal):
+    primary_vec = np.asarray(target["primary"]["basis"][:, 0], complex)
+    chars = characterize_unique_state(group_t, primary_vec, tol=1e-8)
+    partner_chars = None
+    if restore_time_reversal and target["partner"] is not None:
+        partner_vec = np.asarray(target["partner"]["basis"][:, 0], complex)
+        partner_chars = characterize_unique_state(group_t, partner_vec, tol=1e-8)
+    return chars, partner_chars
+
+
 def parser():
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
@@ -466,6 +498,30 @@ def parser():
     p.add_argument("--n-discard", type=int, default=16)
     p.add_argument("--n-chains", type=int, default=16)
     p.add_argument("--n-iter", type=int, default=300)
+    p.add_argument(
+        "--vap-translation-iter", type=int, default=100,
+        help="Warm-start VAP iterations after restoring translations only."
+    )
+    p.add_argument(
+        "--vap-rotation-iter", type=int, default=100,
+        help="Additional VAP iterations after restoring the full spatial group."
+    )
+    p.add_argument(
+        "--vap-tr-iter", type=int, default=100,
+        help="Additional VAP iterations after optional spinless time-reversal restoration."
+    )
+    trg = p.add_mutually_exclusive_group()
+    trg.add_argument(
+        "--restore-time-reversal", dest="restore_time_reversal",
+        action="store_true",
+        help="Finish staged VAP/PAV with spinless T=K restoration."
+    )
+    trg.add_argument(
+        "--no-restore-time-reversal", dest="restore_time_reversal",
+        action="store_false",
+        help="Stop after translation + spatial rotation restoration."
+    )
+    p.set_defaults(restore_time_reversal=True)
     p.add_argument("--learning-rate", type=float, default=0.03)
     p.add_argument("--diag-shift", type=float, default=0.05)
     p.add_argument("--chunk-size", type=int, default=512)
@@ -484,7 +540,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
 
     use_backflow = a.correlator == "backflow"
-    names = method_names(use_backflow)
+    names = method_names(use_backflow, a.restore_time_reversal)
     method_order = ordered_methods(names)
     raw_prefix = "slater_jastrow_backflow" if use_backflow else "slater_jastrow"
     pav_prefix = "pav_tr_backflow" if use_backflow else "pav_tr"
@@ -493,6 +549,12 @@ def main():
     vap_ls_prefix = (
         "full_vap_tr_sj_backflow_1ls" if use_backflow else "full_vap_tr_1ls"
     )
+    stage_tag = "backflow" if use_backflow else "sj"
+    vap_t_prefix = f"vap_stage_translation_{stage_tag}"
+    vap_r_prefix = f"vap_stage_spatial_{stage_tag}"
+    if not a.restore_time_reversal:
+        vap_prefix = vap_r_prefix
+        vap_ls_prefix = f"{vap_r_prefix}_1ls"
 
     g = native_geometry.RubyPBC("ring3", t=a.t, t1=a.t1, t2=a.t2)
     H, evals, ed_gs, ed_row = solve_ed(
@@ -505,6 +567,10 @@ def main():
         g, H, ed_gs, a.ed_degeneracy_tol
     )
     tr_targets = build_tr_targets(sectors)
+    translation_group = build_translation_group(g, H.states)
+    terr, tname = commutator_error(translation_group, H.operator, n_tests=2)
+    if terr > 1e-9:
+        raise RuntimeError(f"translation/H mismatch: {tname} {terr:.3e}")
 
     jlabels, jdist, _, jcounts = jastrow_channels(
         g, mode=a.jastrow_mode, n_shells=a.jastrow_shells
@@ -518,6 +584,10 @@ def main():
         "spatial_sector_count": len(sectors),
         "time_reversal_target_count": len(tr_targets),
         "spinless_time_reversal": "complex conjugation K",
+        "restore_time_reversal": bool(a.restore_time_reversal),
+        "vap_stages": ["raw", "translations", "translations+rotations"] + (
+            ["time-reversal"] if a.restore_time_reversal else []
+        ),
         "correlator": a.correlator,
         "backflow_enabled": use_backflow,
         "backflow_labels": bf_labels if use_backflow else [],
@@ -574,7 +644,10 @@ def main():
         )
 
     run_id = 0
-    proj_name = group_name + " + spinless TR"
+    proj_name = (
+        group_name + " + spinless TR"
+        if a.restore_time_reversal else group_name
+    )
 
     # A. Unrestricted raw SJ, then PAV with spatial + TR restoration.
     for seed in a.seeds:
@@ -661,7 +734,14 @@ def main():
                 target_k=target["k"], target_q=target["q"],
                 target_c3=target["c3"], projection=group_name,
             )
-            ppsi, trinfo = restore_time_reversal_pav(pair,H)
+            if a.restore_time_reversal:
+                ppsi, trinfo = restore_time_reversal_pav(pair,H)
+            else:
+                ppsi = pair
+                trinfo = {
+                    "time_reversal_restored": False,
+                    "time_reversal_residual": time_reversal_residual(ppsi),
+                }
             support = target_support_weight(group,target,ppsi)
             row = exact_state_row(
                 method=names["pav"],
@@ -735,78 +815,187 @@ def main():
             )
         write_csv(out/"comparison_all.csv",rows)
 
-    # B. Full VAP with spatial-pair projection and TR restoration inside model.
+    # B. Staged VAP:
+    # Raw optimized parameters -> translations -> full spatial group -> optional TR.
     if not a.skip_vap:
         for target in tr_targets:
+            tid = target["target_id"]
+            tchars, tpartner = translation_target(
+                translation_group, target, a.restore_time_reversal
+            )
             for seed in a.seeds:
                 run_id += 1
-                tid = target["target_id"]
-                d = out/f"{vap_prefix}__sector{tid}__{seed}"
-                summary,_ = (
-                    load_summary_state(
-                        d,H,expected_jastrow_mode=a.jastrow_mode,
-                        expected_backflow=use_backflow
+                raw_d = out/f"{raw_prefix}__{seed}"
+                raw_params = load_variational_params(raw_d)
+                if raw_params is None:
+                    raise RuntimeError(
+                        f"Raw optimized parameters are missing in {raw_d/'final_state.npz'}. "
+                        "Rerun this seed without --resume once so M/v/eta are saved."
                     )
-                    if a.resume else (None,None)
+
+                # Stage 1: translations only.
+                td = out/f"{vap_t_prefix}__sector{tid}__{seed}"
+                tsum, _ = (
+                    load_summary_state(
+                        td,H,expected_jastrow_mode=a.jastrow_mode,
+                        expected_backflow=use_backflow
+                    ) if a.resume else (None,None)
                 )
-                if summary is None:
+                if tsum is None:
                     print(
-                        f"\n[Full VAP-TR] seed={seed}, target={tid}, "
-                        f"k={target['k']} C3={target['c3']}",
+                        f"\n[VAP stage T] seed={seed}, target={tid}, k={target['k']}",
                         flush=True,
                     )
-                    row = run_full_vap_one(
+                    run_full_vap_one(
                         g,a.nf,a.V,H,ed_gs,float(evals[0]),
-                        group,target["characters"],
+                        translation_group,tchars,
                         ground_sectors=sectors,
                         sector_id=tid,
                         sector_dim=int(target["dimension"]),
-                        method_name=names["vap"],
-                        family_name=vap_prefix,
-                        dir_prefix=vap_prefix,
-                        projection_name=proj_name,
+                        method_name="VAP-Translation-WarmStart",
+                        family_name=vap_t_prefix,
+                        dir_prefix=vap_t_prefix,
+                        projection_name="translations",
                         seed_name=seed,
                         seed_amplitude=a.seed_amplitude,
                         n_shells=a.jastrow_shells,
                         n_samples=a.n_samples,
                         n_discard=a.n_discard,
                         n_chains=a.n_chains,
-                        n_iter=a.n_iter,
+                        n_iter=a.vap_translation_iter,
                         learning_rate=a.learning_rate,
                         diag_shift=a.diag_shift,
                         rng_seed=a.rng_seed+1009*run_id,
                         chunk_size=a.chunk_size,
                         output_dir=out,
                         jastrow_mode=a.jastrow_mode,
-                        partner_chars=target["partner_characters"],
-                        time_reversal_even=True,
+                        partner_chars=tpartner,
+                        time_reversal_even=False,
                         use_backflow=use_backflow,
+                        initial_params=raw_params,
                     )
+                tparams = load_variational_params(td)
+                if tparams is None:
+                    raise RuntimeError(f"Missing translation-stage parameters: {td}")
+
+                # Stage 2: restore rotations / full spatial group.
+                rd = out/f"{vap_r_prefix}__sector{tid}__{seed}"
+                rsum, _ = (
+                    load_summary_state(
+                        rd,H,expected_jastrow_mode=a.jastrow_mode,
+                        expected_backflow=use_backflow
+                    ) if a.resume else (None,None)
+                )
+                if rsum is None:
+                    print(
+                        f"\n[VAP stage T+R] seed={seed}, target={tid}, "
+                        f"k={target['k']} C3={target['c3']}",
+                        flush=True,
+                    )
+                    rsum = run_full_vap_one(
+                        g,a.nf,a.V,H,ed_gs,float(evals[0]),
+                        group,target["characters"],
+                        ground_sectors=sectors,
+                        sector_id=tid,
+                        sector_dim=int(target["dimension"]),
+                        method_name=(
+                            names["vap"] if not a.restore_time_reversal
+                            else "VAP-Spatial-WarmStart"
+                        ),
+                        family_name=vap_r_prefix,
+                        dir_prefix=vap_r_prefix,
+                        projection_name=group_name,
+                        seed_name=seed,
+                        seed_amplitude=a.seed_amplitude,
+                        n_shells=a.jastrow_shells,
+                        n_samples=a.n_samples,
+                        n_discard=a.n_discard,
+                        n_chains=a.n_chains,
+                        n_iter=a.vap_rotation_iter,
+                        learning_rate=a.learning_rate,
+                        diag_shift=a.diag_shift,
+                        rng_seed=a.rng_seed+1009*(run_id+1),
+                        chunk_size=a.chunk_size,
+                        output_dir=out,
+                        jastrow_mode=a.jastrow_mode,
+                        partner_chars=(
+                            target["partner_characters"]
+                            if a.restore_time_reversal else None
+                        ),
+                        time_reversal_even=False,
+                        use_backflow=use_backflow,
+                        initial_params=tparams,
+                    )
+                rparams = load_variational_params(rd)
+                if rparams is None:
+                    raise RuntimeError(f"Missing spatial-stage parameters: {rd}")
+
+                if a.restore_time_reversal:
+                    # Stage 3: restore spinless time reversal last.
+                    fd = out/f"{vap_prefix}__sector{tid}__{seed}"
+                    summary, _ = (
+                        load_summary_state(
+                            fd,H,expected_jastrow_mode=a.jastrow_mode,
+                            expected_backflow=use_backflow
+                        ) if a.resume else (None,None)
+                    )
+                    if summary is None:
+                        print(
+                            f"\n[VAP stage TR] seed={seed}, target={tid}",
+                            flush=True,
+                        )
+                        row = run_full_vap_one(
+                            g,a.nf,a.V,H,ed_gs,float(evals[0]),
+                            group,target["characters"],
+                            ground_sectors=sectors,
+                            sector_id=tid,
+                            sector_dim=int(target["dimension"]),
+                            method_name=names["vap"],
+                            family_name=vap_prefix,
+                            dir_prefix=vap_prefix,
+                            projection_name=proj_name,
+                            seed_name=seed,
+                            seed_amplitude=a.seed_amplitude,
+                            n_shells=a.jastrow_shells,
+                            n_samples=a.n_samples,
+                            n_discard=a.n_discard,
+                            n_chains=a.n_chains,
+                            n_iter=a.vap_tr_iter,
+                            learning_rate=a.learning_rate,
+                            diag_shift=a.diag_shift,
+                            rng_seed=a.rng_seed+1009*(run_id+2),
+                            chunk_size=a.chunk_size,
+                            output_dir=out,
+                            jastrow_mode=a.jastrow_mode,
+                            partner_chars=target["partner_characters"],
+                            time_reversal_even=True,
+                            use_backflow=use_backflow,
+                            initial_params=rparams,
+                        )
+                    else:
+                        row = summary
+                    final_d = fd
                 else:
-                    row = summary
-                    print(f"\n[resume Full VAP-TR] seed={seed}, target={tid}",flush=True)
+                    row = rsum
+                    row["method"] = names["vap"]
+                    final_d = rd
 
                 row["target_id"] = tid
                 row["target_k"] = target["k"]
                 row["target_q"] = json.dumps(target["q"])
                 row["target_c3"] = target["c3"]
-                row["time_reversal_restored"] = True
+                row["staged_vap"] = True
+                row["stage_translation_iter"] = int(a.vap_translation_iter)
+                row["stage_rotation_iter"] = int(a.vap_rotation_iter)
+                row["stage_tr_iter"] = int(a.vap_tr_iter if a.restore_time_reversal else 0)
                 rows.append(row)
 
                 _,vap_psi = load_summary_state(
-                    d,H,expected_jastrow_mode=a.jastrow_mode,
+                    final_d,H,expected_jastrow_mode=a.jastrow_mode,
                     expected_backflow=use_backflow
                 )
                 if vap_psi is None:
-                    raise RuntimeError(f"Missing VAP-TR state: {d}")
-                # Recompute uniform target/TR diagnostics for the comparison.
-                row["target_support_weight"] = target_support_weight(
-                    group,target,vap_psi
-                )
-                row["projected_sector_residual"] = target_support_residual(
-                    group,target,vap_psi
-                )
-                row["time_reversal_residual"] = time_reversal_residual(vap_psi)
+                    raise RuntimeError(f"Missing final staged VAP state: {final_d}")
 
                 ls_row,ls_psi = lanczos_row(
                     base_method=names["vap"],
@@ -823,6 +1012,7 @@ def main():
                         "backflow_channel_counts": row.get("backflow_channel_counts", ""),
                         "backflow_eta_real": row.get("backflow_eta_real", ""),
                         "backflow_eta_imag": row.get("backflow_eta_imag", ""),
+                        "staged_vap": True,
                     },
                 )
                 rows.append(ls_row)
@@ -833,10 +1023,9 @@ def main():
                     lsd/"final_state.npz",psi_native=ls_psi,native_states=H.states
                 )
                 print(
-                    f"[Full VAP-TR+1LS] seed={seed:11s} target={tid} "
+                    f"[Final VAP+1LS] seed={seed:11s} target={tid} "
                     f"E={ls_row['E']:.10f} F={ls_row['fidelity_ground_subspace']:.6f} "
-                    f"J+= {ls_row['J_same_mean']:.3e} J-= {ls_row['J_opposite_mean']:.3e} "
-                    f"TRres={ls_row['time_reversal_residual']:.2e}",
+                    f"J+= {ls_row['J_same_mean']:.3e} J-= {ls_row['J_opposite_mean']:.3e}",
                     flush=True,
                 )
                 write_csv(out/"comparison_all.csv",rows)
@@ -852,7 +1041,7 @@ def main():
 
     print(
         "\n=== ED / Raw / PAV-TR / PAV-TR+1LS / Full VAP-TR / Full VAP-TR+1LS "
-        f"[correlator={a.correlator}] ==="
+        f"[correlator={a.correlator}, staged VAP, TR={a.restore_time_reversal}] ==="
     )
     for r in best:
         print(
