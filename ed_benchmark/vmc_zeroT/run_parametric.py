@@ -323,13 +323,6 @@ def run_one(
         pass
     atomic_json(d / "history.json", history)
 
-    eta_opt = None
-    if use_backflow:
-        try:
-            eta_opt = np.asarray(vstate.parameters["eta"], np.complex128)
-        except Exception:
-            eta_opt = None
-
     row = {
         "method": method,
         "seed": seed_name,
@@ -567,6 +560,13 @@ def run_full_vap_one(
     except Exception:
         pass
     atomic_json(d / "history.json", history)
+
+    eta_opt = None
+    if use_backflow:
+        try:
+            eta_opt = np.asarray(vstate.parameters["eta"], np.complex128)
+        except Exception:
+            eta_opt = None
 
     row = {
         "method": method_name,
