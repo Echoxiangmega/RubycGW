@@ -566,7 +566,7 @@ def parser():
     p.add_argument("--V", type=float, default=2.0)
     p.add_argument(
         "--families", nargs="+",
-        choices=["param_slater", "param_sj", "param_vap_sj", "full_vap_sj", "c3_vap_sj"],
+        choices=["param_slater", "param_sj", "param_vap_sj", "full_vap_sj"],
         default=["param_slater", "param_sj", "param_vap_sj"],
     )
     p.add_argument(
@@ -596,8 +596,6 @@ def parser():
 def result_dir_for(output_dir, family, seed, sector_id):
     if family == "full_vap_sj":
         return output_dir / f"full_vap_sj__sector{sector_id}__{seed}"
-    if family == "c3_vap_sj":
-        return output_dir / f"c3_vap_sj__sector{sector_id}__{seed}"
     if family == "param_vap_sj":
         return output_dir / f"param_vap_sj__sector{sector_id}__{seed}"
     return output_dir / f"{family}__{seed}"
@@ -785,18 +783,13 @@ def main():
 
     run_id = 0
     for family in a.families:
-        if family == "c3_vap_sj":
-            active_group = c3_group
-            active_sectors = c3_sectors
-            targets = list(enumerate(c3_sectors))
-        else:
-            active_group = group
-            active_sectors = ground_sectors
-            targets = (
-                list(enumerate(ground_sectors))
-                if family in ("param_vap_sj", "full_vap_sj")
-                else [(None, None)]
-            )
+        active_group = group
+        active_sectors = ground_sectors
+        targets = (
+            list(enumerate(ground_sectors))
+            if family in ("param_vap_sj", "full_vap_sj")
+            else [(None, None)]
+        )
         for sector_id, sec in targets:
             chars = (
                 sec["characters"] if sec is not None
@@ -817,8 +810,8 @@ def main():
                     print(f"[resume] reused {run_dir/'summary.json'}", flush=True)
                 else:
                     try:
-                        if family in ("full_vap_sj", "c3_vap_sj"):
-                            is_c3 = family == "c3_vap_sj"
+                        if family == "full_vap_sj":
+                            is_c3 = False
                             row = run_full_vap_one(
                                 g, a.nf, a.V, H, ed_gs, float(evals[0]), active_group, chars,
                                 ground_sectors=active_sectors,
@@ -911,7 +904,6 @@ def main():
         "Param-Slater-Jastrow",
         "Param-VAP-Slater-Jastrow",
         "Full-VAP-Slater-Jastrow",
-        "C3-VAP-Slater-Jastrow",
     ):
         cand = [
             r for r in rows
@@ -924,7 +916,7 @@ def main():
     write_csv(out / "parametric_best.csv", best)
     atomic_json(out / "parametric_best.json", best)
 
-    print("\n=== ED / reduced / full-VAP / C3-VAP best comparison ===")
+    print("\n=== ED / reduced / full-VAP best comparison ===")
     for r in best:
         print(
             f"{r['method']:30s} seed={str(r.get('seed','')):11s} "
