@@ -33,6 +33,7 @@ from benchmark_observables import benchmark_observables, ruby_star_formfactor
 from vmc_ansatz import (
     minimum_image_shells,
     jastrow_channels,
+    bond_backflow_channels,
     one_body_seed_hamiltonian,
     one_body_seed,
     build_projected_netket_model,
@@ -322,6 +323,13 @@ def run_one(
         pass
     atomic_json(d / "history.json", history)
 
+    eta_opt = None
+    if use_backflow:
+        try:
+            eta_opt = np.asarray(vstate.parameters["eta"], np.complex128)
+        except Exception:
+            eta_opt = None
+
     row = {
         "method": method,
         "seed": seed_name,
@@ -386,6 +394,7 @@ def run_full_vap_one(
     n_chains, n_iter, learning_rate, diag_shift, rng_seed, chunk_size,
     output_dir, jastrow_mode="distance",
     partner_chars=None, time_reversal_even=False,
+    use_backflow=False,
 ):
     """Full-orbital VAP-Slater-Jastrow baseline on Hex18.
 
@@ -403,6 +412,7 @@ def run_full_vap_one(
     jastrow_labels, distances, shells, shell_counts = jastrow_channels(
         g, mode=jastrow_mode, n_shells=n_shells
     )
+    bf_labels, bf_mats, bf_counts = bond_backflow_channels(g)
 
     M0_raw = one_body_seed(g, nf, seed_name, seed_amplitude, star)
     M0, seed_weight, seed_jitter = make_projectable_seed(
@@ -459,6 +469,7 @@ def run_full_vap_one(
         ),
         time_reversal_even=time_reversal_even,
         initial_tr_phase=tr_phase0,
+        backflow_matrices=(bf_mats if use_backflow else None),
     )
     sampler = nk.sampler.MetropolisFermionHop(hi, graph=graph, n_chains=n_chains)
     vstate = nk.vqs.MCState(
@@ -490,7 +501,8 @@ def run_full_vap_one(
     )
     print(
         f"[optimizer] Full-VAP-SJ parameters={vstate.n_parameters} "
-        f"(full complex M + {len(distances)} Jastrow)",
+        f"(full complex M + {len(distances)} Jastrow"
+        f" + {len(bf_labels) if use_backflow else 0} complex backflow)",
         flush=True,
     )
 
@@ -584,6 +596,18 @@ def run_full_vap_one(
         "jastrow_mode": jastrow_mode,
         "jastrow_labels": ";".join(map(str, jastrow_labels)),
         "jastrow_channel_counts": ";".join(str(int(x)) for x in shell_counts),
+        "backflow_enabled": bool(use_backflow),
+        "backflow_labels": ";".join(bf_labels) if use_backflow else "",
+        "backflow_channel_counts": (
+            ";".join(str(int(x)) for x in bf_counts) if use_backflow else ""
+        ),
+        "n_backflow_parameters_complex": int(len(bf_labels) if use_backflow else 0),
+        "backflow_eta_real": (
+            "" if eta_opt is None else ";".join(f"{z.real:.16g}" for z in eta_opt)
+        ),
+        "backflow_eta_imag": (
+            "" if eta_opt is None else ";".join(f"{z.imag:.16g}" for z in eta_opt)
+        ),
         "mc_E": float(np.real(final_stats.mean)),
         "mc_E_error": stats_error(final_stats),
         "mc_variance": (
