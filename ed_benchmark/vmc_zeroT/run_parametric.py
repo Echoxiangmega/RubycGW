@@ -30,7 +30,12 @@ import geometry as native_geometry
 import observables as native_observables
 
 from benchmark_observables import benchmark_observables, ruby_star_formfactor
-from vmc_ansatz import minimum_image_shells, one_body_seed_hamiltonian, one_body_seed
+from vmc_ansatz import (
+    minimum_image_shells,
+    one_body_seed_hamiltonian,
+    one_body_seed,
+    build_projected_netket_model,
+)
 from parametric_ansatz import (
     build_symmetry_tied_basis,
     build_orbital_rotation_data,
@@ -44,7 +49,7 @@ from run_benchmark import (
     solve_ed,
     stats_error,
 )
-from run_vap import initial_base_state_native
+from run_vap import initial_base_state_native, make_projectable_seed
 from symmetry_projection import (
     build_ordinary_space_group,
     build_translation_c3_group,
@@ -345,6 +350,179 @@ def run_one(
     return row
 
 
+
+def run_full_vap_one(
+    g, nf, V, native_H, ed_gs, ed_E0, group, chars, *,
+    ground_sectors, sector_id, sector_dim,
+    seed_name, seed_amplitude, n_shells, n_samples, n_discard,
+    n_chains, n_iter, learning_rate, diag_shift, rng_seed, chunk_size,
+    output_dir,
+):
+    """Full-orbital VAP-Slater-Jastrow baseline on Hex18.
+
+    This keeps the original unrestricted complex Ns x Nf orbital matrix M and
+    real density-Jastrow parameters. It is intentionally not the scalable
+    reduced parameterization; it serves as the high-flexibility Hex18 baseline.
+    """
+    import jax
+    jax.config.update("jax_enable_x64", True)
+    import netket as nk
+
+    t0 = time.perf_counter()
+    hi, _, H_fast, graph = make_netket_hamiltonian(g, nf, V)
+    star = ruby_star_formfactor(g)
+    distances, shells, shell_counts = minimum_image_shells(g, n_shells=n_shells)
+
+    M0_raw = one_body_seed(g, nf, seed_name, seed_amplitude, star)
+    M0, seed_weight, seed_jitter = make_projectable_seed(
+        M0_raw, native_H, group, chars,
+        rng_seed=rng_seed + 7919,
+        min_weight=1e-8,
+        initial_jitter=1e-4,
+    )
+    if seed_jitter > 0:
+        print(
+            f"[full VAP init] {seed_name}: sector {sector_id} had negligible weight; "
+            f"orbital jitter={seed_jitter:.1e}, new w={seed_weight:.3e}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[full VAP init] {seed_name}: sector {sector_id} w={seed_weight:.6f}",
+            flush=True,
+        )
+
+    maps = np.asarray([op.site_map for op in group], dtype=np.int32)
+    model = build_projected_netket_model(
+        M0,
+        shells,
+        use_jastrow=True,
+        site_maps=maps,
+        characters=np.asarray(chars, complex),
+    )
+    sampler = nk.sampler.MetropolisFermionHop(hi, graph=graph, n_chains=n_chains)
+    vstate = nk.vqs.MCState(
+        sampler, model,
+        n_samples=n_samples,
+        n_discard_per_chain=n_discard,
+        chunk_size=chunk_size,
+        seed=rng_seed,
+        sampler_seed=rng_seed + 104729,
+    )
+    setup_s = time.perf_counter() - t0
+
+    tw = time.perf_counter()
+    warm_stats = vstate.expect(H_fast)
+    warmup_s = time.perf_counter() - tw
+
+    optimizer = nk.optimizer.Sgd(learning_rate=learning_rate)
+    qgt_ctor = partial(nk.optimizer.qgt.QGTJacobianDense, mode="complex")
+    sr = nk.optimizer.SR(
+        qgt=qgt_ctor,
+        solver=nk.optimizer.solver.cholesky_with_fallback,
+        diag_shift=diag_shift,
+    )
+    driver = nk.driver.VMC(
+        H_fast,
+        optimizer,
+        variational_state=vstate,
+        preconditioner=sr,
+    )
+    print(
+        f"[optimizer] Full-VAP-SJ parameters={vstate.n_parameters} "
+        f"(full complex M + {len(distances)} Jastrow)",
+        flush=True,
+    )
+
+    log = nk.logging.RuntimeLog()
+    topt = time.perf_counter()
+    driver.run(n_iter=n_iter, out=log, show_progress=True)
+    opt_s = time.perf_counter() - topt
+
+    te = time.perf_counter()
+    vstate.sample()
+    final_stats = vstate.expect(H_fast)
+    mc_eval_s = time.perf_counter() - te
+
+    tp = time.perf_counter()
+    psi_nk = np.asarray(vstate.to_array(normalize=True))
+    psi = reorder_netket_vector_to_native(hi, psi_nk, native_H.states, g.Ns)
+    E_exact = float(np.vdot(psi, native_H.operator @ psi).real)
+    obs = benchmark_observables(g, native_H.states, psi, native_observables)
+    fidelity = float(np.sum(np.abs(ed_gs.conj().T @ psi) ** 2).real)
+    _, sector_weight = project_to_characters(group, chars, psi)
+    sector_residual = projected_sector_residual(group, chars, psi)
+    post_s = time.perf_counter() - tp
+
+    d = output_dir / f"full_vap_sj__sector{sector_id}__{seed_name}"
+    d.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        d / "final_state.npz",
+        psi_native=psi,
+        native_states=native_H.states,
+        shell_distances=distances,
+        shell_counts=shell_counts,
+        star_formfactor=star,
+    )
+    history = {}
+    try:
+        en = log.data["Energy"]
+        history["iteration"] = [int(x) for x in np.asarray(en.iters)]
+        history["E_mean"] = [float(np.real(x)) for x in np.asarray(en.Mean)]
+        history["E_sigma"] = [float(x) for x in np.asarray(en.Sigma)]
+    except Exception:
+        pass
+    atomic_json(d / "history.json", history)
+
+    row = {
+        "method": "Full-VAP-Slater-Jastrow",
+        "seed": seed_name,
+        "family": "full_vap_sj",
+        "target_sector_id": sector_id,
+        "target_sector_ground_dimension": sector_dim,
+        "E": E_exact,
+        "E_per_site": E_exact / g.Ns,
+        "delta_E_vs_ED": E_exact - ed_E0,
+        "relative_E_error": abs((E_exact-ed_E0)/ed_E0) if ed_E0 else None,
+        "fidelity_ground_subspace": fidelity,
+        "target_sector_weight": float(sector_weight),
+        "ground_manifold_dimension": int(ed_gs.shape[1]),
+        "projected_sector_residual": float(sector_residual),
+        "initial_target_sector_weight": float(seed_weight),
+        "initial_seed_parameter_jitter": float(seed_jitter),
+        "orbital_parameterization": "full complex Ns x Nf orbital matrix + QR",
+        "n_parameters": int(vstate.n_parameters),
+        "n_one_body_parameters": int(g.Ns * nf),
+        "n_jastrow_parameters": int(len(distances)),
+        "mc_E": float(np.real(final_stats.mean)),
+        "mc_E_error": stats_error(final_stats),
+        "mc_variance": (
+            float(np.real(final_stats.variance))
+            if hasattr(final_stats, "variance") else None
+        ),
+        "warmup_mc_E": float(np.real(warm_stats.mean)),
+        "n_samples": int(vstate.n_samples),
+        "n_iter": int(n_iter),
+        "n_chains": int(n_chains),
+        "jastrow_shell_distances": ";".join(f"{x:.12g}" for x in distances),
+        "time_build_s": setup_s,
+        "time_jit_warmup_s": warmup_s,
+        "time_solve_or_opt_s": opt_s,
+        "time_mc_final_eval_s": mc_eval_s,
+        "time_postprocess_s": post_s,
+        "time_total_s": setup_s + warmup_s + opt_s + mc_eval_s + post_s,
+        **obs.as_dict(),
+    }
+    row = add_ed_differences(row, {
+        "E": ed_E0,
+        **benchmark_observables(
+            g, native_H.states, ed_gs, native_observables
+        ).as_dict(),
+    })
+    atomic_json(d / "summary.json", row)
+    return row
+
+
 def parser():
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
@@ -356,7 +534,7 @@ def parser():
     p.add_argument("--V", type=float, default=2.0)
     p.add_argument(
         "--families", nargs="+",
-        choices=["param_slater", "param_sj", "param_vap_sj"],
+        choices=["param_slater", "param_sj", "param_vap_sj", "full_vap_sj"],
         default=["param_slater", "param_sj", "param_vap_sj"],
     )
     p.add_argument(
@@ -489,7 +667,7 @@ def main():
     for family in a.families:
         targets = (
             list(enumerate(ground_sectors))
-            if family == "param_vap_sj"
+            if family in ("param_vap_sj", "full_vap_sj")
             else [(None, None)]
         )
         for sector_id, sec in targets:
@@ -505,25 +683,45 @@ def main():
                     f"\n[run {run_id}] {family}, seed={seed}{sector_txt}",
                     flush=True,
                 )
-                row = run_one(
-                    g, a.nf, a.V, H, ed_gs, float(evals[0]), group, chars, basis,
-                    ground_sectors=ground_sectors,
-                    sector_id=sector_id,
-                    sector_dim=sector_dim,
-                    family=family,
-                    seed_name=seed,
-                    seed_amplitude=a.seed_amplitude,
-                    n_shells=a.jastrow_shells,
-                    n_samples=a.n_samples,
-                    n_discard=a.n_discard,
-                    n_chains=a.n_chains,
-                    n_iter=a.n_iter,
-                    learning_rate=a.learning_rate,
-                    diag_shift=a.diag_shift,
-                    rng_seed=a.rng_seed + 1009*run_id,
-                    chunk_size=a.chunk_size,
-                    output_dir=out,
-                )
+                if family == "full_vap_sj":
+                    row = run_full_vap_one(
+                        g, a.nf, a.V, H, ed_gs, float(evals[0]), group, chars,
+                        ground_sectors=ground_sectors,
+                        sector_id=sector_id,
+                        sector_dim=sector_dim,
+                        seed_name=seed,
+                        seed_amplitude=a.seed_amplitude,
+                        n_shells=a.jastrow_shells,
+                        n_samples=a.n_samples,
+                        n_discard=a.n_discard,
+                        n_chains=a.n_chains,
+                        n_iter=a.n_iter,
+                        learning_rate=a.learning_rate,
+                        diag_shift=a.diag_shift,
+                        rng_seed=a.rng_seed + 1009*run_id,
+                        chunk_size=a.chunk_size,
+                        output_dir=out,
+                    )
+                else:
+                    row = run_one(
+                        g, a.nf, a.V, H, ed_gs, float(evals[0]), group, chars, basis,
+                        ground_sectors=ground_sectors,
+                        sector_id=sector_id,
+                        sector_dim=sector_dim,
+                        family=family,
+                        seed_name=seed,
+                        seed_amplitude=a.seed_amplitude,
+                        n_shells=a.jastrow_shells,
+                        n_samples=a.n_samples,
+                        n_discard=a.n_discard,
+                        n_chains=a.n_chains,
+                        n_iter=a.n_iter,
+                        learning_rate=a.learning_rate,
+                        diag_shift=a.diag_shift,
+                        rng_seed=a.rng_seed + 1009*run_id,
+                        chunk_size=a.chunk_size,
+                        output_dir=out,
+                    )
                 rows.append(row)
                 write_csv(out / "parametric_all.csv", rows)
                 print(
@@ -535,14 +733,19 @@ def main():
                 )
 
     best = [ed]
-    for method in ("Param-Slater", "Param-Slater-Jastrow", "Param-VAP-Slater-Jastrow"):
+    for method in (
+        "Param-Slater",
+        "Param-Slater-Jastrow",
+        "Param-VAP-Slater-Jastrow",
+        "Full-VAP-Slater-Jastrow",
+    ):
         cand = [r for r in rows if r.get("method") == method]
         if cand:
             best.append(min(cand, key=lambda r: float(r["E"])))
     write_csv(out / "parametric_best.csv", best)
     atomic_json(out / "parametric_best.json", best)
 
-    print("\n=== Parameterized best comparison ===")
+    print("\n=== ED / reduced / full-VAP best comparison ===")
     for r in best:
         print(
             f"{r['method']:30s} seed={str(r.get('seed','')):11s} "
