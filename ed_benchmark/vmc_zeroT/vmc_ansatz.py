@@ -236,6 +236,9 @@ def build_projected_netket_model(
     use_jastrow: bool,
     site_maps: np.ndarray,
     characters: np.ndarray,
+    partner_characters: np.ndarray | None = None,
+    time_reversal_even: bool = False,
+    initial_tr_phase: float = 0.0,
 ):
     """Create a symmetry-projected log wavefunction for variation after projection.
 
@@ -261,11 +264,17 @@ def build_projected_netket_model(
     shells_np = np.asarray(shell_matrices, np.float64)
     maps_np = np.asarray(site_maps, np.int32)
     chars_np = np.asarray(characters, np.complex128)
+    partner_chars_np = (
+        None if partner_characters is None
+        else np.asarray(partner_characters, np.complex128)
+    )
     ns, nf = M0.shape
     if maps_np.ndim != 2 or maps_np.shape[1] != ns:
         raise ValueError("site_maps must have shape (|G|, Ns)")
     if chars_np.shape != (maps_np.shape[0],):
         raise ValueError("characters length does not match site_maps")
+    if partner_chars_np is not None and partner_chars_np.shape != chars_np.shape:
+        raise ValueError("partner_characters shape does not match characters")
 
     class LogProjectedSlaterDensityJastrow(nn.Module):
         @nn.compact
@@ -286,6 +295,16 @@ def build_projected_netket_model(
             shells = jnp.asarray(shells_np)
             maps = jnp.asarray(maps_np)
             chars = jnp.asarray(chars_np)
+            partner_chars = (
+                None if partner_chars_np is None else jnp.asarray(partner_chars_np)
+            )
+            if time_reversal_even:
+                tr_phase = self.param(
+                    "tr_phase",
+                    lambda key: jnp.asarray(initial_tr_phase, dtype=jnp.float64),
+                )
+            else:
+                tr_phase = None
             filling = nf / ns
 
             def base_logpsi(x):
@@ -311,11 +330,20 @@ def build_projected_netket_model(
                 sources = jax.vmap(lambda p: x[p])(maps)
                 logs = jax.vmap(base_logpsi)(sources)
                 signs = jax.vmap(fock_sign)(maps, sources)
-                coeff = jnp.conj(chars) * signs
                 shift = jnp.max(jnp.real(logs))
-                z = jnp.sum(coeff * jnp.exp(logs - shift))
-                # Exact symmetry nodes are allowed. A tiny complex floor avoids
-                # undefined log/gradient at accidental floating-point zero only.
+                amps = jnp.exp(logs - shift)
+                z = jnp.sum(jnp.conj(chars) * signs * amps)
+                if partner_chars is not None:
+                    z = z + jnp.sum(jnp.conj(partner_chars) * signs * amps)
+                if time_reversal_even:
+                    # Spinless time reversal is complex conjugation K in the
+                    # occupation basis. The trainable phase spans all real
+                    # (T-invariant up to a global phase) combinations of the
+                    # projected state and its time-reversed partner.
+                    phase = jnp.exp(1j * tr_phase)
+                    z = phase * z + jnp.conj(phase * z)
+                # Exact symmetry/TR nodes are allowed. A tiny complex floor
+                # avoids undefined log/gradient only at floating-point zero.
                 tiny = jnp.asarray(1e-300 + 0.0j, dtype=z.dtype)
                 z_safe = jnp.where(jnp.abs(z) > 1e-300, z, tiny)
                 return shift + jnp.log(z_safe)
