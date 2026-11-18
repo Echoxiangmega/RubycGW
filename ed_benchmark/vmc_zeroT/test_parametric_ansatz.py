@@ -11,11 +11,13 @@ sys.path.insert(0, str(NATIVE))
 
 import geometry
 from benchmark_observables import ruby_star_formfactor
-from vmc_ansatz import one_body_seed_hamiltonian
+from vmc_ansatz import one_body_seed_hamiltonian, one_body_seed, minimum_image_shells
 from parametric_ansatz import (
     build_symmetry_tied_basis,
     seed_tied_parameters,
     reconstruct_one_body,
+    build_orbital_rotation_data,
+    build_stable_parametric_netket_model,
 )
 
 
@@ -56,6 +58,28 @@ def main():
         assert np.max(np.abs(h-h.conj().T)) < 1e-12
         for q in basis.subgroup_maps:
             assert np.max(np.abs(transform_h(h, q)-h)) < 1e-10
+
+    # Instantiate the stable reduced NetKet model so scope/shape errors are
+    # caught before a long VMC job.
+    try:
+        import jax
+        import jax.numpy as jnp
+        jax.config.update("jax_enable_x64", True)
+        star = ruby_star_formfactor(g)
+        Q0 = one_body_seed(g, 3, "normal", 0.08, star)
+        rot = build_orbital_rotation_data(basis, Q0)
+        _, shells, _ = minimum_image_shells(g, n_shells=4)
+        model = build_stable_parametric_netket_model(
+            rot["Q0"], rot["tangent_basis"], shells, use_jastrow=True,
+            initial_theta=np.zeros(rot["tangent_rank"])
+        )
+        x = np.zeros((1, g.Ns), dtype=np.int8)
+        x[0, :3] = 1
+        variables = model.init(jax.random.PRNGKey(0), jnp.asarray(x))
+        y = np.asarray(model.apply(variables, jnp.asarray(x)))
+        assert np.all(np.isfinite(y)), y
+    except ImportError:
+        print("NetKet/JAX unavailable: skipped stable-model instantiation check")
 
     print("symmetry-tied parameterization tests: PASS")
 
