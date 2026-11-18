@@ -236,7 +236,23 @@ def target_support_weight(group, target, psi):
 
 
 def target_support_residual(group, target, psi):
-    return float(np.sqrt(max(0.0, 1.0-target_support_weight(group, target, psi))))
+    """Direct norm ||(1-P_target) psi||.
+
+    Do not infer this as sqrt(1-weight): near unit weight that expression
+    amplifies ordinary floating-point roundoff (for example 1-w ~ 1e-15
+    becomes a spurious residual ~3e-8).
+    """
+    x = np.asarray(psi, complex)
+    x /= np.linalg.norm(x)
+    raw, _ = reconstruct_projected_component(
+        group, target["characters"], x
+    )
+    if target["partner_characters"] is not None:
+        raw2, _ = reconstruct_projected_component(
+            group, target["partner_characters"], x
+        )
+        raw = raw + raw2
+    return float(np.linalg.norm(x-raw))
 
 
 def restore_time_reversal_lowest(psi, H, tol=1e-13):
