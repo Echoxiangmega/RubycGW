@@ -218,6 +218,8 @@ def build_netket_model(
     shell_matrices: np.ndarray,
     use_jastrow: bool,
     backflow_matrices: np.ndarray | None = None,
+    initial_v: np.ndarray | None = None,
+    initial_eta: np.ndarray | None = None,
 ):
     """Create a Flax-Linen log-wavefunction model lazily."""
     import jax
@@ -232,6 +234,8 @@ def build_netket_model(
         else np.asarray(backflow_matrices, np.float64)
     )
     ns, nf = M0.shape
+    initial_v_np = None if initial_v is None else np.asarray(initial_v, np.float64)
+    initial_eta_np = None if initial_eta is None else np.asarray(initial_eta, np.complex128)
     if backflow_np is not None and backflow_np.shape[1:] != (ns, ns):
         raise ValueError("backflow_matrices must have shape (n_channels,Ns,Ns)")
 
@@ -244,16 +248,21 @@ def build_netket_model(
 
             M = self.param("M", init_M)
             if use_jastrow:
-                v = self.param(
-                    "v", nn.initializers.zeros_init(), (shells_np.shape[0],), jnp.float64
-                )
+                def init_v(key):
+                    del key
+                    if initial_v_np is None:
+                        return jnp.zeros((shells_np.shape[0],), dtype=jnp.float64)
+                    return jnp.asarray(initial_v_np, dtype=jnp.float64)
+                v = self.param("v", init_v)
             else:
                 v = None
             if backflow_np is not None:
-                eta = self.param(
-                    "eta", nn.initializers.zeros_init(),
-                    (backflow_np.shape[0],), jnp.complex128
-                )
+                def init_eta(key):
+                    del key
+                    if initial_eta_np is None:
+                        return jnp.zeros((backflow_np.shape[0],), dtype=jnp.complex128)
+                    return jnp.asarray(initial_eta_np, dtype=jnp.complex128)
+                eta = self.param("eta", init_eta)
                 backflow = jnp.asarray(backflow_np)
             else:
                 eta = None
@@ -294,6 +303,8 @@ def build_projected_netket_model(
     time_reversal_even: bool = False,
     initial_tr_phase: float = 0.0,
     backflow_matrices: np.ndarray | None = None,
+    initial_v: np.ndarray | None = None,
+    initial_eta: np.ndarray | None = None,
 ):
     """Create a symmetry-projected log wavefunction for variation after projection.
 
@@ -328,6 +339,8 @@ def build_projected_netket_model(
         else np.asarray(partner_characters, np.complex128)
     )
     ns, nf = M0.shape
+    initial_v_np = None if initial_v is None else np.asarray(initial_v, np.float64)
+    initial_eta_np = None if initial_eta is None else np.asarray(initial_eta, np.complex128)
     if backflow_np is not None and backflow_np.shape[1:] != (ns, ns):
         raise ValueError("backflow_matrices must have shape (n_channels,Ns,Ns)")
     if maps_np.ndim != 2 or maps_np.shape[1] != ns:
@@ -346,16 +359,21 @@ def build_projected_netket_model(
 
             M = self.param("M", init_M)
             if use_jastrow:
-                v = self.param(
-                    "v", nn.initializers.zeros_init(), (shells_np.shape[0],), jnp.float64
-                )
+                def init_v(key):
+                    del key
+                    if initial_v_np is None:
+                        return jnp.zeros((shells_np.shape[0],), dtype=jnp.float64)
+                    return jnp.asarray(initial_v_np, dtype=jnp.float64)
+                v = self.param("v", init_v)
             else:
                 v = None
             if backflow_np is not None:
-                eta = self.param(
-                    "eta", nn.initializers.zeros_init(),
-                    (backflow_np.shape[0],), jnp.complex128
-                )
+                def init_eta(key):
+                    del key
+                    if initial_eta_np is None:
+                        return jnp.zeros((backflow_np.shape[0],), dtype=jnp.complex128)
+                    return jnp.asarray(initial_eta_np, dtype=jnp.complex128)
+                eta = self.param("eta", init_eta)
                 backflow = jnp.asarray(backflow_np)
             else:
                 eta = None
