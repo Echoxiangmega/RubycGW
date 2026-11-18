@@ -363,3 +363,48 @@ so the differentiable path contains no eigendecomposition. The program prints
 both the original symmetry-generator count and the active tangent rank.
 The SR Jacobian is explicitly evaluated in complex mode because the parameters
 are real but the Slater wavefunction can be complex.
+
+
+### Integrated full-orbital VAP baseline on Hex18
+
+\`run_parametric.py\` also accepts:
+
+\`\`\`text
+full_vap_sj
+\`\`\`
+
+This is the original high-flexibility Hex18 ansatz: a full complex
+\(N_s\times N_f\) orbital matrix, real density Jastrow, and variation after
+projection. It is not intended as the scalable large-cluster parameterization;
+it is retained as the Hex18 accuracy baseline.
+
+For a unique ED ground state it uses the ordinary \(T\times C_{3v}\) projector.
+For a degenerate ED ground multiplet it runs separately in every
+\(T\times C_3\) sector present in the exact ground space, just like the reduced
+VAP branch. Therefore the number of full-VAP jobs is
+(number of seeds) x (number of ED ground symmetry sectors).
+
+For example, on the \(N_f=3,V=2.5\) point, start with one seed:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/run_parametric.py \
+  --nf 3 --t 1 --t1 0.5 --t2 -0.5 --V 2.5 \
+  --families full_vap_sj \
+  --seeds normal \
+  --n-samples 4096 --n-iter 300 --ed-k 12 \
+  --output results/fullvap_hex18_N3_V2p5
+\`\`\`
+
+To run all four comparison families in a single output directory:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/run_parametric.py \
+  --nf 3 --t 1 --t1 0.5 --t2 -0.5 --V 2.5 \
+  --families param_slater param_sj param_vap_sj full_vap_sj \
+  --seeds normal sd isd lc_same lc_opposite \
+  --n-samples 4096 --n-iter 300 --ed-k 12 \
+  --output results/hex18_N3_V2p5_allfamilies
+\`\`\`
+
+The best full-VAP row is written together with the reduced families to
+\`parametric_best.csv\`.
