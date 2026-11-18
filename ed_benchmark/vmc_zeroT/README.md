@@ -309,3 +309,30 @@ results/parametric_hex18_N6_V2/comparison_ed_fullvap_parametric.json
 The comparison includes \(E\), \(E-E_{\rm ED}\), fidelity, CO/BOW/LC
 structure factors, opposite/same LC ratio, target-sector weight, variational
 parameter count, and wall time.
+
+
+### Degenerate ED ground multiplets
+
+The reduced-parameter benchmark now supports exactly degenerate Hex18 ED
+ground spaces. For a unique ground state, VAP keeps the previous ordinary
+translations x \(C_{3v}\) projector. For a degenerate ground multiplet, the
+code automatically decomposes the complete ED ground space into the abelian
+ordinary translations x \(C_3\) one-dimensional character sectors and runs
+\`Param-VAP-Slater-Jastrow\` separately for every sector present in the ED
+ground manifold. The reported fidelity is always the overlap with the entire
+exact ED ground subspace.
+
+Before running a degenerate point such as \(N_f=3,V=2.5,t_1=0.5,t_2=-0.5\),
+test the decomposition:
+
+\`\`\`bash
+python ed_benchmark/vmc_zeroT/test_degenerate_ground_sectors.py
+\`\`\`
+
+Then \`run_parametric.py\` can be used normally. If the ED ground multiplet
+fills all states requested by \`--ed-k\`, the script stops and asks for a
+larger \`--ed-k\` rather than silently using an incomplete multiplet.
+
+Because VAP runs once per ED ground symmetry sector, the VAP wall time scales
+approximately with the number of such sectors in addition to the requested
+seed count.
