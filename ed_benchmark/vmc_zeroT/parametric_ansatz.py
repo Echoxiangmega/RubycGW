@@ -247,6 +247,13 @@ def build_parametric_netket_model(
     maps_np = None if projection_site_maps is None else np.asarray(projection_site_maps, np.int32)
     chars_np = None if projection_characters is None else np.asarray(projection_characters, np.complex128)
     projected = maps_np is not None
+    theta0_np = (
+        np.zeros(tan_np.shape[0], dtype=np.float64)
+        if initial_theta is None
+        else np.asarray(initial_theta, np.float64)
+    )
+    if theta0_np.shape != (tan_np.shape[0],):
+        raise ValueError("initial_theta shape mismatch")
     if projected and chars_np.shape != (maps_np.shape[0],):
         raise ValueError("projection character/map mismatch")
 
@@ -421,6 +428,7 @@ def build_stable_parametric_netket_model(
     shell_matrices: np.ndarray,
     use_jastrow: bool,
     *,
+    initial_theta=None,
     projection_site_maps=None,
     projection_characters=None,
 ):
@@ -447,9 +455,7 @@ def build_stable_parametric_netket_model(
     class StableReducedSlaterJastrow(nn.Module):
         @nn.compact
         def __call__(self, n):
-            theta = self.param(
-                "theta", nn.initializers.zeros_init(), (tan_np.shape[0],), jnp.float64
-            )
+            theta = self.param("theta", lambda key: jnp.asarray(theta0_np))
             if use_jastrow:
                 v = self.param(
                     "v", nn.initializers.zeros_init(), (shells_np.shape[0],), jnp.float64
