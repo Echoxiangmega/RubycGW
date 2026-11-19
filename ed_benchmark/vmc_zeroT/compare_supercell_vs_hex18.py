@@ -4,36 +4,40 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 from pathlib import Path
-import pandas as pd
-import numpy as np
 
 
-def best(df, predicate):
-    x=df[predicate(df)].copy()
-    if x.empty:
-        return None
-    x["E"]=pd.to_numeric(x["E"],errors="coerce")
-    x=x[np.isfinite(x["E"])]
-    if x.empty:
-        return None
-    return x.loc[x["E"].idxmin()]
+def read_rows(path):
+    with Path(path).open("r",newline="",encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def number(row,key):
+    try:
+        x=float(row.get(key,""))
+    except Exception:
+        return math.nan
+    return x if math.isfinite(x) else math.nan
+
+
+def best(rows,predicate):
+    x=[r for r in rows if predicate(str(r.get("method","")))]
+    x=[r for r in x if math.isfinite(number(r,"E"))]
+    return min(x,key=lambda r:number(r,"E")) if x else None
 
 
 def time_per_iter(row):
     if row is None:
-        return np.nan
-    if "time_per_iteration_s" in row.index and pd.notna(row["time_per_iteration_s"]):
-        return float(row["time_per_iteration_s"])
-    if (
-        "time_solve_or_opt_s" in row.index
-        and "n_iter" in row.index
-        and pd.notna(row["time_solve_or_opt_s"])
-        and pd.notna(row["n_iter"])
-        and float(row["n_iter"])>0
-    ):
-        return float(row["time_solve_or_opt_s"])/float(row["n_iter"])
-    return np.nan
+        return math.nan
+    x=number(row,"time_per_iteration_s")
+    if math.isfinite(x):
+        return x
+    t=number(row,"time_solve_or_opt_s")
+    n=number(row,"n_iter")
+    if math.isfinite(t) and math.isfinite(n) and n>0:
+        return t/n
+    return math.nan
 
 
 def record(label,row,projection_images=None):
@@ -51,13 +55,17 @@ def record(label,row,projection_images=None):
         "explicit_projection_images":(
             projection_images
             if projection_images is not None
-            else row.get("explicit_projection_images",np.nan)
+            else row.get("explicit_projection_images","")
         ),
         "time_per_iteration_s":time_per_iter(row),
     }
     for key in keys:
-        out[key]=row.get(key,np.nan)
+        out[key]=number(row,key)
     return out
+
+
+def fmt(x,spec):
+    return format(x,spec) if math.isfinite(float(x)) else "nan"
 
 
 def main():
@@ -67,29 +75,15 @@ def main():
     p.add_argument("--output",default="comparison_supercell_vs_hex18.csv")
     a=p.parse_args()
 
-    old=pd.read_csv(a.old)
-    new=pd.read_csv(a.new)
+    old=read_rows(a.old)
+    new=read_rows(a.new)
 
-    old_raw=best(old,lambda d:d["method"].astype(str).str.startswith("Raw-"))
-    old_vap=best(old,lambda d:
-        d["method"].astype(str).str.startswith("Full-VAP")
-        & ~d["method"].astype(str).str.endswith("+1LS")
-    )
-    old_vap_ls=best(old,lambda d:
-        d["method"].astype(str).str.startswith("Full-VAP")
-        & d["method"].astype(str).str.endswith("+1LS")
-    )
-    new_raw=best(new,lambda d:
-        d["method"].astype(str).str.startswith("Raw-SupercellBloch")
-    )
-    new_c3=best(new,lambda d:
-        d["method"].astype(str).str.startswith("VAP-C3-SupercellBloch")
-        & ~d["method"].astype(str).str.endswith("+1LS")
-    )
-    new_c3_ls=best(new,lambda d:
-        d["method"].astype(str).str.startswith("VAP-C3-SupercellBloch")
-        & d["method"].astype(str).str.endswith("+1LS")
-    )
+    old_raw=best(old,lambda m:m.startswith("Raw-"))
+    old_vap=best(old,lambda m:m.startswith("Full-VAP") and not m.endswith("+1LS"))
+    old_vap_ls=best(old,lambda m:m.startswith("Full-VAP") and m.endswith("+1LS"))
+    new_raw=best(new,lambda m:m.startswith("Raw-SupercellBloch"))
+    new_c3=best(new,lambda m:m.startswith("VAP-C3-SupercellBloch") and not m.endswith("+1LS"))
+    new_c3_ls=best(new,lambda m:m.startswith("VAP-C3-SupercellBloch") and m.endswith("+1LS"))
 
     rows=[
         record("old Raw Hex18",old_raw,1),
@@ -105,11 +99,11 @@ def main():
     rows=[r for r in rows if r is not None]
 
     if new_raw is not None and old_raw is not None:
-        dE=abs(float(new_raw["E"])-float(old_raw["E"]))
+        dE=abs(number(new_raw,"E")-number(old_raw,"E"))
         print(f"Raw implementation energy difference |E_new-E_old| = {dE:.6e}")
     if new_c3 is not None and old_vap is not None:
         tn=time_per_iter(new_c3); to=time_per_iter(old_vap)
-        if np.isfinite(tn) and np.isfinite(to) and tn>0:
+        if math.isfinite(tn) and math.isfinite(to) and tn>0:
             print(f"C3-only / old full-VAP time-per-iteration ratio = {tn/to:.4f}")
             print(f"old full-VAP / C3-only speedup = {to/tn:.2f}x")
 
@@ -124,10 +118,10 @@ def main():
         print(
             f"{r['label']:38s} "
             f"seed={str(r['seed']):11s} "
-            f"dE={float(r['delta_E_vs_ED']):+.4e} "
-            f"F={float(r['fidelity_ground_subspace']):.6f} "
-            f"var={float(r['exact_energy_variance']):.3e} "
-            f"t/it={float(r['time_per_iteration_s']):.3f}s"
+            f"dE={fmt(r['delta_E_vs_ED'],'+.4e')} "
+            f"F={fmt(r['fidelity_ground_subspace'],'.6f')} "
+            f"var={fmt(r['exact_energy_variance'],'.3e')} "
+            f"t/it={fmt(r['time_per_iteration_s'],'.3f')}s"
         )
     print("Saved:",Path(a.output).resolve())
 
