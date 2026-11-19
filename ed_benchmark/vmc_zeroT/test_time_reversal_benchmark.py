@@ -54,6 +54,7 @@ def main():
 
     assert tr0<1e-10,tr0
     assert sp0<1e-10,sp0
+    assert info["time_reversal_energy_after"] <= info["time_reversal_energy_before"] + 1e-10
     assert abs(obs.lc_same_mean)<1e-10,obs.lc_same_mean
     assert abs(obs.lc_opposite_mean)<1e-10,obs.lc_opposite_mean
 
