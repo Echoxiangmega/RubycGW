@@ -2,6 +2,7 @@
 """Regression tests for saved-state site/bond/current map observables."""
 from pathlib import Path
 import sys
+import tempfile
 import numpy as np
 
 HERE=Path(__file__).resolve().parent
@@ -16,6 +17,9 @@ from plot_saved_state_maps import (
     compute_site_density,
     compute_edge_observables,
     select_representation,
+    site_positions,
+    edge_segments,
+    plot_site_bond_current_triptych,
 )
 
 
@@ -38,6 +42,18 @@ def main():
     assert np.max(np.abs(density-density_tr))<1e-12
     assert np.max(np.abs(bond-bond_tr))<1e-12
     assert np.max(np.abs(current+current_tr))<1e-12
+
+    # Combined site/bond/current figure must be generated without a display.
+    xy,cells=site_positions(g)
+    starts,ends,crossed=edge_segments(g,xy,cells)
+    with tempfile.TemporaryDirectory() as td:
+        out=Path(td)
+        plot_site_bond_current_triptych(
+            g,xy,starts,ends,crossed,density,bond,current,out,
+            "saved-state regression",
+        )
+        assert (out/"site_bond_current_triptych.png").exists()
+        assert (out/"site_bond_current_triptych.svg").exists()
 
     # Equal-weight mixture of a state and its time reverse must have zero
     # one-point current while retaining density and real bond order.
