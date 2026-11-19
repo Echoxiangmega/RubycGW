@@ -934,3 +934,52 @@ python ed_benchmark/native_ed/test_large_supercells.py
 
 The test verifies the site count, quotient-cell count, permitted-momentum
 count, PBC bond consistency, and finite-torus point-group compatibility.
+
+
+## 24-site 2x2 ED/VMC benchmark
+
+The projection comparison runner also supports the 24-site `2x2` Ruby torus.
+At the same one-third filling as Hex18, use `Nf=8`.  The fixed-N Hilbert
+space has 735471 states, so `--ed-backend auto` reuses the symmetry-resolved
+QuSpin solver in `ed_benchmark/quspin_zeroT/run_zeroT.py`: translations are
+blocked first and compatible little-group rotation/mirror sectors are added.
+The resulting ground vector(s) are expanded back to the complete fixed-N basis
+for exactly the same VMC fidelity and observable definitions used on Hex18.
+
+A direct V=5.5 comparison is
+
+```powershell
+python ed_benchmark/vmc_zeroT/run_projection_comparison.py `
+  --cluster 2x2 `
+  --nf 8 `
+  --t 1 --t1 0.5 --t2 -0.5 --V 5.5 `
+  --seeds normal sd isd lc_same lc_opposite `
+  --correlator backflow `
+  --jastrow-mode bond_aware `
+  --jastrow-shells 4 `
+  --n-samples 4096 `
+  --n-iter 300 `
+  --vap-translation-iter 100 `
+  --vap-rotation-iter 100 `
+  --vap-tr-iter 100 `
+  --restore-time-reversal `
+  --ed-backend auto `
+  --ed-k 12 `
+  --output results/backflow_staged_2x2_N8_V5p5
+```
+
+For a first smoke test, add `--skip-vap` and reduce `--n-iter`; the ED,
+Raw VMC, PAV and exact post-processing paths will still be exercised.  The
+24-site benchmark uses a matrix-free full-basis Hamiltonian after the
+symmetry-blocked ED, avoiding construction of the full sparse matrix solely
+for post-processing.
+
+Run the non-NetKet plumbing regression with
+
+```bash
+python ed_benchmark/vmc_zeroT/test_2x2_benchmark_plumbing.py
+```
+
+The benchmark now uses vectorized fixed-N operator application and vectorized
+second-quantized symmetry maps, which preserve the Hex18 algebra while making
+the 735471-state post-processing practical.
