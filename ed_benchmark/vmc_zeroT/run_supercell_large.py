@@ -291,7 +291,6 @@ def _qgt_and_solver(nk,jax,args):
         qgt=partial(
             nk.optimizer.qgt.QGTJacobianDense,
             mode="complex",
-            holomorphic=False,
             chunk_size=args.qgt_chunk_size,
         )
     elif requested=="pytree":
@@ -299,7 +298,6 @@ def _qgt_and_solver(nk,jax,args):
         qgt=partial(
             nk.optimizer.qgt.QGTJacobianPyTree,
             mode="complex",
-            holomorphic=False,
             chunk_size=args.qgt_chunk_size,
         )
     elif requested in ("auto","onthefly"):
@@ -311,7 +309,6 @@ def _qgt_and_solver(nk,jax,args):
         qgt=partial(
             nk.optimizer.qgt.QGTJacobianPyTree,
             mode="complex",
-            holomorphic=False,
             chunk_size=args.qgt_chunk_size,
         )
     else:
@@ -510,7 +507,7 @@ def _stage(
         "qgt_requested":args.qgt,
         "qgt":effective_qgt,
         "qgt_mode":"complex",
-        "qgt_holomorphic":False,
+        "qgt_holomorphic":"implicit_nonholomorphic_from_mode_complex",
         "sr_solver":args.sr_solver,
         "cg_tol":float(args.cg_tol),
         "cg_maxiter":int(args.cg_maxiter),
