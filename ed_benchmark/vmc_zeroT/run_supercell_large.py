@@ -235,7 +235,6 @@ def _current_operators(hi,g):
 
 def _mc_order_observables(vstate, g, nf, hi, current_ops):
     """Evaluate CO and the historical LC channels on the current MCState."""
-    vstate.sample()
     samples=np.asarray(vstate.samples)
     out=_charge_structure_from_samples(g,samples,nf)
 
@@ -349,6 +348,8 @@ def _stage(
     n_iter,learning_rate,
     args,
     rng_seed,
+    train_samples=None,
+    train_sweep_size=None,
 ):
     import jax
     jax.config.update("jax_enable_x64",True)
@@ -384,10 +385,19 @@ def _stage(
         packed_orbitals=True,
     )
 
+    stage_samples=(
+        int(train_samples)
+        if train_samples is not None
+        else int(args.n_samples)
+    )
     sweep_size=(
-        int(args.sweep_size)
-        if args.sweep_size is not None
-        else int(nf)
+        int(train_sweep_size)
+        if train_sweep_size is not None
+        else (
+            int(args.sweep_size)
+            if args.sweep_size is not None
+            else int(nf)
+        )
     )
     sampler_kwargs={
         "graph":graph,
@@ -400,7 +410,7 @@ def _stage(
     sampler=nk.sampler.MetropolisFermionHop(hi,**sampler_kwargs)
     vstate=nk.vqs.MCState(
         sampler,model,
-        n_samples=args.n_samples,
+        n_samples=stage_samples,
         n_discard_per_chain=args.n_discard,
         chunk_size=args.chunk_size,
         seed=rng_seed,
@@ -412,50 +422,66 @@ def _stage(
     warm=vstate.expect(H_fast)
     warmup_s=time.perf_counter()-tw
 
-    qgt_ctor,solver,effective_qgt=_qgt_and_solver(nk,jax,args)
-    if str(args.qgt).lower()=="onthefly" and effective_qgt!="onthefly":
+    effective_qgt="not_used_pav_only"
+    log=nk.logging.RuntimeLog()
+    if int(n_iter)>0:
+        qgt_ctor,solver,effective_qgt=_qgt_and_solver(nk,jax,args)
+        if str(args.qgt).lower()=="onthefly" and effective_qgt!="onthefly":
+            print(
+                "[QGT] requested onthefly, but this ansatz has mixed real/complex "
+                "parameters (real Jastrow v, complex orbitals/backflow). "
+                "Falling back to QGTJacobianPyTree(mode='complex') + iterative "
+                "solver; no dense P x P QGT is formed.",
+                flush=True,
+            )
+        optimizer=nk.optimizer.Sgd(learning_rate=learning_rate)
+        try:
+            sr=nk.optimizer.SR(
+                qgt=qgt_ctor,
+                solver=solver,
+                diag_shift=args.diag_shift,
+                solver_restart=True,
+            )
+        except TypeError:
+            sr=nk.optimizer.SR(
+                qgt=qgt_ctor,
+                solver=solver,
+                diag_shift=args.diag_shift,
+            )
+
+        driver=nk.driver.VMC(
+            H_fast,optimizer,
+            variational_state=vstate,
+            preconditioner=sr,
+        )
+        n_images=1 if maps is None else int(len(maps))
         print(
-            "[QGT] requested onthefly, but this ansatz has mixed real/complex "
-            "parameters (real Jastrow v, complex orbitals/backflow). "
-            "Falling back to QGTJacobianPyTree(mode='complex') + iterative "
-            "solver; no dense P x P QGT is formed.",
+            f"[large {stage_name}] Ns={g.Ns} Nf={nf} "
+            f"params={vstate.n_parameters} images={n_images} "
+            f"samples={stage_samples} sweep={sweep_size} "
+            f"qgt={args.qgt}->{effective_qgt}/{args.sr_solver}",
             flush=True,
         )
-    optimizer=nk.optimizer.Sgd(learning_rate=learning_rate)
-    try:
-        sr=nk.optimizer.SR(
-            qgt=qgt_ctor,
-            solver=solver,
-            diag_shift=args.diag_shift,
-            solver_restart=True,
+        topt=time.perf_counter()
+        driver.run(n_iter=n_iter,out=log,show_progress=True)
+        opt_s=time.perf_counter()-topt
+    else:
+        n_images=1 if maps is None else int(len(maps))
+        print(
+            f"[large {stage_name} PAV-only] Ns={g.Ns} Nf={nf} "
+            f"params={vstate.n_parameters} images={n_images} "
+            f"samples={stage_samples} sweep={sweep_size}; no SR/Jacobian",
+            flush=True,
         )
-    except TypeError:
-        # Compatibility with older 3.x releases that do not expose
-        # solver_restart in the public constructor.
-        sr=nk.optimizer.SR(
-            qgt=qgt_ctor,
-            solver=solver,
-            diag_shift=args.diag_shift,
-        )
+        opt_s=0.0
 
-    driver=nk.driver.VMC(
-        H_fast,optimizer,
-        variational_state=vstate,
-        preconditioner=sr,
+    eval_samples=(
+        int(args.eval_samples)
+        if args.eval_samples is not None
+        else int(args.n_samples)
     )
-    n_images=1 if maps is None else int(len(maps))
-    print(
-        f"[large {stage_name}] Ns={g.Ns} Nf={nf} "
-        f"params={vstate.n_parameters} images={n_images} "
-        f"sweep={sweep_size} qgt={args.qgt}->{effective_qgt}/{args.sr_solver}",
-        flush=True,
-    )
-
-    log=nk.logging.RuntimeLog()
-    topt=time.perf_counter()
-    driver.run(n_iter=n_iter,out=log,show_progress=True)
-    opt_s=time.perf_counter()-topt
-
+    if int(vstate.n_samples)!=eval_samples:
+        vstate.n_samples=eval_samples
     te=time.perf_counter()
     vstate.sample()
     final_stats=vstate.expect(H_fast)
@@ -512,7 +538,9 @@ def _stage(
         "cg_tol":float(args.cg_tol),
         "cg_maxiter":int(args.cg_maxiter),
         "diag_shift":float(args.diag_shift),
-        "n_samples":int(args.n_samples),
+        "n_samples":int(stage_samples),
+        "training_n_samples":int(stage_samples),
+        "evaluation_n_samples":int(eval_samples),
         "n_chains":int(args.n_chains),
         "sweep_size":int(sweep_size),
         "default_netket_sweep_size_would_be":int(g.Ns),
@@ -534,7 +562,9 @@ def _stage(
         "time_setup_s":float(setup_s),
         "time_jit_warmup_s":float(warmup_s),
         "time_opt_s":float(opt_s),
-        "time_per_iteration_s":float(opt_s/max(int(n_iter),1)),
+        "time_per_iteration_s":(
+            float(opt_s/int(n_iter)) if int(n_iter)>0 else None
+        ),
         "time_final_eval_s":float(final_eval_s),
         "time_order_observables_s":float(observable_eval_s),
         "n_iter":int(n_iter),
@@ -608,6 +638,18 @@ def parser():
     p.add_argument("--restore-time-reversal",action="store_true")
 
     p.add_argument("--n-samples",type=int,default=2048)
+    p.add_argument(
+        "--spatial-samples",type=int,default=512,
+        help="Training samples per Tint+C3v/TR iteration; final observables use --eval-samples.",
+    )
+    p.add_argument(
+        "--spatial-sweep-size",type=int,default=None,
+        help="Sweep size during 18-image spatial/TR training. Default=max(2,Nf//4).",
+    )
+    p.add_argument(
+        "--eval-samples",type=int,default=None,
+        help="Samples for final E/CO/LC evaluation of every stage. Default=--n-samples.",
+    )
     p.add_argument("--n-discard",type=int,default=8)
     p.add_argument("--n-chains",type=int,default=32)
     p.add_argument(
@@ -737,6 +779,7 @@ def main():
             "Mixed real/complex parameters use QGTJacobianPyTree(mode=complex)+iterative solver by default; the dense P x P QGT is not formed.",
             "Metropolis sweep_size defaults to Nf rather than Ns.",
             "Determinant evaluation remains stateless/exact; no inverse cache is used.",
+            "Tint+C3v/TR training defaults to fewer samples and shorter sweeps; final observables are reevaluated with eval_samples.",
         ],
     }
     atomic_json(out/"settings.json",settings)
@@ -832,6 +875,12 @@ def main():
                     n_iter=a.spatial_iter,
                     learning_rate=a.spatial_learning_rate,
                     args=a,rng_seed=base_seed+3+17*requested_irreps.index(ir),
+                    train_samples=a.spatial_samples,
+                    train_sweep_size=(
+                        a.spatial_sweep_size
+                        if a.spatial_sweep_size is not None
+                        else max(2,nf//4)
+                    ),
                 )
             rows.append(spatial_summary)
 
@@ -855,6 +904,12 @@ def main():
                     n_iter=a.tr_iter,
                     learning_rate=a.tr_learning_rate,
                     args=a,rng_seed=base_seed+4+17*requested_irreps.index(ir),
+                    train_samples=a.spatial_samples,
+                    train_sweep_size=(
+                        a.spatial_sweep_size
+                        if a.spatial_sweep_size is not None
+                        else max(2,nf//4)
+                    ),
                 )
                 rows.append(tr_summary)
 
