@@ -1279,8 +1279,9 @@ python ed_benchmark/vmc_zeroT/run_supercell_benchmark.py `
 For a unique ED ground state the 1x1 CSV also reports
 `ed_primitive_translation_sector_weight` and
 `ed_full_spatial_sector_weight`. These are diagnostics only: the new ansatz
-does not enforce primitive-cell translations or mirrors. They show whether the
-C3v-optimized state also returns to the exact primitive-translation sector.
+does not enforce primitive-cell translations, while C3v explicitly restores
+the three mirrors. These diagnostics show whether the C3v-optimized state also
+returns to the exact primitive-translation sector.
 The CSV also reports the gauge-invariant spinless time-reversal residual.
 
 
@@ -1292,7 +1293,8 @@ The supercell runner now supports a third optimization stage
 Raw supercell -> C3v VAP -> C3v+TR VAP
 ```
 
-without restoring primitive-cell translations or mirrors. Enable it with
+without explicitly restoring primitive-cell translations; the full residual
+C3v point group, including all three mirrors, is restored. Enable it with
 
 ```powershell
 python ed_benchmark/vmc_zeroT/run_supercell_benchmark.py `
