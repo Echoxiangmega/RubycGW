@@ -575,6 +575,10 @@ def parser():
     p.add_argument("--ed-degeneracy-tol", type=float, default=1e-8)
     p.add_argument("--resume", action="store_true")
     p.add_argument("--skip-vap", action="store_true")
+    p.add_argument(
+        "--ed-only", action="store_true",
+        help="Solve/save ED and exit before symmetry-projected VMC stages."
+    )
     p.add_argument("--output", default="results/full_pav_vap_tr_hex18")
     return p
 
@@ -619,6 +623,30 @@ def main():
                 "increase --ed-sector-low"
             )
         raise RuntimeError("ED ground manifold truncated; increase --ed-k")
+
+    # Persist the exact ground-state manifold immediately.  This is kept
+    # separate from comparison_all.csv because site/bond/current maps require
+    # the full many-body state, not only scalar benchmark observables.
+    ed_dir = out/"ed"
+    ed_dir.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        ed_dir/"final_state.npz",
+        psi_ground_manifold=np.asarray(ed_gs, np.complex128),
+        native_states=np.asarray(H.states, np.uint64),
+        eigenvalues=np.asarray(evals, float),
+        ground_energy=np.asarray(float(evals[0])),
+        ground_degeneracy=np.asarray(ed_gs.shape[1], dtype=np.int64),
+    )
+    atomic_json(ed_dir/"summary.json", ed_row)
+    atomic_json(out/"geometry.json", g.metadata())
+    print(
+        f"[ED save] {ed_dir/'final_state.npz'} "
+        f"(ground manifold columns={ed_gs.shape[1]})",
+        flush=True,
+    )
+    if a.ed_only:
+        print("[ED only] exact state saved; skipping all VMC stages.", flush=True)
+        return
 
     # The 24-site native symmetry ED already validates a complete, non-overlapping
     # decomposition into exact Hamiltonian blocks.  Repeating [H,U] tests on
