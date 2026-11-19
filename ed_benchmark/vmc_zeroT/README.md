@@ -1648,3 +1648,43 @@ and therefore can retain a broken loop-current branch. Add
 
 only when a finite-size/time-reversal-even control state is desired; this
 appends the final `Tint x C3v + TR` stage.
+
+
+### C3v sector scan in the large-supercell runner
+
+The production runner now defaults to
+
+```text
+--c3v-irrep both
+```
+
+which means that Raw and Tint are optimized once per seed, after which the
+same Tint checkpoint branches into the two one-dimensional C3v irreps A1 and
+A2.  The output therefore contains separate `Tint+C3v` rows with
+`point_label=A1` and `point_label=A2`.
+
+C3v has a third, two-dimensional irrep E.  It can be requested explicitly with
+
+```text
+--c3v-irrep E
+```
+
+or all three irreps can be scanned with
+
+```text
+--c3v-irrep all
+```
+
+where `all=A1+A2+E`.  For E the code uses the standard central character
+projector with C3v characters ([2,-1,-1,0,0,0]), repeated over the three
+internal-translation cosets.
+
+A unique finite-size eigenstate of an exact C3v-symmetric Hamiltonian can only
+belong to a one-dimensional irrep A1 or A2.  An E-sector eigenstate necessarily
+comes in a symmetry-enforced two-dimensional multiplet.  Thus `both` is the
+natural default when looking for a unique Gamma-sector finite-size ground
+state, while `all` is the conservative choice when an E doublet is possible.
+
+The loop-current operator construction also avoids operator division for
+NetKet FermionOperator2ndJax objects and uses scalar multiplication for its
+normalization.
