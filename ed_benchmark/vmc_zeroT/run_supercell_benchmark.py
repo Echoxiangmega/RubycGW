@@ -772,14 +772,21 @@ def main():
 
     point_maps=None
     point_image_count=0
+    tint_maps=None
+    residual_spatial_maps=None
     if not a.skip_c3:
         try:
             site_ops=(c3v_site_maps(g) if a.point_group=="c3v" else c3_site_maps(g))
             point_maps=np.asarray([p for _,p in site_ops],np.int32)
             point_image_count=len(site_ops)
+            if a.point_group=="c3v":
+                tint_ops=internal_translation_site_maps(g)
+                tint_maps=np.asarray([p for _,p in tint_ops],np.int32)
+                residual_ops=internal_c3v_space_group_site_maps(g)
+                residual_spatial_maps=np.asarray([p for _,p in residual_ops],np.int32)
         except RuntimeError as exc:
             raise RuntimeError(
-                f"This torus does not retain ordinary {a.point_group.upper()}. "
+                f"This torus does not retain the requested residual spatial symmetry. "
                 "Use a compatible shape (normally L1=L2) or pass --skip-point-group."
             ) from exc
     settings={
@@ -791,6 +798,12 @@ def main():
         "supercell_translation_built_in":True,
         "explicit_rotation_group":a.point_group.upper(),
         "explicit_rotation_images":point_image_count,
+        "internal_translation_images":(
+            0 if tint_maps is None else int(len(tint_maps))
+        ),
+        "full_residual_spatial_images":(
+            0 if residual_spatial_maps is None else int(len(residual_spatial_maps))
+        ),
         "exact_available":exact_available,
         "point_group_targets":[{
             "label":str(t["label"]),
