@@ -17,6 +17,8 @@ from supercell_ansatz import (
     ring3_periodic_star_formfactor,
     seed_bloch_blocks,
     assemble_bloch_orbitals_numpy,
+    _sparse_jastrow_channels,
+    _sparse_backflow_channels,
 )
 from symmetry_projection import (
     c3v_site_maps,
@@ -118,6 +120,38 @@ def main():
     refvals=np.sort(ring3_periodic_star_formfactor(g,1,1))
     assert len(f)==4*len(refvals)
     assert np.allclose(np.sort(f),np.sort(np.tile(refvals,4)))
+
+    # Sparse Jastrow/backflow compression must reproduce the dense formulas.
+    rng=np.random.default_rng(260119)
+    ns=18
+    nch=4
+    mats=np.zeros((nch,ns,ns),float)
+    for s in range(nch):
+        for i in range(ns-1):
+            if (i+s)%3==0:
+                mats[s,i,i+1]=mats[s,i+1,i]=1.0+0.1*s
+    dn=rng.normal(size=ns)
+    jch,ji,jj,jv=_sparse_jastrow_channels(mats)
+    dense_j=0.5*np.einsum("i,sij,j->s",dn,mats,dn)
+    sparse_j=np.zeros(nch,float)
+    np.add.at(sparse_j,jch,jv*dn[ji]*dn[jj])
+    assert np.max(np.abs(dense_j-sparse_j))<1e-12
+
+    bf=np.zeros((3,ns,ns),float)
+    for k in range(3):
+        for i in range(ns):
+            j=(i+k+1)%ns
+            bf[k,i,j]=1.0
+    eta=rng.normal(size=3)+1j*rng.normal(size=3)
+    Q=rng.normal(size=(ns,5))+1j*rng.normal(size=(ns,5))
+    bch,bdst,bsrc,bv=_sparse_backflow_channels(bf)
+    dense_b=np.einsum("k,kij,j,ja->ia",eta,bf,dn,Q)
+    sparse_b=np.zeros_like(Q,dtype=complex)
+    np.add.at(
+        sparse_b,bdst,
+        eta[bch,None]*bv[:,None]*dn[bsrc,None]*Q[bsrc,:],
+    )
+    assert np.max(np.abs(dense_b-sparse_b))<1e-12
 
     print("supercell ansatz tests: PASS")
     print("1x1: exact Hex18 one-body variational space")
