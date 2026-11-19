@@ -992,3 +992,68 @@ symmetry block. The default `--ed-sector-low 4` keeps the 2x2 scan much
 cheaper than requesting 12 states in every block. If the benchmark reports
 that the ground manifold is truncated inside a symmetry block, increase
 `--ed-sector-low`.
+
+
+## Plot saved ED/VMC site, bond, and current maps
+
+`plot_saved_state_maps.py` reads the state files written by
+`run_projection_comparison.py` and produces real-space maps analogous to the
+GW site/bond/current plots.
+
+For a saved ED ground manifold:
+
+```powershell
+python ed_benchmark/vmc_zeroT/plot_saved_state_maps.py `
+  --result-root results/backflow_staged_2x2_N8_V5p5 `
+  --state-file results/backflow_staged_2x2_N8_V5p5/ed/final_state.npz `
+  --mode average `
+  --output-dir results/backflow_staged_2x2_N8_V5p5/ed_maps
+```
+
+If `--state-file` is omitted, the script defaults to
+`<result-root>/ed/final_state.npz`.
+
+The outputs are
+
+```text
+site_density.png / .svg
+bond_order.png / .svg
+bond_current.png / .svg
+site_density.csv
+bond_observables.csv
+summary.json
+```
+
+The plotted quantities are
+
+[
+n_i=\langle n_i\rangle,
+qquad
+B_{ij}=2\,\mathrm{Re}\langle c_i^\dagger c_j\rangle,
+qquad
+J_{i\to j}
+=i t_{ij}\left(
+\langle c_i^\dagger c_j\rangle-
+\langle c_j^\dagger c_i\rangle
+\right).
+]
+
+For a degenerate ED ground manifold, `--mode average` evaluates the
+basis-independent equal-weight incoherent mixture over all saved ground
+vectors.  `--mode vector --column N` instead plots one saved basis vector.
+A unique spinless time-reversal-even ED ground state has vanishing one-point
+bond currents up to numerical noise; this does not by itself exclude
+loop-current correlations.
+
+The same script can plot any Raw/PAV/VAP `final_state.npz` containing
+`psi_native` and `native_states`.
+
+A lightweight convention check is
+
+```bash
+python ed_benchmark/vmc_zeroT/test_saved_state_maps.py
+```
+
+which verifies that time reversal leaves density/bond order unchanged, flips
+every bond current, and cancels one-point current in an equal-weight
+time-reversal pair.
