@@ -49,7 +49,7 @@ REPO = HERE.parents[1]
 NATIVE = REPO / "ed_benchmark" / "native_ed"
 sys.path.insert(0, str(NATIVE))
 
-from geometry import RubyPBC, A, ORBITALS  # noqa: E402
+from geometry import RubyPBC, make_ring3_supercell, A, ORBITALS  # noqa: E402
 from core import edge_triplets  # noqa: E402
 import observables as native_observables  # noqa: E402
 from benchmark_observables import ruby_star_formfactor  # noqa: E402
@@ -80,6 +80,17 @@ def load_geometry(result_root: Path) -> RubyPBC:
         t = float(meta.get("t", 1.0))
         t1 = float(meta.get("t1", 0.5))
         t2 = float(meta.get("t2", 0.5))
+    if str(cluster).startswith("ring3sc_"):
+        tag=str(cluster).split("ring3sc_",1)[1]
+        try:
+            l1s,l2s=tag.lower().split("x",1)
+            return make_ring3_supercell(
+                int(l1s),int(l2s),t=t,t1=t1,t2=t2
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"Could not parse ring3 supercell geometry name {cluster!r}"
+            ) from exc
     return RubyPBC(cluster, t=t, t1=t1, t2=t2)
 
 
