@@ -756,9 +756,9 @@ def main():
     if a.output_dir is not None:
         out = Path(a.output_dir).resolve()
     elif state_file.parent.name == "ed":
-        out = root / "ed_maps"
+        out = root / f"ed_maps_{a.mode}"
     else:
-        out = state_file.parent.parent / (state_file.parent.name + "_maps")
+        out = state_file.parent.parent / (state_file.parent.name + f"_maps_{a.mode}")
     out.mkdir(parents=True, exist_ok=True)
 
     g = load_geometry(root)
