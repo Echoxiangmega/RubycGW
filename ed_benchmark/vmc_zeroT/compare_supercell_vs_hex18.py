@@ -85,10 +85,13 @@ def main():
     old_vap=best(old,lambda m:m.startswith("Full-VAP") and not m.endswith("+1LS"))
     old_vap_ls=best(old,lambda m:m.startswith("Full-VAP") and m.endswith("+1LS"))
     new_raw=best(new,lambda m:m.startswith("Raw-SupercellBloch"))
+    new_c3v=best(new,lambda m:m.startswith("VAP-C3v-SupercellBloch") and not m.endswith("+1LS"))
+    new_c3v_ls=best(new,lambda m:m.startswith("VAP-C3v-SupercellBloch") and m.endswith("+1LS"))
+    new_c3vtr=best(new,lambda m:m.startswith("VAP-C3vTR-SupercellBloch") and not m.endswith("+1LS"))
+    new_c3vtr_ls=best(new,lambda m:m.startswith("VAP-C3vTR-SupercellBloch") and m.endswith("+1LS"))
+    # Keep old C3-only rows readable for previously completed runs.
     new_c3=best(new,lambda m:m.startswith("VAP-C3-SupercellBloch") and not m.endswith("+1LS"))
     new_c3_ls=best(new,lambda m:m.startswith("VAP-C3-SupercellBloch") and m.endswith("+1LS"))
-    new_c3tr=best(new,lambda m:m.startswith("VAP-C3TR-SupercellBloch") and not m.endswith("+1LS"))
-    new_c3tr_ls=best(new,lambda m:m.startswith("VAP-C3TR-SupercellBloch") and m.endswith("+1LS"))
 
     rows=[
         record("old Raw Hex18",old_raw,1),
@@ -98,21 +101,23 @@ def main():
         record("old full spatial/TR VAP Hex18",old_vap,18),
         record("old full spatial/TR VAP Hex18 +1LS",old_vap_ls,18),
         record("new 1x1 supercell Raw",new_raw,1),
-        record("new 1x1 supercell C3 VAP",new_c3,3),
-        record("new 1x1 supercell C3 VAP +1LS",new_c3_ls,3),
-        record("new 1x1 supercell C3+TR VAP",new_c3tr,3),
-        record("new 1x1 supercell C3+TR VAP +1LS",new_c3tr_ls,3),
+        record("new 1x1 supercell C3v VAP",new_c3v,6),
+        record("new 1x1 supercell C3v VAP +1LS",new_c3v_ls,6),
+        record("new 1x1 supercell C3v+TR VAP",new_c3vtr,6),
+        record("new 1x1 supercell C3v+TR VAP +1LS",new_c3vtr_ls,6),
+        record("legacy new 1x1 supercell C3 VAP",new_c3,3),
+        record("legacy new 1x1 supercell C3 VAP +1LS",new_c3_ls,3),
     ]
     rows=[r for r in rows if r is not None]
 
     if new_raw is not None and old_raw is not None:
         dE=abs(number(new_raw,"E")-number(old_raw,"E"))
         print(f"Raw implementation energy difference |E_new-E_old| = {dE:.6e}")
-    if new_c3 is not None and old_vap is not None:
-        tn=time_per_iter(new_c3); to=time_per_iter(old_vap)
+    if new_c3v is not None and old_vap is not None:
+        tn=time_per_iter(new_c3v); to=time_per_iter(old_vap)
         if math.isfinite(tn) and math.isfinite(to) and tn>0:
-            print(f"C3-only / old full-VAP time-per-iteration ratio = {tn/to:.4f}")
-            print(f"old full-VAP / C3-only speedup = {to/tn:.2f}x")
+            print(f"C3v / old full-VAP time-per-iteration ratio = {tn/to:.4f}")
+            print(f"old full-VAP / C3v speedup = {to/tn:.2f}x")
 
     fields=list(rows[0].keys()) if rows else []
     with Path(a.output).open("w",newline="",encoding="utf-8") as f:
