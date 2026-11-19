@@ -71,18 +71,24 @@ class FixedHamiltonian:
         self.method=method
         self.site_gauge=site_gauge
         if method=='sparse':
+            # The physical Ruby Hamiltonian has real hopping unless an
+            # explicit site gauge is supplied.  Keeping the ordinary case
+            # float64 roughly halves the 24-site CSR memory footprint.
+            real_operator=(site_gauge is None)
             rows=[np.arange(self.n,dtype=np.int64)]
             cols=[np.arange(self.n,dtype=np.int64)]
-            vals=[self.diagonal.astype(complex)]
+            vals=[self.diagonal.astype(np.float64 if real_operator else np.complex128)]
             for ie,e in enumerate(g.edges):
                 row,col,sign=edge_triplets(g,self.states,ie)
-                amp=complex(g.t[e.kind])
+                amp=(float(g.t[e.kind]) if real_operator else complex(g.t[e.kind]))
                 if site_gauge is not None:
                     amp*=site_gauge[e.i]*np.conj(site_gauge[e.j])
                 # column with occupation at i: c^dag_i c_j is NOT allowed;
                 # instead use the Hamiltonian matrix direction based on bit occupancy.
                 col_i=((self.states[col] & np.uint64(1 << (g.Ns-1-e.i)))!=0)
                 amp_for_col=np.where(col_i,np.conj(amp),amp)
+                if real_operator:
+                    amp_for_col=np.asarray(amp_for_col.real,dtype=np.float64)
                 rows.append(row);cols.append(col)
                 vals.append(sign*amp_for_col)
             self.operator=coo_matrix((np.concatenate(vals),
