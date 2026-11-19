@@ -1502,7 +1502,7 @@ The large-system ansatz enables three implementation optimizations:
    sparse lists, not inside `logpsi`.
 
 3. **Matrix-free SR.** The default is
-   `QGTOnTheFly + jax.scipy.sparse.linalg.cg`; no dense QGT or Cholesky
+   `QGTJacobianPyTree(mode="complex") + jax.scipy.sparse.linalg.cg`; no dense QGT or Cholesky
    factor is formed. `--qgt pytree` is available as a timing/memory
    cross-check. The iterative solution reuses the previous SR solution on
    NetKet versions that support `solver_restart`.
@@ -1538,7 +1538,7 @@ python ed_benchmark/vmc_zeroT/run_supercell_large.py `
   --jastrow-mode bond_aware --jastrow-shells 4 `
   --n-samples 2048 --n-chains 32 `
   --raw-iter 10 --tint-iter 10 --spatial-iter 10 `
-  --qgt onthefly --sr-solver cg `
+  --qgt auto --sr-solver cg `
   --qgt-chunk-size 128 `
   --cg-tol 1e-5 --cg-maxiter 100 `
   --diag-shift 0.05 `
@@ -1688,3 +1688,30 @@ state, while `all` is the conservative choice when an E doublet is possible.
 The loop-current operator construction also avoids operator division for
 NetKet FermionOperator2ndJax objects and uses scalar multiplication for its
 normalization.
+
+
+### Mixed real/complex SR compatibility
+
+The large-supercell ansatz has complex orbital/backflow parameters but a real
+density-Jastrow vector. It is therefore a mixed real/complex parameter PyTree
+and must use the general non-holomorphic complex Jacobian. Direct
+`QGTOnTheFly + CG` can promote the real Jastrow tangent to complex and violate
+JAX CG's requirement that every carried PyTree leaf retain its dtype.
+
+The production runner therefore defaults to
+
+```text
+--qgt auto
+```
+
+which currently selects
+
+```text
+QGTJacobianPyTree(mode="complex", holomorphic=False) + iterative CG
+```
+
+for this ansatz. This stores the sample Jacobian but does **not** construct the
+dense (P\times P) QGT. An explicit `--qgt onthefly` request is accepted for
+backward compatibility but is automatically redirected to the same safe
+PyTree implementation with a console message. `--qgt dense` is retained only
+for small profiling runs.
