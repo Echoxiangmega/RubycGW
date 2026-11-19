@@ -1462,3 +1462,128 @@ state: a corresponding `+1LS` state is preferred when available; otherwise
 the last VAP state is used.  The optional `pre_tr` triptych follows the same
 rule and is useful for inspecting a nonzero loop-current pattern before the
 finite-size TR restoration removes the one-point current.
+
+
+## Large-supercell production runner: matrix-free SR, sparse correlators
+
+For production calculations beyond ED, use
+
+```text
+ed_benchmark/vmc_zeroT/run_supercell_large.py
+```
+
+instead of the 1x1 benchmark runner. This path never calls ED, never expands a
+full Hilbert-space state with `to_array()`, never evaluates fidelity/exact
+variance, and never applies Lanczos.
+
+The default staged optimization is
+
+[
+\mathrm{Raw}
+\rightarrow T_{\rm int}
+\rightarrow T_{\rm int}\rtimes C_{3v},
+]
+
+with optional spinless TR restoration. The residual image counts remain
+1, 3 and 18 for any (L_1\times L_2).
+
+The large-system ansatz enables three implementation optimizations:
+
+1. **Packed orbital parameters.** All occupied (k)-block matrices are stored
+   in one complex (18\times N_f) parameter leaf and sliced before the
+   per-block QR operations. This keeps the parameter count (18N_f) but
+   avoids an (O(L_1L_2))-leaf PyTree, which is preferable for matrix-free
+   automatic differentiation.
+
+2. **Sparse Jastrow/backflow evaluation.** The density Jastrow evaluates only
+   stored unordered pair lists. The three bond-backflow channels evaluate only
+   directed nonzero graph neighbors and scatter-add their contributions.
+   Dense (N_s\times N_s) channel matrices are used only to construct these
+   sparse lists, not inside `logpsi`.
+
+3. **Matrix-free SR.** The default is
+   `QGTOnTheFly + jax.scipy.sparse.linalg.cg`; no dense QGT or Cholesky
+   factor is formed. `--qgt pytree` is available as a timing/memory
+   cross-check. The iterative solution reuses the previous SR solution on
+   NetKet versions that support `solver_restart`.
+
+The fermion-hop sampler also defaults to
+
+[
+\text{sweep_size}=N_f
+]
+
+rather than NetKet's site-count default (N_s). At 1/3 site filling this
+reduces the number of proposal/log-wavefunction evaluations per returned
+sample by a factor of three. Always check energy/autocorrelation stability by
+repeating selected points with `--sweep-size Ns` before production use.
+
+### Recommended 72-site profiling run
+
+For a 2x2 array of 18-site ring3 supercells,
+
+[
+N_s=72,\qquad N_f=24,
+]
+
+start with two representative seeds and short stages:
+
+```powershell
+python ed_benchmark/vmc_zeroT/run_supercell_large.py `
+  --L1 2 --L2 2 --nf 24 `
+  --t 1 --t1 0.5 --t2 -0.5 --V 5.5 `
+  --seeds normal lc_opposite `
+  --correlator backflow `
+  --c3v-irrep A2 `
+  --jastrow-mode bond_aware --jastrow-shells 4 `
+  --n-samples 2048 --n-chains 32 `
+  --raw-iter 10 --tint-iter 10 --spatial-iter 10 `
+  --qgt onthefly --sr-solver cg `
+  --qgt-chunk-size 128 `
+  --cg-tol 1e-5 --cg-maxiter 100 `
+  --diag-shift 0.05 `
+  --output results/large_supercell_2x2_V5p5_profile
+```
+
+The main output is
+
+```text
+large_supercell_summary.csv
+```
+
+with stage-resolved energy/error, time per iteration, image count, sweep size,
+parameter count, QGT mode, CG controls and rough dense-QGT/Jacobian memory
+estimates.
+
+For a direct QGT implementation comparison, rerun the same short calculation
+with
+
+```text
+--qgt pytree
+```
+
+in a different output directory.
+
+### Production continuation
+
+Completed stages can be reused with
+
+```text
+--reuse-raw
+--reuse-tint
+--reuse-spatial
+```
+
+so a longer stage or optional TR refinement does not require repeating earlier
+optimization.
+
+### About determinant updates
+
+The large runner substantially reduces work surrounding the determinant
+(sparse correlators, fewer sampler sweeps, packed AD/QGT), but it deliberately
+keeps determinant evaluation stateless and exact. A true
+Sherman-Morrison/Woodbury fermion-hop update must cache the inverse determinant
+for every Markov chain and for every projected symmetry image; with local
+backflow the changed rows form a small-rank update, but this cache belongs in a
+custom sampler state, not in a pure Flax `logpsi(x)`. This optimization should
+be benchmarked separately against the stateless reference before production.
