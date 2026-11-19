@@ -1239,3 +1239,19 @@ The test verifies that the 1x1 seed occupied subspaces for normal, SD, ISD,
 LC-same and LC-opposite are identical to the historical Hex18 seeds, and that
 a 2x2 ring3 superlattice (72 sites) is exactly invariant under the two ring3
 supercell translations.
+
+
+After the 1x1 run, compare it directly with an existing historical Hex18
+`comparison_all.csv`:
+
+```powershell
+python ed_benchmark/vmc_zeroT/compare_supercell_vs_hex18.py `
+  --old results/backflow_staged_N6_V5p5/comparison_all.csv `
+  --new results/supercell_1x1_N6_V5p5/comparison_supercell.csv `
+  --output results/supercell_1x1_N6_V5p5/comparison_vs_old_hex18.csv
+```
+
+The comparison utility selects the lowest-energy seed in each family and
+reports energy error, ground-subspace fidelity, exact variance, CO/BOW/LC
+observables and time per optimization iteration. It also records the explicit
+projection-image counts (old full spatial Hex18: 18; new C3-only: 3).
