@@ -940,8 +940,8 @@ count, PBC bond consistency, and finite-torus point-group compatibility.
 
 The projection comparison runner also supports the 24-site `2x2` Ruby torus.
 At the same one-third filling as Hex18, use `Nf=8`.  The fixed-N Hilbert
-space has 735471 states, so `--ed-backend auto` reuses the symmetry-resolved
-QuSpin solver in `ed_benchmark/quspin_zeroT/run_zeroT.py`: translations are
+space has 735471 states, so `--ed-backend auto` uses the native NumPy/SciPy
+symmetry solver in `ed_benchmark/native_ed/symmetry.py`: translations are
 blocked first and compatible little-group rotation/mirror sectors are added.
 The resulting ground vector(s) are expanded back to the complete fixed-N basis
 for exactly the same VMC fidelity and observable definitions used on Hex18.
@@ -980,6 +980,6 @@ Run the non-NetKet plumbing regression with
 python ed_benchmark/vmc_zeroT/test_2x2_benchmark_plumbing.py
 ```
 
-The benchmark now uses vectorized fixed-N operator application and vectorized
-second-quantized symmetry maps, which preserve the Hex18 algebra while making
-the 735471-state post-processing practical.
+The benchmark now uses vectorized fixed-N operator application, vectorized
+second-quantized symmetry maps, and vectorized native symmetry projectors.
+No QuSpin binary extension is required for the 2x2 benchmark.
