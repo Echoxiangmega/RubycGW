@@ -1057,3 +1057,76 @@ python ed_benchmark/vmc_zeroT/test_saved_state_maps.py
 which verifies that time reversal leaves density/bond order unchanged, flips
 every bond current, and cancels one-point current in an equal-weight
 time-reversal pair.
+
+
+### Ground-manifold branch-selection modes for saved-state maps
+
+For an exactly degenerate ED ground manifold, the plotting tool can now select
+physical pure states *inside the saved ground subspace* before drawing the
+site/bond/current maps:
+
+```text
+--mode average
+    Basis-independent equal-weight ground-manifold mixture.
+
+--mode vector --column N
+    One raw saved ED basis vector. Useful for debugging, but not
+    basis-independent inside an exactly degenerate manifold.
+
+--mode lc_same
+    Diagonalize the benchmark-normalized equal-orientation triangle
+    loop-current operator inside the ground manifold and choose its largest
+    signed eigen-current branch.
+
+--mode lc_opposite
+    Same procedure for the opposite A/B triangle loop-current channel.
+
+--mode charge_leading
+    Compute the basis-independent connected density covariance of the
+    equal-weight ground manifold, find the leading allowed-q six-orbital
+    charge mode, form its real Hermitian quadratures, and select the pure
+    ground-manifold state with the largest static density shift along that
+    mode. The plotted site density is therefore an expectation value of an
+    actual ground-manifold state, not a structure-factor template.
+
+--mode charge_ab
+    Extremize the q=Gamma A-versus-B triangle density imbalance inside the
+    ground manifold.
+
+--mode bow_star
+    Extremize the existing Ruby star bond-order operator inside the ground
+    manifold.
+```
+
+Examples:
+
+```powershell
+python ed_benchmark/vmc_zeroT/plot_saved_state_maps.py `
+  --result-root results/backflow_staged_2x2_N8_V5p5 `
+  --mode lc_opposite
+```
+
+```powershell
+python ed_benchmark/vmc_zeroT/plot_saved_state_maps.py `
+  --result-root results/backflow_staged_2x2_N8_V5p5 `
+  --mode charge_leading
+```
+
+```powershell
+python ed_benchmark/vmc_zeroT/plot_saved_state_maps.py `
+  --result-root results/backflow_staged_2x2_N8_V5p5 `
+  --mode charge_ab
+```
+
+Mode-specific default output directories are used, for example
+`ed_maps_average`, `ed_maps_lc_opposite`, and
+`ed_maps_charge_leading`, so repeated plots do not overwrite one another.
+
+For every pure selected branch, `selected_state.npz` is also saved. The
+`summary.json` records the projected order-operator eigenvalues, selected
+ground-manifold coefficients, selected eigenvalue/shift, and, for
+`charge_leading`, the leading momentum and structure-factor eigenvalue.
+
+If the exact ground state is unique (`ground_dim=1`), the order-selecting
+modes do not manufacture symmetry breaking. They return the unique state and
+record `selection_available=false` with the reason in `summary.json`.
