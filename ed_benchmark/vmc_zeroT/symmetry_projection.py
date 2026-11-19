@@ -414,7 +414,11 @@ def c3v_irrep_characters(irrep: str) -> np.ndarray:
         return np.ones(6, dtype=np.complex128)
     if ir == "A2":
         return np.asarray([1, 1, 1, -1, -1, -1], np.complex128)
-    raise ValueError("Only one-dimensional C3v irreps A1 and A2 are supported")
+    if ir == "E":
+        # Character projector for the two-dimensional E irrep.  The missing
+        # overall irrep-dimension factor is irrelevant after normalization.
+        return np.asarray([2, -1, -1, 0, 0, 0], np.complex128)
+    raise ValueError("Unknown C3v irrep; choose A1, A2 or E")
 
 
 def c3v_from_characters(characters, tol=1e-6):
