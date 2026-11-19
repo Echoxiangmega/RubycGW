@@ -159,6 +159,37 @@ def _save_history(path,log):
     atomic_json(path,history)
 
 
+def _load_saved_supercell_state(directory: Path):
+    summary_path=directory/"summary.json"
+    state_path=directory/"final_state.npz"
+    if not summary_path.exists() or not state_path.exists():
+        raise RuntimeError(
+            f"Saved supercell stage is incomplete: {summary_path} / {state_path}"
+        )
+    summary=json.loads(summary_path.read_text(encoding="utf-8"))
+    with np.load(state_path,allow_pickle=False) as z:
+        nkp=len(z["kpoints"])
+        params={
+            "blocks":[
+                np.asarray(z[f"variational_M_{ik}"],complex)
+                if f"variational_M_{ik}" in z.files
+                else np.empty((18,0),complex)
+                for ik in range(nkp)
+            ],
+            "v":np.asarray(z["variational_v"],float),
+            "eta":np.asarray(z["variational_eta"],complex),
+            "tr_phase":(
+                float(np.asarray(z["variational_tr_phase"]))
+                if "variational_tr_phase" in z.files else None
+            ),
+        }
+        psi=(
+            np.asarray(z["psi_native"],complex)
+            if "psi_native" in z.files else None
+        )
+    return summary,params,psi
+
+
 def _warm_blocks(params,seed_data):
     if params is None:
         return [np.asarray(x,np.complex128) for x in seed_data["blocks"]],None,None,None
@@ -483,6 +514,10 @@ def parser():
     )
     p.add_argument("--skip-raw",action="store_true")
     p.add_argument("--skip-c3",action="store_true")
+    p.add_argument(
+        "--reuse-c3",action="store_true",
+        help="Reuse existing C3 stage parameters in --output and continue to TR without rerunning C3.",
+    )
     p.add_argument("--skip-lanczos",action="store_true")
     p.add_argument("--ed-k",type=int,default=12)
     p.add_argument("--ed-degeneracy-tol",type=float,default=1e-8)
@@ -498,6 +533,8 @@ def main():
         raise ValueError("L1,L2 must be positive")
     if a.restore_time_reversal and a.skip_c3:
         raise ValueError("--restore-time-reversal requires the C3 stage; remove --skip-c3")
+    if a.reuse_c3 and a.skip_c3:
+        raise ValueError("--reuse-c3 and --skip-c3 are mutually exclusive")
     out=Path(a.output).resolve()
     out.mkdir(parents=True,exist_ok=True)
 
@@ -670,33 +707,40 @@ def main():
             for seed in a.seeds:
                 run_id+=1
                 raw,params0=raw_cache[seed]
-                print(
-                    f"\n[supercell C3-VAP] seed={seed}, m={m}",
-                    flush=True,
-                )
                 method=f"VAP-C3-SupercellBloch-{a.correlator}"
                 dirname=f"supercell_c3_{a.correlator}__m{m}__{seed}"
-                row,params,psi,_=train_one(
-                    g=g,nf=nf,V=a.V,
-                    seed_name=seed,seed_amplitude=a.seed_amplitude,
-                    l1=a.L1,l2=a.L2,
-                    n_shells=a.jastrow_shells,jastrow_mode=a.jastrow_mode,
-                    use_backflow=use_backflow,
-                    n_samples=a.n_samples,n_discard=a.n_discard,
-                    n_chains=a.n_chains,n_iter=a.rotation_iter,
-                    learning_rate=a.rotation_learning_rate,
-                    diag_shift=a.diag_shift,
-                    rng_seed=a.rng_seed+1009*run_id,
-                    chunk_size=a.chunk_size,
-                    output_dir=out,dir_name=dirname,
-                    method_name=method,
-                    point_maps=point_maps,point_chars=chars,c3_m=m,
-                    time_reversal_even=False,
-                    initial_params=params0,
-                    native_H=native_H,ed_gs=ed_gs,ed_row=ed_row,
-                    diagnostic_projectors=diagnostic_projectors,
-                    validate_hamiltonian=False,
-                )
+                if a.reuse_c3:
+                    print(
+                        f"\n[supercell C3-VAP reuse] seed={seed}, m={m}",
+                        flush=True,
+                    )
+                    row,params,psi=_load_saved_supercell_state(out/dirname)
+                else:
+                    print(
+                        f"\n[supercell C3-VAP] seed={seed}, m={m}",
+                        flush=True,
+                    )
+                    row,params,psi,_=train_one(
+                        g=g,nf=nf,V=a.V,
+                        seed_name=seed,seed_amplitude=a.seed_amplitude,
+                        l1=a.L1,l2=a.L2,
+                        n_shells=a.jastrow_shells,jastrow_mode=a.jastrow_mode,
+                        use_backflow=use_backflow,
+                        n_samples=a.n_samples,n_discard=a.n_discard,
+                        n_chains=a.n_chains,n_iter=a.rotation_iter,
+                        learning_rate=a.rotation_learning_rate,
+                        diag_shift=a.diag_shift,
+                        rng_seed=a.rng_seed+1009*run_id,
+                        chunk_size=a.chunk_size,
+                        output_dir=out,dir_name=dirname,
+                        method_name=method,
+                        point_maps=point_maps,point_chars=chars,c3_m=m,
+                        time_reversal_even=False,
+                        initial_params=params0,
+                        native_H=native_H,ed_gs=ed_gs,ed_row=ed_row,
+                        diagnostic_projectors=diagnostic_projectors,
+                        validate_hamiltonian=False,
+                    )
                 if exact_available:
                     row["target_c3"]=f"C3:m{m}"
                     row["target_sector_ground_dimension"]=target["ground_dimension"]
