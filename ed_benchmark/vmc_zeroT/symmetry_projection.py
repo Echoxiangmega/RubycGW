@@ -37,31 +37,56 @@ def _permutation_parity(values):
     return -1.0 if inv % 2 else 1.0
 
 
-def second_quantize_site_map(states, ns: int, site_map, *, name="sym") -> FockSymmetry:
-    """Build the fixed-N Fock-space representation of c_i^dag -> c_p(i)^dag."""
-    states = np.asarray(states, dtype=np.uint64)
-    p = np.asarray(site_map, dtype=np.int64)
-    if p.shape != (ns,) or sorted(map(int, p)) != list(range(ns)):
-        raise ValueError(f"{name}: site_map is not a permutation")
+def _uint64_parity(values):
+    """Vectorized popcount parity for uint64 arrays."""
+    x=np.asarray(values,dtype=np.uint64).copy()
+    for shift in (32,16,8,4):
+        x ^= x >> np.uint64(shift)
+    return ((np.uint64(0x6996) >> (x & np.uint64(15))) & np.uint64(1)).astype(np.int8)
 
-    target = np.empty(len(states), dtype=np.int64)
-    phase = np.empty(len(states), dtype=np.complex128)
-    for a, s0 in enumerate(states):
-        s = int(s0)
-        occ = [i for i in range(ns) if s & (1 << (ns - 1 - i))]
-        mapped = [int(p[i]) for i in occ]
-        sign = _permutation_parity(mapped)
-        st = 0
-        for j in mapped:
-            st |= 1 << (ns - 1 - j)
-        b = int(np.searchsorted(states, np.uint64(st)))
-        if b >= len(states) or int(states[b]) != st:
-            raise RuntimeError(f"{name}: mapped Fock state not found")
-        target[a] = b
-        phase[a] = sign
-    if len(np.unique(target)) != len(target):
+
+def second_quantize_site_map(states, ns: int, site_map, *, name="sym") -> FockSymmetry:
+    """Build the fixed-N Fock representation of c_i^dag -> c_p(i)^dag.
+
+    The previous implementation looped over every Fock state in Python.  This
+    version performs the same permutation and fermionic inversion parity with
+    vectorized uint64 operations, which is important for the 24-site 2x2
+    benchmark (735471 states at Nf=8).
+    """
+    states=np.asarray(states,dtype=np.uint64)
+    p=np.asarray(site_map,dtype=np.int64)
+    if p.shape!=(ns,) or sorted(map(int,p))!=list(range(ns)):
+        raise ValueError(f"{name}: site_map is not a permutation")
+    if ns>62:
+        raise ValueError("uint64 Fock mapping supports at most 62 sites")
+
+    mapped=np.zeros(len(states),dtype=np.uint64)
+    prefix=np.zeros(len(states),dtype=np.uint64)
+    parity=np.zeros(len(states),dtype=np.int8)
+
+    # Process occupied source orbitals in canonical source order.  Whenever
+    # source i is occupied, count previously mapped occupied orbitals p(j)
+    # with j<i and p(j)>p(i); those are exactly the inversions produced by
+    # sorting the mapped creation operators.
+    for i in range(ns):
+        srcbit=np.uint64(1 << (ns-1-i))
+        occ=(states & srcbit)!=0
+        pi=int(p[i])
+        if pi+1<ns:
+            greater_mask=np.uint64((1 << (ns-1-pi)) - 1)
+            odd=_uint64_parity(prefix & greater_mask).astype(bool)
+            parity ^= (occ & odd).astype(np.int8)
+        dstbit=np.uint64(1 << (ns-1-pi))
+        mapped[occ] |= dstbit
+        prefix[occ] |= dstbit
+
+    target=np.searchsorted(states,mapped)
+    if np.any(target>=len(states)) or np.any(states[target]!=mapped):
+        raise RuntimeError(f"{name}: mapped Fock state not found")
+    if len(np.unique(target))!=len(target):
         raise RuntimeError(f"{name}: Fock action is not bijective")
-    return FockSymmetry(name, p, target, phase)
+    phase=(1-2*parity).astype(np.int8)
+    return FockSymmetry(name,p,target.astype(np.int64),phase)
 
 
 def compose_site_maps(p_after, p_before):
