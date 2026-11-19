@@ -1587,3 +1587,64 @@ for every Markov chain and for every projected symmetry image; with local
 backflow the changed rows form a small-rank update, but this cache belongs in a
 custom sampler state, not in a pure Flax `logpsi(x)`. This optimization should
 be benchmarked separately against the stateless reference before production.
+
+
+### Large-supercell order diagnostics and time reversal
+
+The production large-supercell runner now evaluates the physical diagnostics
+after **every** optimization stage, including the unprojected Raw state:
+
+```text
+mc_E
+S_CO
+S_CO_connected
+CO_q1
+CO_q2
+S_CO_over_Ncell
+J_same_mean
+J_opposite_mean
+S_LC_same
+S_LC_opposite
+S_LC_same_connected
+S_LC_opposite_connected
+```
+
+The LC definitions are unchanged from the finite-cluster benchmark. If
+(J_{R,A/B}) are the benchmark-normalized elementary triangle currents,
+
+[
+ar J_+ = rac{1}{N_\triangle}sum_R(J_{R,A}+J_{R,B}),
+qquad
+ar J_- = rac{1}{N_\triangle}sum_R(J_{R,A}-J_{R,B}),
+]
+
+then
+
+[
+S_{\rm LC,+}=\langle \bar J_+^2\rangle,qquad
+S_{\rm LC,-}=\langle \bar J_-^2\rangle.
+]
+
+No momentum-resolved LC scan is introduced in this production path.
+
+For charge order, `S_CO` is an alias of the existing `CO_qmax`: the largest
+eigenvalue of the six-orbital density structure-factor matrix over all allowed
+primitive-lattice momenta. `CO_q1` and `CO_q2` record the momentum at which
+this maximum occurs. `S_CO_over_Ncell` is additionally written for later
+finite-size scaling.
+
+Spinless time-reversal restoration is **disabled by default**. The default
+large-system workflow stops after
+
+```text
+Raw -> Tint -> Tint x C3v
+```
+
+and therefore can retain a broken loop-current branch. Add
+
+```text
+--restore-time-reversal
+```
+
+only when a finite-size/time-reversal-even control state is desired; this
+appends the final `Tint x C3v + TR` stage.
