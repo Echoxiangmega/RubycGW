@@ -965,6 +965,7 @@ python ed_benchmark/vmc_zeroT/run_projection_comparison.py `
   --restore-time-reversal `
   --ed-backend auto `
   --ed-k 12 `
+  --ed-sector-low 4 `
   --output results/backflow_staged_2x2_N8_V5p5
 ```
 
@@ -983,3 +984,11 @@ python ed_benchmark/vmc_zeroT/test_2x2_benchmark_plumbing.py
 The benchmark now uses vectorized fixed-N operator application, vectorized
 second-quantized symmetry maps, and vectorized native symmetry projectors.
 No QuSpin binary extension is required for the 2x2 benchmark.
+
+
+For the native symmetry ED, `--ed-k` is the number of globally retained low
+states, while `--ed-sector-low` is the number of eigenpairs computed in each
+symmetry block. The default `--ed-sector-low 4` keeps the 2x2 scan much
+cheaper than requesting 12 states in every block. If the benchmark reports
+that the ground manifold is truncated inside a symmetry block, increase
+`--ed-sector-low`.
