@@ -924,13 +924,15 @@ def main():
 
     print("\n[large supercell] summary")
     for r in rows:
+        tp=r.get("time_per_iteration_s",None)
+        tp_text=("PAV-only" if tp is None else f"{float(tp):.3f}s/it")
         print(
             f"  seed={r['seed']:11s} stage={r['stage']:14s} "
             f"irrep={str(r.get('point_label','-')):4s} "
             f"E={r['mc_E']:+.8f} +/- {r['mc_E_error']:.2e} "
             f"SCO={r['S_CO']:.5g} "
             f"SLC-={r['S_LC_opposite']:.5g} "
-            f"t/it={r['time_per_iteration_s']:.3f}s "
+            f"time={tp_text} "
             f"images={r['explicit_projection_images']}"
         )
     print(f"Saved: {out}")
