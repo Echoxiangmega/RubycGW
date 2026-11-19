@@ -404,6 +404,80 @@ def build_c3v_group(g, states):
     ]
 
 
+def internal_translation_site_maps(g):
+    """Residual primitive translations inside one 18-site ring3 supercell.
+
+    The ring3 superlattice has index three in the primitive translation group.
+    Once ring3-supercell translations are built into the ansatz, only these
+    three cosets remain to be restored explicitly. Their number is independent
+    of the total L1 x L2 supercell size.
+    """
+    reps=[(0,0),(1,0),(1,1)]
+    out=[]
+    seen=set()
+    for R in reps:
+        p=np.asarray(g.translate(R),dtype=np.int64)
+        key=tuple(map(int,p))
+        if key in seen:
+            raise RuntimeError(
+                "Internal ring3 translation cosets collapsed on this torus"
+            )
+        seen.add(key)
+        out.append((f"Tint{R}",p))
+    if len(out)!=3:
+        raise RuntimeError("Expected exactly three internal translations")
+    return out
+
+
+def build_internal_translation_group(g, states):
+    return [
+        second_quantize_site_map(states,g.Ns,p,name=name)
+        for name,p in internal_translation_site_maps(g)
+    ]
+
+
+def internal_c3v_space_group_site_maps(g):
+    """Residual (T_primitive/T_ring3) semidirect C3v point group.
+
+    Ordering is internal-translation outer, C3v inner. There are exactly
+    3*6=18 site maps for a compatible ring3-supercell torus.
+    """
+    trans=internal_translation_site_maps(g)
+    point=c3v_site_maps(g)
+    out={}
+    for tn,tp in trans:
+        for pn,pp in point:
+            q=compose_site_maps(pp,tp)
+            out.setdefault(tuple(map(int,q)),(f"{pn}*{tn}",q))
+    vals=list(out.values())
+    if len(vals)!=18:
+        raise RuntimeError(
+            f"Residual internal-translation x C3v group has {len(vals)} "
+            "distinct maps; expected 18"
+        )
+    return vals
+
+
+def build_internal_c3v_space_group(g, states):
+    return [
+        second_quantize_site_map(states,g.Ns,p,name=name)
+        for name,p in internal_c3v_space_group_site_maps(g)
+    ]
+
+
+def internal_gamma_c3v_characters(irrep: str) -> np.ndarray:
+    """One-dimensional Gamma-sector characters of residual Tint semidirect C3v.
+
+    At internal Gamma all three translation characters equal +1, so the full
+    18-character array is simply the C3v A1/A2 character row repeated for each
+    translation coset. This matches internal_c3v_space_group_site_maps ordering.
+    """
+    ch=c3v_irrep_characters(irrep)
+    if str(irrep).upper() not in ("A1","A2"):
+        raise ValueError("Internal-Gamma residual projector supports A1/A2")
+    return np.tile(ch,3).astype(np.complex128)
+
+
 def c3v_irrep_characters(irrep: str) -> np.ndarray:
     """Characters for the one-dimensional ordinary C3v irreps A1/A2.
 
