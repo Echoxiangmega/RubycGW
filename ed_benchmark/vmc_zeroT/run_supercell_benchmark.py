@@ -59,6 +59,8 @@ from run_benchmark import (
 from run_projection_comparison import one_lanczos_step
 from symmetry_projection import (
     build_c3_group,
+    build_translation_group,
+    build_ordinary_space_group,
     c3_site_maps,
     characterize_unique_state,
     decompose_ground_manifold_abelian,
@@ -178,6 +180,7 @@ def train_one(
     point_maps=None,point_chars=None,c3_m=None,
     initial_params=None,
     native_H=None,ed_gs=None,ed_row=None,
+    diagnostic_projectors=None,
     validate_hamiltonian=False,
 ):
     import jax
@@ -322,6 +325,18 @@ def train_one(
             extra["projected_sector_residual"]=projected_sector_residual(
                 group,np.asarray(point_chars,complex),psi
             )
+        if diagnostic_projectors:
+            for label,grp,ch in diagnostic_projectors:
+                _,weight=project_to_characters(grp,ch,psi)
+                extra[f"{label}_weight"]=float(weight)
+        bilinear=np.dot(psi,psi)
+        if abs(bilinear)<1e-15:
+            extra["time_reversal_residual"]=float(np.sqrt(2.0))
+        else:
+            phase=bilinear/abs(bilinear)
+            extra["time_reversal_residual"]=float(
+                np.linalg.norm(psi-phase*np.conj(psi))
+            )
         exact=exact_row(
             method_name,seed_name,psi,native_H,ed_gs,ed_row,extra=extra
         )
@@ -462,6 +477,7 @@ def main():
     native_H=evals=ed_gs=ed_row=None
     c3_group=None
     targets=[]
+    diagnostic_projectors=[]
     if exact_available:
         native_H,evals,ed_gs,ed_row=solve_ed(
             g,nf,a.V,k=a.ed_k,
@@ -473,6 +489,19 @@ def main():
         c3_group,targets=c3_targets_from_ed(
             g,native_H,ed_gs,a.ed_degeneracy_tol
         )
+        if ed_gs.shape[1]==1:
+            tg=build_translation_group(g,native_H.states)
+            tchars=characterize_unique_state(
+                tg,ed_gs[:,0],tol=max(1e-8,a.ed_degeneracy_tol)
+            )
+            sg=build_ordinary_space_group(g,native_H.states)
+            schars=characterize_unique_state(
+                sg,ed_gs[:,0],tol=max(1e-8,a.ed_degeneracy_tol)
+            )
+            diagnostic_projectors=[
+                ("ed_primitive_translation_sector",tg,tchars),
+                ("ed_full_spatial_sector",sg,schars),
+            ]
         ed_dir=out/"ed"
         ed_dir.mkdir(parents=True,exist_ok=True)
         np.savez_compressed(
@@ -570,6 +599,7 @@ def main():
                 point_maps=None,point_chars=None,c3_m=None,
                 initial_params=None,
                 native_H=native_H,ed_gs=ed_gs,ed_row=ed_row,
+                diagnostic_projectors=diagnostic_projectors,
                 validate_hamiltonian=(run_id==1 and exact_available),
             )
             if exact_available:
@@ -621,6 +651,7 @@ def main():
                     point_maps=point_maps,point_chars=chars,c3_m=m,
                     initial_params=params0,
                     native_H=native_H,ed_gs=ed_gs,ed_row=ed_row,
+                    diagnostic_projectors=diagnostic_projectors,
                     validate_hamiltonian=False,
                 )
                 if exact_available:
