@@ -15,8 +15,9 @@ Raw/PAV/VAP:
     keys: psi_native, native_states, ...
 
 For a degenerate ED manifold, --mode average evaluates the equal-weight
-incoherent ground-manifold density matrix.  This is basis-independent inside
-that manifold.  --mode vector selects one saved column instead.
+incoherent ground-manifold density matrix. Order-selecting modes can instead
+diagonalize LC, charge, or bond-order operators inside the exact saved ground
+subspace and plot the resulting pure branch.
 
 Outputs
 -------
@@ -368,6 +369,12 @@ def select_representation(
         }
 
     d=psi.shape[1]
+    gram=psi.conj().T@psi
+    if np.linalg.norm(gram-np.eye(d))>1e-8:
+        raise ValueError(
+            "Saved ED ground manifold is not orthonormal; refusing "
+            "basis-dependent order selection."
+        )
     if mode=="average":
         return {
             "mode":"average",
