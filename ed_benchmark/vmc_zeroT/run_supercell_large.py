@@ -127,6 +127,141 @@ def _load_params(directory):
     return json.loads(summary.read_text(encoding="utf-8")),params
 
 
+
+def _charge_structure_from_samples(g, samples, nf):
+    """MC estimate matching the existing small-cluster CO_qmax definition.
+
+    Sites are ordered as primitive cells x six Ruby orbitals. For every
+    allowed primitive-lattice momentum q, form the 6x6 density structure
+    matrix and return its largest eigenvalue. Both the raw delta-n definition
+    (subtracting only the global filling) and the connected covariance are
+    reported.
+    """
+    x=np.asarray(samples,float).reshape((-1,g.Ns))
+    if x.shape[1]!=g.Ns:
+        raise ValueError("Unexpected VMC sample shape")
+    nc=int(g.num_cells)
+    if g.Ns!=6*nc:
+        raise RuntimeError("Ruby geometry must contain six sites per primitive cell")
+    dn=x.reshape((-1,nc,6))-float(nf/g.Ns)
+    reps=np.asarray(g.reps,float)
+    qs=np.asarray(g.permitted_momenta(),float)
+    phase=np.exp(
+        -2j*np.pi*np.einsum("qd,cd->qc",qs,reps)
+    )/np.sqrt(float(nc))
+    z=np.einsum("qc,sca->sqa",phase,dn,optimize=True)
+
+    raw=np.einsum(
+        "sqa,sqb->qab",z.conj(),z,optimize=True
+    )/float(z.shape[0])
+    raw=0.5*(raw+np.swapaxes(raw.conj(),1,2))
+    raw_e=np.linalg.eigvalsh(raw).real
+    raw_max=raw_e[:,-1]
+
+    zc=z-np.mean(z,axis=0,keepdims=True)
+    conn=np.einsum(
+        "sqa,sqb->qab",zc.conj(),zc,optimize=True
+    )/float(z.shape[0])
+    conn=0.5*(conn+np.swapaxes(conn.conj(),1,2))
+    conn_e=np.linalg.eigvalsh(conn).real
+    conn_max=conn_e[:,-1]
+
+    iraw=int(np.argmax(raw_max))
+    iconn=int(np.argmax(conn_max))
+    return {
+        "CO_qmax":float(raw_max[iraw]),
+        "CO_q1":float(qs[iraw,0]),
+        "CO_q2":float(qs[iraw,1]),
+        "CO_qmax_connected":float(conn_max[iconn]),
+        "CO_connected_q1":float(qs[iconn,0]),
+        "CO_connected_q2":float(qs[iconn,1]),
+        # Explicit S_CO aliases for large-supercell phase-diagram tables.
+        "S_CO":float(raw_max[iraw]),
+        "S_CO_connected":float(conn_max[iconn]),
+        # Conventional intensive finite-size quantity, useful later for scaling.
+        "S_CO_over_Ncell":float(raw_max[iraw]/nc),
+        "S_CO_connected_over_Ncell":float(conn_max[iconn]/nc),
+        "CO_n_momenta":int(len(qs)),
+        "CO_n_samples":int(z.shape[0]),
+    }
+
+
+def _current_operators(hi,g):
+    """Benchmark-normalized same/opposite triangle loop-current operators.
+
+    This exactly follows the existing benchmark definition:
+      J_loop = oriented particle-current sum / 3
+      J_same = average over all elementary triangles
+      J_opp  = A/B signed average over all elementary triangles
+    and S_LC=<J_channel^2>.
+    """
+    from netket.operator.fermion import create as cdag, destroy as c
+
+    triangles=[lp for lp in g.cycles() if len(lp)==3]
+    if len(triangles)!=2*g.num_cells:
+        raise RuntimeError(
+            f"Expected {2*g.num_cells} elementary triangles, got {len(triangles)}"
+        )
+    ntri=float(len(triangles))
+    same=0.0
+    opp=0.0
+    for lp in triangles:
+        sign_ab=1.0 if lp[0]%6<3 else -1.0
+        loopop=0.0
+        for i,j in zip(lp,lp[1:]+lp[:1]):
+            e,_=g._directed_edge(i,j)
+            if e is None:
+                raise RuntimeError(f"Nonbond triangle edge {i}-{j}")
+            t=float(g.t[e.kind])/len(lp)
+            loopop += (
+                1j*t*(cdag(hi,i)@c(hi,j))
+                -1j*t*(cdag(hi,j)@c(hi,i))
+            )
+        same += loopop/ntri
+        opp += sign_ab*loopop/ntri
+
+    def collect(op):
+        try:
+            return op.collect()
+        except Exception:
+            return op
+
+    same=collect(same)
+    opp=collect(opp)
+    return same,opp,collect(same@same),collect(opp@opp)
+
+
+def _mc_order_observables(vstate, g, nf, hi, current_ops):
+    """Evaluate CO and the historical LC channels on the current MCState."""
+    vstate.sample()
+    samples=np.asarray(vstate.samples)
+    out=_charge_structure_from_samples(g,samples,nf)
+
+    same,opp,same2,opp2=current_ops
+    sm=vstate.expect(same)
+    om=vstate.expect(opp)
+    ss=vstate.expect(same2)
+    os=vstate.expect(opp2)
+
+    j_same=float(np.real(sm.mean))
+    j_opp=float(np.real(om.mean))
+    s_same=float(np.real(ss.mean))
+    s_opp=float(np.real(os.mean))
+    out.update({
+        "J_same_mean":j_same,
+        "J_same_mean_error":stats_error(sm),
+        "J_opposite_mean":j_opp,
+        "J_opposite_mean_error":stats_error(om),
+        "S_LC_same":s_same,
+        "S_LC_same_error":stats_error(ss),
+        "S_LC_opposite":s_opp,
+        "S_LC_opposite_error":stats_error(os),
+        "S_LC_same_connected":float(s_same-j_same*j_same),
+        "S_LC_opposite_connected":float(s_opp-j_opp*j_opp),
+    })
+    return out
+
+
 def _memory_estimates(n_parameters,n_samples):
     # Complex-mode Jacobians can split real/imag directions. These are only
     # rough upper-scale diagnostics, not allocations performed by this script.
@@ -177,7 +312,7 @@ def _stage(
     stage_name,
     directory,
     g,nf,V,
-    hi,H_fast,graph,
+    hi,H_fast,graph,current_ops,
     seed_data,
     shell_mats,bf_mats,
     use_backflow,
@@ -292,6 +427,12 @@ def _stage(
     final_stats=vstate.expect(H_fast)
     final_eval_s=time.perf_counter()-te
 
+    tobs=time.perf_counter()
+    order_obs=_mc_order_observables(
+        vstate,g,nf,hi,current_ops
+    )
+    observable_eval_s=time.perf_counter()-tobs
+
     params=extract_supercell_parameters(
         vstate.parameters,
         len(seed_data["kpoints"]),
@@ -358,6 +499,7 @@ def _stage(
         "time_opt_s":float(opt_s),
         "time_per_iteration_s":float(opt_s/max(int(n_iter),1)),
         "time_final_eval_s":float(final_eval_s),
+        "time_order_observables_s":float(observable_eval_s),
         "n_iter":int(n_iter),
         "learning_rate":float(learning_rate),
         "seed_shell_gap":seed_data["shell_gap"],
@@ -367,6 +509,7 @@ def _stage(
         "occupations_per_k":[
             int(x) for x in seed_data["occupations_per_k"]
         ],
+        **order_obs,
         **_memory_estimates(vstate.n_parameters,args.n_samples),
     }
     atomic_json(directory/"summary.json",summary)
@@ -459,6 +602,7 @@ def main():
     import jax
     jax.config.update("jax_enable_x64",True)
     hi,_,H_fast,graph=make_netket_hamiltonian(g,nf,a.V)
+    current_ops=_current_operators(hi,g)
     _,_,shell_mats,_=jastrow_channels(
         g,mode=a.jastrow_mode,n_shells=a.jastrow_shells
     )
@@ -524,7 +668,7 @@ def main():
                 stage_name="Raw",
                 directory=raw_dir,
                 g=g,nf=nf,V=a.V,
-                hi=hi,H_fast=H_fast,graph=graph,
+                hi=hi,H_fast=H_fast,graph=graph,current_ops=current_ops,
                 seed_data=seed_data,
                 shell_mats=shell_mats,bf_mats=bf_mats,
                 use_backflow=use_backflow,
@@ -546,7 +690,7 @@ def main():
                 stage_name="Tint",
                 directory=tint_dir,
                 g=g,nf=nf,V=a.V,
-                hi=hi,H_fast=H_fast,graph=graph,
+                hi=hi,H_fast=H_fast,graph=graph,current_ops=current_ops,
                 seed_data=seed_data,
                 shell_mats=shell_mats,bf_mats=bf_mats,
                 use_backflow=use_backflow,
@@ -570,7 +714,7 @@ def main():
                 stage_name="Tint+C3v",
                 directory=spatial_dir,
                 g=g,nf=nf,V=a.V,
-                hi=hi,H_fast=H_fast,graph=graph,
+                hi=hi,H_fast=H_fast,graph=graph,current_ops=current_ops,
                 seed_data=seed_data,
                 shell_mats=shell_mats,bf_mats=bf_mats,
                 use_backflow=use_backflow,
@@ -593,7 +737,7 @@ def main():
                 stage_name="Tint+C3v+TR",
                 directory=tr_dir,
                 g=g,nf=nf,V=a.V,
-                hi=hi,H_fast=H_fast,graph=graph,
+                hi=hi,H_fast=H_fast,graph=graph,current_ops=current_ops,
                 seed_data=seed_data,
                 shell_mats=shell_mats,bf_mats=bf_mats,
                 use_backflow=use_backflow,
@@ -614,6 +758,8 @@ def main():
         print(
             f"  seed={r['seed']:11s} stage={r['stage']:14s} "
             f"E={r['mc_E']:+.8f} +/- {r['mc_E_error']:.2e} "
+            f"SCO={r['S_CO']:.5g} "
+            f"SLC-={r['S_LC_opposite']:.5g} "
             f"t/it={r['time_per_iteration_s']:.3f}s "
             f"images={r['explicit_projection_images']}"
         )
