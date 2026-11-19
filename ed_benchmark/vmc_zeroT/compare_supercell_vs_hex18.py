@@ -47,6 +47,9 @@ def record(label,row,projection_images=None):
         "E","delta_E_vs_ED","fidelity_ground_subspace",
         "exact_energy_variance","CO_qmax","S_BOW_star",
         "S_LC_same","S_LC_opposite",
+        "ed_primitive_translation_sector_weight",
+        "ed_full_spatial_sector_weight",
+        "time_reversal_residual",
     ]
     out={
         "label":label,
