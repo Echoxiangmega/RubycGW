@@ -50,6 +50,8 @@ sys.path.insert(0, str(NATIVE))
 
 from geometry import RubyPBC, A, ORBITALS  # noqa: E402
 from core import edge_triplets  # noqa: E402
+import observables as native_observables  # noqa: E402
+from benchmark_observables import ruby_star_formfactor  # noqa: E402
 
 
 SITE_CMAP = "coolwarm"
@@ -121,40 +123,318 @@ def normalize_columns(x: np.ndarray) -> np.ndarray:
     return out
 
 
-def select_representation(payload: dict, mode: str, column: int | None) -> dict:
-    states = payload["states"]
-    psi = normalize_columns(payload["psi"])
+def _occupations_bool(states: np.ndarray, ns: int) -> np.ndarray:
+    """Boolean occupation table; ~18 MB for the 24-site Nf=8 benchmark."""
+    shifts=np.arange(ns-1,-1,-1,dtype=np.uint64)
+    return ((states[:,None] >> shifts[None,:]) & np.uint64(1)).astype(bool)
 
-    if payload["kind"] == "vector":
-        if mode == "average":
-            # A one-dimensional manifold and a pure state are equivalent here.
-            mode = "vector"
-        return {
-            "mode": "vector",
-            "psi": psi,
-            "states": states,
-            "label": "single saved state",
-        }
 
-    if mode == "average":
-        return {
-            "mode": "average",
-            "psi": psi,
-            "states": states,
-            "label": f"equal-weight ED ground-manifold average (d={psi.shape[1]})",
-        }
+def _projected_site_matrices(
+    manifold: np.ndarray, states: np.ndarray, ns: int, occ: np.ndarray | None=None
+) -> np.ndarray:
+    """M_i[a,b]=<psi_a|n_i|psi_b> inside an orthonormal manifold."""
+    if occ is None:
+        occ=_occupations_bool(states,ns)
+    d=manifold.shape[1]
+    out=np.empty((ns,d,d),np.complex128)
+    for i in range(ns):
+        x=manifold[occ[:,i],:]
+        out[i]=x.conj().T@x
+    return out
 
-    if column is None:
-        column = 0
-    if not 0 <= int(column) < psi.shape[1]:
-        raise IndexError(
-            f"--column {column} outside ground-manifold dimension {psi.shape[1]}"
+
+def _ensemble_density_covariance(
+    manifold: np.ndarray, states: np.ndarray, ns: int, occ: np.ndarray | None=None
+):
+    """Basis-independent equal-weight density and connected covariance."""
+    if occ is None:
+        occ=_occupations_bool(states,ns)
+    prob=np.mean(np.abs(manifold)**2,axis=1)
+    density=np.asarray(prob@occ,dtype=float)
+    nn=np.empty((ns,ns),float)
+    # Avoid a D x Ns float64 temporary at D=735471.
+    for j in range(ns):
+        nn[:,j]=np.asarray((prob*occ[:,j])@occ,dtype=float)
+    conn=nn-np.outer(density,density)
+    conn=0.5*(conn+conn.T)
+    return density,conn,occ
+
+
+def _real_sources(z: np.ndarray) -> list[np.ndarray]:
+    """Orthonormal real quadratures spanning Re/Im of a complex density mode."""
+    out=[]
+    for raw in (np.real(z),np.imag(z)):
+        v=np.asarray(raw,float).copy()
+        for q in out:
+            v-=np.dot(v,q)*q
+        n=float(np.linalg.norm(v))
+        if n>1e-10:
+            out.append(v/n)
+    return out
+
+
+def _leading_charge_source(g: RubyPBC, covariance: np.ndarray) -> dict:
+    """Leading connected-density mode over all allowed finite-torus momenta."""
+    best=None
+    for q in g.permitted_momenta():
+        F=np.zeros((g.Ns,6),np.complex128)
+        for cell,R in enumerate(g.reps):
+            phase=np.exp(2j*np.pi*float(np.dot(q,np.asarray(R,float))))/np.sqrt(g.num_cells)
+            for a in range(6):
+                F[6*cell+a,a]=phase
+        block=F.conj().T@covariance@F
+        block=0.5*(block+block.conj().T)
+        w,U=np.linalg.eigh(block)
+        if best is None or float(w[-1].real)>best["structure_factor"]:
+            best={
+                "q":[float(x) for x in q],
+                "structure_factor":float(w[-1].real),
+                "orbital_vector":np.asarray(U[:,-1],np.complex128),
+                "site_vector":np.asarray(F@U[:,-1],np.complex128),
+            }
+    if best is None:
+        raise RuntimeError("No permitted momentum for charge selection")
+    return best
+
+
+def _select_extremal_hermitian(
+    manifold: np.ndarray,
+    matrix: np.ndarray,
+    *,
+    ensemble_reference: float=0.0,
+    criterion: str="max_shift",
+):
+    """Choose a normalized state inside the manifold from a Hermitian operator."""
+    M=0.5*(np.asarray(matrix,complex)+np.asarray(matrix,complex).conj().T)
+    w,U=np.linalg.eigh(M)
+    if criterion=="max_positive":
+        idx=len(w)-1
+    elif criterion=="max_negative":
+        idx=0
+    elif criterion=="max_abs":
+        idx=int(np.argmax(np.abs(w)))
+    elif criterion=="max_shift":
+        idx=int(np.argmax(np.abs(w-ensemble_reference)))
+    else:
+        raise ValueError(f"Unknown extremum criterion {criterion}")
+    coeff=np.asarray(U[:,idx],np.complex128)
+    psi=np.asarray(manifold@coeff,np.complex128)
+    psi/=np.linalg.norm(psi)
+    return psi,{
+        "operator_eigenvalues":[float(x) for x in w],
+        "selected_index":int(idx),
+        "selected_eigenvalue":float(w[idx]),
+        "ensemble_reference":float(ensemble_reference),
+        "selected_shift":float(w[idx]-ensemble_reference),
+        "coefficients":[[float(z.real),float(z.imag)] for z in coeff],
+    }
+
+
+def _select_lc_branch(
+    g: RubyPBC, states: np.ndarray, manifold: np.ndarray, channel: str
+):
+    triangles=[lp for lp in g.cycles() if len(lp)==3]
+    if len(triangles)!=2*g.num_cells:
+        raise RuntimeError("Unexpected elementary-triangle count")
+    signs=np.ones(len(triangles),float)
+    if channel=="lc_opposite":
+        signs=np.array([1.0 if lp[0]%6<3 else -1.0 for lp in triangles],float)
+    terms=[]
+    # Match benchmark_observables: average over all elementary triangles.
+    for lp,s in zip(triangles,signs):
+        terms.extend([
+            (coef*s/len(triangles),ops)
+            for coef,ops in native_observables.current_terms(g,lp)
+        ])
+    actions=np.column_stack([
+        native_observables.op_sum(manifold[:,j],states,g.Ns,terms)
+        for j in range(manifold.shape[1])
+    ])
+    M=manifold.conj().T@actions
+    psi,meta=_select_extremal_hermitian(
+        manifold,M,criterion="max_positive"
+    )
+    meta.update({
+        "selection_available":True,
+        "order_mode":channel,
+        "definition":"largest signed eigenvalue of the benchmark- normalized triangle loop-current operator within the saved ED ground manifold",
+        "n_triangles":len(triangles),
+    })
+    return psi,meta
+
+
+def _select_charge_ab_branch(
+    g: RubyPBC, states: np.ndarray, manifold: np.ndarray
+):
+    occ=_occupations_bool(states,g.Ns)
+    siteM=_projected_site_matrices(manifold,states,g.Ns,occ)
+    weights=np.tile([1.,1.,1.,-1.,-1.,-1.],g.num_cells)
+    weights/=np.linalg.norm(weights)
+    O=np.einsum("i,iab->ab",weights,siteM)
+    ensemble=float(np.trace(O).real/manifold.shape[1])
+    psi,meta=_select_extremal_hermitian(
+        manifold,O,ensemble_reference=ensemble,criterion="max_shift"
+    )
+    meta.update({
+        "selection_available":True,
+        "order_mode":"charge_ab",
+        "definition":"extremal A-versus-B triangle density operator within the saved ED ground manifold",
+        "source_weights":[float(x) for x in weights],
+    })
+    return psi,meta
+
+
+def _select_charge_leading_branch(
+    g: RubyPBC, states: np.ndarray, manifold: np.ndarray
+):
+    density,cov,occ=_ensemble_density_covariance(
+        manifold,states,g.Ns
+    )
+    lead=_leading_charge_source(g,cov)
+    siteM=_projected_site_matrices(manifold,states,g.Ns,occ)
+    best=None
+    for component,weights in enumerate(_real_sources(lead["site_vector"])):
+        O=np.einsum("i,iab->ab",weights,siteM)
+        ensemble=float(np.dot(weights,density))
+        psi,meta=_select_extremal_hermitian(
+            manifold,O,ensemble_reference=ensemble,criterion="max_shift"
         )
+        score=abs(meta["selected_shift"])
+        if best is None or score>best[0]:
+            best=(score,psi,meta,component,weights)
+    if best is None:
+        raise RuntimeError("Leading charge mode has no real Hermitian quadrature")
+    _,psi,meta,component,weights=best
+    meta.update({
+        "selection_available":True,
+        "order_mode":"charge_leading",
+        "definition":"strongest real quadrature of the leading connected charge structure-factor mode, extremized within the saved ED ground manifold",
+        "leading_q":lead["q"],
+        "leading_structure_factor":lead["structure_factor"],
+        "leading_orbital_vector":[
+            [float(z.real),float(z.imag)] for z in lead["orbital_vector"]
+        ],
+        "selected_quadrature":"real" if component==0 else "imag",
+        "source_weights":[float(x) for x in weights],
+    })
+    return psi,meta
+
+
+def _select_bow_star_branch(
+    g: RubyPBC, states: np.ndarray, manifold: np.ndarray
+):
+    f=ruby_star_formfactor(g)
+    terms=[]
+    norm=float(len(g.edges))
+    for coeff,e in zip(f,g.edges):
+        a=float(coeff)/norm
+        terms.append((a,[("+",e.i),("-",e.j)]))
+        terms.append((a,[("+",e.j),("-",e.i)]))
+    actions=np.column_stack([
+        native_observables.op_sum(manifold[:,j],states,g.Ns,terms)
+        for j in range(manifold.shape[1])
+    ])
+    M=manifold.conj().T@actions
+    ensemble=float(np.trace(M).real/manifold.shape[1])
+    psi,meta=_select_extremal_hermitian(
+        manifold,M,ensemble_reference=ensemble,criterion="max_shift"
+    )
+    meta.update({
+        "selection_available":True,
+        "order_mode":"bow_star",
+        "definition":"extremal Ruby star bond-order operator within the saved ED ground manifold",
+    })
+    return psi,meta
+
+
+def select_representation(
+    payload: dict, mode: str, column: int | None, g: RubyPBC
+) -> dict:
+    states=payload["states"]
+    psi=normalize_columns(payload["psi"])
+
+    if payload["kind"]=="vector":
+        return {
+            "mode":"vector",
+            "psi":psi,
+            "states":states,
+            "label":"single saved state",
+            "selection":{
+                "selection_available":False,
+                "order_mode":mode,
+                "reason":"Saved file contains only one state; no ground-manifold mixing is possible.",
+                "ground_dim":1,
+            },
+        }
+
+    d=psi.shape[1]
+    if mode=="average":
+        return {
+            "mode":"average",
+            "psi":psi,
+            "states":states,
+            "label":f"equal-weight ED ground-manifold average (d={d})",
+            "selection":{
+                "selection_available":True,
+                "order_mode":"average",
+                "ground_dim":int(d),
+                "definition":"basis-independent equal-weight ground-manifold mixture",
+            },
+        }
+
+    if mode=="vector":
+        if column is None:
+            column=0
+        if not 0<=int(column)<d:
+            raise IndexError(
+                f"--column {column} outside ground-manifold dimension {d}"
+            )
+        return {
+            "mode":"vector",
+            "psi":psi[:,int(column)],
+            "states":states,
+            "label":f"ED ground-manifold column {int(column)}",
+            "selection":{
+                "selection_available":True,
+                "order_mode":"vector",
+                "ground_dim":int(d),
+                "column":int(column),
+                "warning":"A basis vector inside an exactly degenerate manifold is not basis-independent.",
+            },
+        }
+
+    if d==1:
+        return {
+            "mode":"vector",
+            "psi":psi[:,0],
+            "states":states,
+            "label":f"unique ED ground state; {mode} cannot polarize it",
+            "selection":{
+                "selection_available":False,
+                "order_mode":mode,
+                "ground_dim":1,
+                "reason":"Unique ground state cannot acquire a distinct broken-order branch by mixing within the exact ground manifold.",
+            },
+        }
+
+    if mode in ("lc_same","lc_opposite"):
+        chosen,meta=_select_lc_branch(g,states,psi,mode)
+    elif mode=="charge_ab":
+        chosen,meta=_select_charge_ab_branch(g,states,psi)
+    elif mode=="charge_leading":
+        chosen,meta=_select_charge_leading_branch(g,states,psi)
+    elif mode=="bow_star":
+        chosen,meta=_select_bow_star_branch(g,states,psi)
+    else:
+        raise ValueError(f"Unknown mode {mode}")
+
+    meta["ground_dim"]=int(d)
     return {
-        "mode": "vector",
-        "psi": psi[:, int(column)],
-        "states": states,
-        "label": f"ED ground-manifold column {int(column)}",
+        "mode":"vector",
+        "psi":chosen,
+        "states":states,
+        "label":f"ED ground-manifold branch selected by {mode} (d={d})",
+        "selection":meta,
     }
 
 
@@ -429,8 +709,19 @@ def parser():
         ),
     )
     p.add_argument(
-        "--mode", choices=["average", "vector"], default="average",
-        help="How to interpret a degenerate ED ground manifold."
+        "--mode",
+        choices=[
+            "average", "vector",
+            "lc_same", "lc_opposite",
+            "charge_leading", "charge_ab",
+            "bow_star",
+        ],
+        default="average",
+        help=(
+            "For a degenerate ED manifold, either average/select a raw basis "
+            "vector or choose the pure ground-manifold branch that extremizes "
+            "the requested LC/charge/bond-order operator."
+        )
     )
     p.add_argument(
         "--column", type=int, default=None,
@@ -472,7 +763,7 @@ def main():
 
     g = load_geometry(root)
     payload = load_saved_state(state_file)
-    rep = select_representation(payload, a.mode, a.column)
+    rep = select_representation(payload, a.mode, a.column, g)
     states = np.asarray(rep["states"], np.uint64)
     if len(states) != len(rep["psi"]):
         raise RuntimeError(
@@ -508,6 +799,7 @@ def main():
         "Ns": int(g.Ns),
         "state_file": str(state_file),
         "representation": rep["label"],
+        "selection": rep.get("selection", {}),
         "mean_density": float(np.mean(density)),
         "density_min": float(np.min(density)),
         "density_max": float(np.max(density)),
@@ -522,6 +814,14 @@ def main():
         json.dumps(summary, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+
+    if rep["mode"]=="vector":
+        np.savez_compressed(
+            out/"selected_state.npz",
+            psi_native=np.asarray(rep["psi"],np.complex128),
+            native_states=np.asarray(states,np.uint64),
+            selection_mode=np.asarray(a.mode),
+        )
 
     print(f"[saved-state maps] state={state_file}")
     print(f"[saved-state maps] representation={rep['label']}")
