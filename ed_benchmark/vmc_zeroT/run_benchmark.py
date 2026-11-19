@@ -133,7 +133,7 @@ def _solve_ed_full(g, nf, V, k=8, degeneracy_tol=1e-8):
     return H, evals, gs, row
 
 
-def _solve_ed_symmetry(g, nf, V, k=8, degeneracy_tol=1e-8):
+def _solve_ed_symmetry(g, nf, V, k=8, degeneracy_tol=1e-8, sector_low=4):
     """Pure NumPy/SciPy symmetry-blocked ED using native_ed/symmetry.py.
 
     This reuses the repository's existing finite-group projectors: translation
@@ -172,7 +172,7 @@ def _solve_ed_symmetry(g, nf, V, k=8, degeneracy_tol=1e-8):
         # symmetry block. Four is enough to detect ordinary finite-size
         # multiplets while keeping the sector scan much cheaper than asking
         # for all global --ed-k states in every block.
-        nev=min(max(2,min(int(k),4)),d)
+        nev=min(max(2,int(sector_low)),d)
         evals_block,vecs_block=native_core.lowest(HB,nev)
         records.append({
             "labels":clean_label,
@@ -248,7 +248,7 @@ def _solve_ed_symmetry(g, nf, V, k=8, degeneracy_tol=1e-8):
     return H,evals,gs,row
 
 
-def solve_ed(g, nf, V, k=8, degeneracy_tol=1e-8, backend="auto"):
+def solve_ed(g, nf, V, k=8, degeneracy_tol=1e-8, backend="auto", sector_low=4):
     """ED frontend shared by Hex18 and larger finite-cluster benchmarks.
 
     backend='auto' keeps the original full sparse ED for small Hilbert spaces
@@ -261,7 +261,10 @@ def solve_ed(g, nf, V, k=8, degeneracy_tol=1e-8, backend="auto"):
     if chosen == "auto":
         chosen = "symmetry" if comb(g.Ns, nf) > 200000 else "full"
     if chosen == "symmetry":
-        return _solve_ed_symmetry(g, nf, V, k=k, degeneracy_tol=degeneracy_tol)
+        return _solve_ed_symmetry(
+            g, nf, V, k=k, degeneracy_tol=degeneracy_tol,
+            sector_low=sector_low,
+        )
     return _solve_ed_full(g, nf, V, k=k, degeneracy_tol=degeneracy_tol)
 
 
