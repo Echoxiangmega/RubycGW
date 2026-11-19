@@ -168,7 +168,11 @@ def _solve_ed_symmetry(g, nf, V, k=8, degeneracy_tol=1e-8):
         if diff.nnz and np.max(np.abs(diff.data))>1e-8:
             raise RuntimeError("Native symmetry block Hamiltonian is non-Hermitian")
 
-        nev=min(keep,d)
+        # The existing native 2x2 solver used only a few low states per
+        # symmetry block. Four is enough to detect ordinary finite-size
+        # multiplets while keeping the sector scan much cheaper than asking
+        # for all global --ed-k states in every block.
+        nev=min(max(2,min(int(k),4)),d)
         evals_block,vecs_block=native_core.lowest(HB,nev)
         records.append({
             "labels":clean_label,
@@ -204,6 +208,15 @@ def _solve_ed_symmetry(g, nf, V, k=8, degeneracy_tol=1e-8):
     mask=(evals-e0)<=degeneracy_tol
     ground=[x for x,m in zip(candidates,mask) if m]
     truncated=bool(len(candidates)>=keep and evals[-1]-e0<=degeneracy_tol)
+    for rec in records:
+        vals=np.asarray(rec["eigenvalues"],dtype=float)
+        if (
+            int(rec["dim"])>len(vals)
+            and len(vals)>0
+            and vals[-1]-e0<=degeneracy_tol
+        ):
+            truncated=True
+            break
 
     gs=np.column_stack([x[1] for x in ground])
     gs,_=np.linalg.qr(gs)
@@ -221,6 +234,7 @@ def _solve_ed_symmetry(g, nf, V, k=8, degeneracy_tol=1e-8):
         "ground_manifold_truncated":truncated,
         "ed_backend":"native_symmetry_blocks",
         "ed_symmetry_sector_count":int(len(records)),
+        "ed_eigenpairs_per_sector_max":int(max((len(r["eigenvalues"]) for r in records),default=0)),
         "ed_full_dimension":int(comb(g.Ns,nf)),
         "mc_E":None,
         "mc_E_error":None,
