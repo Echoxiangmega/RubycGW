@@ -660,6 +660,9 @@ def main():
     c3_group=None
     targets=[]
     diagnostic_projectors=[]
+    internal_translation_chars=None
+    internal_translation_label="Gamma"
+    residual_spatial_chars_by_label={}
     if exact_available:
         native_H,evals,ed_gs,ed_row=solve_ed(
             g,nf,a.V,k=a.ed_k,
@@ -677,6 +680,24 @@ def main():
                 g,native_H,ed_gs,a.ed_degeneracy_tol
             )
         if ed_gs.shape[1]==1:
+            tintg=build_internal_translation_group(g,native_H.states)
+            internal_translation_chars=characterize_unique_state(
+                tintg,ed_gs[:,0],tol=max(1e-8,a.ed_degeneracy_tol)
+            )
+            if np.max(np.abs(internal_translation_chars-np.ones(3)))<1e-7:
+                internal_translation_label="Gamma"
+            else:
+                internal_translation_label="exact"
+            if a.point_group=="c3v":
+                rg=build_internal_c3v_space_group(g,native_H.states)
+                residual_chars=characterize_unique_state(
+                    rg,ed_gs[:,0],tol=max(1e-8,a.ed_degeneracy_tol)
+                )
+                for t in targets:
+                    residual_spatial_chars_by_label[str(t["label"])]=np.asarray(
+                        residual_chars,complex
+                    )
+
             tg=build_translation_group(g,native_H.states)
             tchars=characterize_unique_state(
                 tg,ed_gs[:,0],tol=max(1e-8,a.ed_degeneracy_tol)
@@ -733,6 +754,21 @@ def main():
     for t in targets:
         if "label" not in t:
             t["label"]=f"m{int(t.get('m',0))}"
+
+    if internal_translation_chars is None:
+        if exact_available and ed_gs is not None and ed_gs.shape[1] != 1 and not a.skip_internal_translation:
+            raise RuntimeError(
+                "The staged internal-translation benchmark currently requires a unique "
+                "1x1 ED ground state. Use --skip-internal-translation for a degenerate "
+                "ED manifold until matrix-valued residual irreps are implemented."
+            )
+        internal_translation_chars=np.ones(3,dtype=np.complex128)
+        internal_translation_label="Gamma"
+        if a.point_group=="c3v":
+            for t in targets:
+                residual_spatial_chars_by_label[str(t["label"])]=(
+                    internal_gamma_c3v_characters(str(t["label"]))
+                )
 
     point_maps=None
     point_image_count=0
