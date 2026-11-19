@@ -226,9 +226,11 @@ def _current_operators(hi,g):
         except Exception:
             return op
 
+    same2=collect(same@same)
+    opp2=collect(opp@opp)
     same=collect(same)
     opp=collect(opp)
-    return same,opp,collect(same@same),collect(opp@opp)
+    return same,opp,same2,opp2
 
 
 def _mc_order_observables(vstate, g, nf, hi, current_ops):
