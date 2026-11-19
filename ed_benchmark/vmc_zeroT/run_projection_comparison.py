@@ -566,7 +566,7 @@ def parser():
     p.add_argument("--ed-k", type=int, default=12)
     p.add_argument(
         "--ed-backend", choices=["auto", "full", "symmetry"], default="auto",
-        help="auto uses full sparse ED on Hex18 and the existing symmetry-blocked QuSpin ED on 2x2."
+        help="auto uses full sparse ED on Hex18 and the native NumPy/SciPy symmetry-blocked ED on 2x2."
     )
     p.add_argument("--ed-degeneracy-tol", type=float, default=1e-8)
     p.add_argument("--resume", action="store_true")
@@ -611,11 +611,11 @@ def main():
     if ed_row.get("ground_manifold_truncated"):
         raise RuntimeError("ED ground manifold truncated; increase --ed-k")
 
-    # The 24-site symmetry ED already validates a complete, non-overlapping
+    # The 24-site native symmetry ED already validates a complete, non-overlapping
     # decomposition into exact Hamiltonian blocks.  Repeating [H,U] tests on
     # the 735471-dimensional matrix-free full basis would be very expensive.
     large_symmetry_ed = (
-        ed_row.get("ed_backend") == "quspin_symmetry_blocks"
+        ed_row.get("ed_backend") == "native_symmetry_blocks"
         and len(H.states) > 200000
     )
     group, group_name, sectors = build_ed_sectors(
