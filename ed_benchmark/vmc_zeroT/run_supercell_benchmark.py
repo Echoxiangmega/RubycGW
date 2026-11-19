@@ -1222,6 +1222,29 @@ def main():
                     flush=True,
                 )
 
+    if exact_available and a.plot_final_seeds:
+        if len(targets)==1:
+            try:
+                from plot_supercell_seed_triptychs import plot_seed_triptychs
+                plot_seed_triptychs(
+                    out,
+                    seeds=a.seeds,
+                    correlator=a.correlator,
+                    irrep=str(targets[0]["label"]),
+                    include_pre_tr=bool(a.plot_pre_tr),
+                )
+            except Exception as exc:
+                print(
+                    f"[triptych warning] automatic seed plotting failed: {exc}",
+                    flush=True,
+                )
+        else:
+            print(
+                "[triptych warning] multiple exact point-group targets; "
+                "run plot_supercell_seed_triptychs.py with --irrep explicitly.",
+                flush=True,
+            )
+
     print(f"\nSaved: {out}",flush=True)
 
 
