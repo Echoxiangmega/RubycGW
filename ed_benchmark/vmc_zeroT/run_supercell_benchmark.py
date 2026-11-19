@@ -8,13 +8,14 @@ is exact in the Bloch orbital construction and is never explicitly projected.
 For L1=L2=1, exact ED is available and this runner compares:
   ED
   Raw-Supercell-Bloch
-  VAP-C3-Supercell-Bloch
-  VAP-C3-Supercell-Bloch + one exact Lanczos step
+  VAP-C3v-Supercell-Bloch
+  VAP-C3v-Supercell-Bloch + one exact Lanczos step
 
 This 1x1 case is deliberately designed as a fair comparison with the existing
 Hex18 benchmark: the raw one-body variational space is the same full complex
-18 x Nf matrix, but C3 VAP sums only 3 point-group images instead of the old
-translations x C3v spatial projection (18 images on ring3).
+18 x Nf matrix. The default C3v VAP sums only 6 residual point-group images,
+because ring3-supercell translations are exact in the ansatz, instead of the
+old primitive-translations x C3v spatial projection (18 images on ring3).
 
 For larger superlattices the runner currently performs MC optimization and
 saves the scalable ansatz state/parameters, but exact full-basis postprocessing
@@ -59,9 +60,13 @@ from run_benchmark import (
 from run_projection_comparison import one_lanczos_step
 from symmetry_projection import (
     build_c3_group,
+    build_c3v_group,
     build_translation_group,
     build_ordinary_space_group,
     c3_site_maps,
+    c3v_site_maps,
+    c3v_irrep_characters,
+    c3v_from_characters,
     characterize_unique_state,
     decompose_ground_manifold_abelian,
     project_to_characters,
@@ -120,6 +125,48 @@ def c3_targets_from_ed(g,H,ed_gs,tol=1e-8):
         else:
             merged[m]["ground_dimension"]+=t["ground_dimension"]
     return group,[merged[m] for m in sorted(merged)]
+
+
+def c3v_targets_from_ed(g,H,ed_gs,tol=1e-8):
+    """Return ordinary C3v targets present in the exact ground manifold."""
+    group=build_c3v_group(g,H.states)
+    if ed_gs.shape[1]==1:
+        chars=characterize_unique_state(group,ed_gs[:,0],tol=max(1e-8,tol))
+        info=c3v_from_characters(chars,tol=max(1e-6,10*tol))
+        if info.get("irrep") is None:
+            raise RuntimeError(
+                "Unique ED ground state is not a one-dimensional A1/A2 C3v irrep"
+            )
+        return group,[{
+            "label":str(info["irrep"]),
+            "characters":np.asarray(chars,complex),
+            "ground_dimension":1,
+        }]
+
+    targets=[]
+    V=np.asarray(ed_gs,complex)
+    V,_=np.linalg.qr(V)
+    for ir in ("A1","A2","E"):
+        chars=c3v_irrep_characters(ir)
+        cols=[]
+        for j in range(V.shape[1]):
+            p,w=project_to_characters(group,chars,V[:,j])
+            if p is not None and w>max(tol,1e-10):
+                cols.append(p)
+        if not cols:
+            continue
+        W=np.column_stack(cols)
+        s=np.linalg.svd(W,compute_uv=False)
+        rank=int(np.sum(s>max(1e-8,100*tol)))
+        if rank:
+            targets.append({
+                "label":ir,
+                "characters":np.asarray(chars,complex),
+                "ground_dimension":rank,
+            })
+    if not targets:
+        raise RuntimeError("Could not identify a C3v irrep in ED ground manifold")
+    return group,targets
 
 
 def exact_row(method,seed,psi,H,ed_gs,ed_row,*,extra=None):
