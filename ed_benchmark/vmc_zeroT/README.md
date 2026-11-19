@@ -1814,3 +1814,62 @@ that sector, for example
 
 and increase the spatial iteration count only if the projected energy is still
 moving appreciably.
+
+
+### Default large-supercell spatial workflow: PAV screening then short VAP
+
+The default production workflow is now
+
+```text
+Raw
+ -> Tint
+ -> A1/A2 PAV screening
+ -> short VAP only in the lower C3v sector
+```
+
+with `--spatial-workflow screen_then_vap` (the default).  Raw and Tint are
+optimized only once per seed.  The optimized Tint parameters are then
+projected into every requested C3v sector without any SR/Jacobian construction.
+The PAV energy, CO and LC diagnostics are recorded as
+`stage=Tint+C3v-PAV`.
+
+The sector with the lowest PAV energy is selected for short VAP.  To avoid
+choosing the wrong sector because of Monte Carlo noise, any additional sector
+whose PAV energy lies within
+
+```text
+--screen-keep-within-sigma 2
+```
+
+combined standard errors of the best sector is also retained.  The default
+short spatial refinement is `--spatial-iter 10`.
+
+Alternative workflows remain available:
+
+```text
+--spatial-workflow pav_only
+--spatial-workflow direct_vap
+```
+
+The former performs only the sector screening; the latter skips screening and
+directly VAP-optimizes every requested irrep.
+
+### Meaning of sweep_size
+
+For NetKet Metropolis sampling, `sweep_size` is the number of elementary
+Metropolis transitions performed along each Markov chain between two stored
+samples.  With `MetropolisFermionHop`, one elementary transition proposes a
+number-conserving hop/exchange between an occupied and an empty mode allowed by
+the graph.
+
+Thus `sweep_size=24` for (N_f=24) means that each chain attempts 24
+fermion-hop moves before the next configuration is retained as a sample.
+The attempts do not visit each fermion exactly once; they are random proposals.
+
+Increasing `sweep_size` generally reduces autocorrelation between stored
+samples but increases the number of expensive wavefunction evaluations.
+Reducing it makes sampling cheaper but gives more correlated samples.  This is
+why Raw/Tint default to (N_f), while the expensive 18-image C3v training
+defaults to (max(2,N_f/4)).  The appropriate value should be checked using
+the measured autocorrelation time and R-hat diagnostics rather than interpreted
+as a physical parameter of the model.
