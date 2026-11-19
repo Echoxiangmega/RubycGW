@@ -626,10 +626,30 @@ def parser():
             "Raw and Tint are optimized once and shared by all requested sectors."
         ),
     )
+    p.add_argument(
+        "--spatial-workflow",
+        choices=["screen_then_vap","direct_vap","pav_only"],
+        default="screen_then_vap",
+        help=(
+            "screen_then_vap: PAV-screen requested C3v sectors, then short-VAP "
+            "only the lower sector(s). direct_vap reproduces the older behavior. "
+            "pav_only performs screening without VAP."
+        ),
+    )
+    p.add_argument(
+        "--screen-keep-within-sigma",type=float,default=2.0,
+        help=(
+            "During PAV screening, also short-VAP sectors whose energy is within "
+            "this many combined MC standard errors of the best sector."
+        ),
+    )
 
     p.add_argument("--raw-iter",type=int,default=50)
     p.add_argument("--tint-iter",type=int,default=50)
-    p.add_argument("--spatial-iter",type=int,default=50)
+    p.add_argument(
+        "--spatial-iter",type=int,default=10,
+        help="Short VAP iterations after A1/A2 PAV screening.",
+    )
     p.add_argument("--tr-iter",type=int,default=50)
     p.add_argument("--raw-learning-rate",type=float,default=0.03)
     p.add_argument("--tint-learning-rate",type=float,default=0.01)
@@ -780,6 +800,7 @@ def main():
             "Metropolis sweep_size defaults to Nf rather than Ns.",
             "Determinant evaluation remains stateless/exact; no inverse cache is used.",
             "Tint+C3v/TR training defaults to fewer samples and shorter sweeps; final observables are reevaluated with eval_samples.",
+            "Default spatial workflow is A1/A2 PAV screening followed by short VAP only in the lower sector; statistically tied sectors are both retained.",
         ],
     }
     atomic_json(out/"settings.json",settings)
@@ -852,66 +873,137 @@ def main():
             )
         rows.append(tint_summary)
 
-        for ir in requested_irreps:
-            spatial_chars=spatial_chars_by_irrep[ir]
-            spatial_dir=out/(
-                f"large_tint_c3v_{a.correlator}__{ir}__{seed}"
-            )
-            if a.reuse_spatial:
-                spatial_summary,spatial_params=_load_params(spatial_dir)
-            else:
-                spatial_summary,spatial_params=_stage(
-                    stage_name="Tint+C3v",
-                    directory=spatial_dir,
-                    g=g,nf=nf,V=a.V,
-                    hi=hi,H_fast=H_fast,graph=graph,current_ops=current_ops,
-                    seed_data=seed_data,
-                    shell_mats=shell_mats,bf_mats=bf_mats,
-                    use_backflow=use_backflow,
-                    initial_params=params,
-                    maps=spatial_maps,chars=spatial_chars,
-                    point_label=ir,
-                    time_reversal_even=False,
-                    n_iter=a.spatial_iter,
-                    learning_rate=a.spatial_learning_rate,
-                    args=a,rng_seed=base_seed+3+17*requested_irreps.index(ir),
-                    train_samples=a.spatial_samples,
-                    train_sweep_size=(
-                        a.spatial_sweep_size
-                        if a.spatial_sweep_size is not None
-                        else max(2,nf//4)
-                    ),
-                )
-            rows.append(spatial_summary)
+        if requested_irreps:
+            selected_irreps=list(requested_irreps)
+            pav_rows={}
+            pav_params={}
 
-            if a.restore_time_reversal:
-                tr_dir=out/(
-                    f"large_tint_c3vtr_{a.correlator}__"
-                    f"{ir}__{seed}"
-                )
-                tr_summary,_=_stage(
-                    stage_name="Tint+C3v+TR",
-                    directory=tr_dir,
-                    g=g,nf=nf,V=a.V,
-                    hi=hi,H_fast=H_fast,graph=graph,current_ops=current_ops,
-                    seed_data=seed_data,
-                    shell_mats=shell_mats,bf_mats=bf_mats,
-                    use_backflow=use_backflow,
-                    initial_params=spatial_params,
-                    maps=spatial_maps,chars=spatial_chars,
-                    point_label=ir,
-                    time_reversal_even=True,
-                    n_iter=a.tr_iter,
-                    learning_rate=a.tr_learning_rate,
-                    args=a,rng_seed=base_seed+4+17*requested_irreps.index(ir),
-                    train_samples=a.spatial_samples,
-                    train_sweep_size=(
-                        a.spatial_sweep_size
-                        if a.spatial_sweep_size is not None
-                        else max(2,nf//4)
-                    ),
-                )
-                rows.append(tr_summary)
+            if a.spatial_workflow in ("screen_then_vap","pav_only"):
+                # Cheap A1/A2(/E) PAV screening: same optimized Tint parameters,
+                # projected into each residual C3v sector, with no SR/Jacobian.
+                for ir in requested_irreps:
+                    spatial_chars=spatial_chars_by_irrep[ir]
+                    pav_dir=out/(
+                        f"large_tint_c3v_pav_{a.correlator}__{ir}__{seed}"
+                    )
+                    pav_summary,pp=_stage(
+                        stage_name="Tint+C3v-PAV",
+                        directory=pav_dir,
+                        g=g,nf=nf,V=a.V,
+                        hi=hi,H_fast=H_fast,graph=graph,current_ops=current_ops,
+                        seed_data=seed_data,
+                        shell_mats=shell_mats,bf_mats=bf_mats,
+                        use_backflow=use_backflow,
+                        initial_params=params,
+                        maps=spatial_maps,chars=spatial_chars,
+                        point_label=ir,
+                        time_reversal_even=False,
+                        n_iter=0,
+                        learning_rate=a.spatial_learning_rate,
+                        args=a,
+                        rng_seed=base_seed+30+17*requested_irreps.index(ir),
+                        train_samples=a.spatial_samples,
+                        train_sweep_size=(
+                            a.spatial_sweep_size
+                            if a.spatial_sweep_size is not None
+                            else max(2,nf//4)
+                        ),
+                    )
+                    rows.append(pav_summary)
+                    pav_rows[ir]=pav_summary
+                    pav_params[ir]=pp
+
+                if a.spatial_workflow=="screen_then_vap":
+                    best_ir=min(
+                        requested_irreps,
+                        key=lambda ir:float(pav_rows[ir]["mc_E"]),
+                    )
+                    best_E=float(pav_rows[best_ir]["mc_E"])
+                    best_err=float(pav_rows[best_ir].get("mc_E_error") or 0.0)
+                    selected_irreps=[]
+                    for ir in requested_irreps:
+                        Ei=float(pav_rows[ir]["mc_E"])
+                        ei=float(pav_rows[ir].get("mc_E_error") or 0.0)
+                        comb=(best_err*best_err+ei*ei)**0.5
+                        if ir==best_ir or (
+                            comb>0.0
+                            and (Ei-best_E)<=a.screen_keep_within_sigma*comb
+                        ):
+                            selected_irreps.append(ir)
+                    print(
+                        f"[C3v screen] seed={seed}: best={best_ir}; "
+                        f"short-VAP sectors={selected_irreps}",
+                        flush=True,
+                    )
+                else:
+                    selected_irreps=[]
+
+            if a.spatial_workflow!="pav_only":
+                # Direct VAP starts from Tint. Screened VAP starts from the same
+                # Tint parameters; the PAV state is a projected evaluation, not a
+                # different variational parameter set.
+                for ir in selected_irreps:
+                    spatial_chars=spatial_chars_by_irrep[ir]
+                    spatial_dir=out/(
+                        f"large_tint_c3v_{a.correlator}__{ir}__{seed}"
+                    )
+                    if a.reuse_spatial:
+                        spatial_summary,spatial_params=_load_params(spatial_dir)
+                    else:
+                        spatial_summary,spatial_params=_stage(
+                            stage_name="Tint+C3v-VAP",
+                            directory=spatial_dir,
+                            g=g,nf=nf,V=a.V,
+                            hi=hi,H_fast=H_fast,graph=graph,current_ops=current_ops,
+                            seed_data=seed_data,
+                            shell_mats=shell_mats,bf_mats=bf_mats,
+                            use_backflow=use_backflow,
+                            initial_params=params,
+                            maps=spatial_maps,chars=spatial_chars,
+                            point_label=ir,
+                            time_reversal_even=False,
+                            n_iter=a.spatial_iter,
+                            learning_rate=a.spatial_learning_rate,
+                            args=a,
+                            rng_seed=base_seed+3+17*requested_irreps.index(ir),
+                            train_samples=a.spatial_samples,
+                            train_sweep_size=(
+                                a.spatial_sweep_size
+                                if a.spatial_sweep_size is not None
+                                else max(2,nf//4)
+                            ),
+                        )
+                    rows.append(spatial_summary)
+
+                    if a.restore_time_reversal:
+                        tr_dir=out/(
+                            f"large_tint_c3vtr_{a.correlator}__"
+                            f"{ir}__{seed}"
+                        )
+                        tr_summary,_=_stage(
+                            stage_name="Tint+C3v+TR",
+                            directory=tr_dir,
+                            g=g,nf=nf,V=a.V,
+                            hi=hi,H_fast=H_fast,graph=graph,current_ops=current_ops,
+                            seed_data=seed_data,
+                            shell_mats=shell_mats,bf_mats=bf_mats,
+                            use_backflow=use_backflow,
+                            initial_params=spatial_params,
+                            maps=spatial_maps,chars=spatial_chars,
+                            point_label=ir,
+                            time_reversal_even=True,
+                            n_iter=a.tr_iter,
+                            learning_rate=a.tr_learning_rate,
+                            args=a,
+                            rng_seed=base_seed+4+17*requested_irreps.index(ir),
+                            train_samples=a.spatial_samples,
+                            train_sweep_size=(
+                                a.spatial_sweep_size
+                                if a.spatial_sweep_size is not None
+                                else max(2,nf//4)
+                            ),
+                        )
+                        rows.append(tr_summary)
 
         _write_csv(out/"large_supercell_summary.csv",rows)
 
