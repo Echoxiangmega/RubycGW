@@ -87,6 +87,8 @@ def main():
     new_raw=best(new,lambda m:m.startswith("Raw-SupercellBloch"))
     new_c3=best(new,lambda m:m.startswith("VAP-C3-SupercellBloch") and not m.endswith("+1LS"))
     new_c3_ls=best(new,lambda m:m.startswith("VAP-C3-SupercellBloch") and m.endswith("+1LS"))
+    new_c3tr=best(new,lambda m:m.startswith("VAP-C3TR-SupercellBloch") and not m.endswith("+1LS"))
+    new_c3tr_ls=best(new,lambda m:m.startswith("VAP-C3TR-SupercellBloch") and m.endswith("+1LS"))
 
     rows=[
         record("old Raw Hex18",old_raw,1),
@@ -98,6 +100,8 @@ def main():
         record("new 1x1 supercell Raw",new_raw,1),
         record("new 1x1 supercell C3 VAP",new_c3,3),
         record("new 1x1 supercell C3 VAP +1LS",new_c3_ls,3),
+        record("new 1x1 supercell C3+TR VAP",new_c3tr,3),
+        record("new 1x1 supercell C3+TR VAP +1LS",new_c3tr_ls,3),
     ]
     rows=[r for r in rows if r is not None]
 
