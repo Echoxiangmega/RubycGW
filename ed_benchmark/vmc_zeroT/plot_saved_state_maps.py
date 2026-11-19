@@ -699,6 +699,91 @@ def plot_bond_current(
     save_both(fig, out / "bond_current")
 
 
+def plot_site_bond_current_triptych(
+    g, xy, starts, ends, crossed, density, bond, current, out, title,
+    threshold_fraction=0.02,
+):
+    """Save site density, bond order and bond current in one 1x3 figure."""
+    fig, axes = plt.subplots(1, 3, figsize=(19.5, 6.3))
+
+    # Site density.
+    ax=axes[0]
+    draw_base_bonds(ax,g,starts,ends,crossed)
+    nbar=float(np.mean(density))
+    dev=max(float(np.max(np.abs(density-nbar))),1e-12)
+    nnorm=TwoSlopeNorm(vmin=nbar-dev,vcenter=nbar,vmax=nbar+dev)
+    sc=draw_sites(
+        ax,xy,density,SITE_CMAP,nnorm,
+        size=150+650*np.abs(density-nbar)/max(dev,1e-12),
+    )
+    cb=fig.colorbar(sc,ax=ax,shrink=0.72,pad=0.02)
+    cb.set_label(r"$\langle n_i\rangle$")
+    ax.set_title("site density",fontsize=12)
+    configure_axes(ax,xy,starts,ends)
+
+    # Bond order.
+    ax=axes[1]
+    bmax=max(float(np.max(np.abs(bond))),1e-12)
+    bnorm=TwoSlopeNorm(vmin=-bmax,vcenter=0.0,vmax=bmax)
+    bcmap=plt.get_cmap(BOND_CMAP)
+    for n,e in enumerate(g.edges):
+        ax.plot(
+            [starts[n,0],ends[n,0]],
+            [starts[n,1],ends[n,1]],
+            color=bcmap(bnorm(bond[n])),
+            lw=0.8+3.8*abs(bond[n])/bmax,
+            linestyle="--" if crossed[n] else "-",
+            solid_capstyle="round",zorder=2,
+        )
+    draw_sites(ax,xy,size=90)
+    sm=ScalarMappable(norm=bnorm,cmap=bcmap)
+    sm.set_array([])
+    cb=fig.colorbar(sm,ax=ax,shrink=0.72,pad=0.02)
+    cb.set_label(r"$2\,\mathrm{Re}\langle c_i^\dagger c_j\rangle$")
+    ax.set_title("bond order",fontsize=12)
+    configure_axes(ax,xy,starts,ends)
+
+    # Bond current.
+    ax=axes[2]
+    draw_base_bonds(ax,g,starts,ends,crossed,alpha=0.22)
+    jmax=max(float(np.max(np.abs(current))),1e-14)
+    jnorm=TwoSlopeNorm(vmin=-jmax,vcenter=0.0,vmax=jmax)
+    jcmap=plt.get_cmap(CURRENT_CMAP)
+    for n,e in enumerate(g.edges):
+        j=float(current[n])
+        if abs(j)<threshold_fraction*jmax:
+            continue
+        start=starts[n].copy()
+        end=ends[n].copy()
+        if j<0:
+            start,end=end,start
+        tail=0.23*start+0.77*end
+        head=0.77*start+0.23*end
+        ax.add_patch(
+            patches.FancyArrowPatch(
+                tail,head,arrowstyle="-|>",
+                mutation_scale=9+7*abs(j)/jmax,
+                linewidth=0.9+2.7*abs(j)/jmax,
+                color=jcmap(jnorm(j)),
+                linestyle="--" if crossed[n] else "-",
+                zorder=4,
+            )
+        )
+    draw_sites(ax,xy,size=90)
+    sm=ScalarMappable(norm=jnorm,cmap=jcmap)
+    sm.set_array([])
+    cb=fig.colorbar(sm,ax=ax,shrink=0.72,pad=0.02)
+    cb.set_label(r"$J_{i\to j}$")
+    ax.set_title(f"bond current; max |J|={jmax:.4g}",fontsize=12)
+    configure_axes(ax,xy,starts,ends)
+
+    fig.suptitle(title,fontsize=14,y=0.99)
+    fig.tight_layout(rect=(0,0,1,0.965))
+    fig.savefig(out/"site_bond_current_triptych.png",dpi=230,bbox_inches="tight")
+    fig.savefig(out/"site_bond_current_triptych.svg",bbox_inches="tight")
+    plt.close(fig)
+
+
 def parser():
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -798,6 +883,10 @@ def main():
     )
     plot_bond_current(
         g, xy, starts, ends, crossed, current, out, title,
+        threshold_fraction=float(a.current_threshold),
+    )
+    plot_site_bond_current_triptych(
+        g,xy,starts,ends,crossed,density,bond,current,out,title,
         threshold_fraction=float(a.current_threshold),
     )
 
