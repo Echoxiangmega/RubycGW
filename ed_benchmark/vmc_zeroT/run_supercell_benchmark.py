@@ -791,22 +791,30 @@ def main():
 
     if not a.skip_c3:
         for target in targets:
-            m=int(target["m"])
+            label=str(target["label"])
             chars=np.asarray(target["characters"],complex)
+            m=(int(target["m"]) if "m" in target else None)
+            pg_tag=("c3v" if a.point_group=="c3v" else "c3")
+            method=(
+                f"VAP-C3v-SupercellBloch-{a.correlator}"
+                if a.point_group=="c3v"
+                else f"VAP-C3-SupercellBloch-{a.correlator}"
+            )
             for seed in a.seeds:
                 run_id+=1
                 raw,params0=raw_cache[seed]
-                method=f"VAP-C3-SupercellBloch-{a.correlator}"
-                dirname=f"supercell_c3_{a.correlator}__m{m}__{seed}"
+                dirname=f"supercell_{pg_tag}_{a.correlator}__{label}__{seed}"
                 if a.reuse_c3:
                     print(
-                        f"\n[supercell C3-VAP reuse] seed={seed}, m={m}",
+                        f"\n[supercell {a.point_group.upper()}-VAP reuse] "
+                        f"seed={seed}, irrep={label}",
                         flush=True,
                     )
                     row,params,psi=_load_saved_supercell_state(out/dirname)
                 else:
                     print(
-                        f"\n[supercell C3-VAP] seed={seed}, m={m}",
+                        f"\n[supercell {a.point_group.upper()}-VAP] "
+                        f"seed={seed}, irrep={label}",
                         flush=True,
                     )
                     row,params,psi,_=train_one(
@@ -823,7 +831,9 @@ def main():
                         chunk_size=a.chunk_size,
                         output_dir=out,dir_name=dirname,
                         method_name=method,
-                        point_maps=point_maps,point_chars=chars,c3_m=m,
+                        point_maps=point_maps,point_chars=chars,
+                        point_group_name=a.point_group.upper(),
+                        point_label=label,c3_m=m,
                         time_reversal_even=False,
                         initial_params=params0,
                         native_H=native_H,ed_gs=ed_gs,ed_row=ed_row,
@@ -831,7 +841,8 @@ def main():
                         validate_hamiltonian=False,
                     )
                 if exact_available:
-                    row["target_c3"]=f"C3:m{m}"
+                    row["target_point_group"]=a.point_group.upper()
+                    row["target_point_irrep"]=label
                     row["target_sector_ground_dimension"]=target["ground_dimension"]
                     rows.append(row)
 
@@ -843,9 +854,12 @@ def main():
                                 "family":"ring3_supercell_bloch",
                                 "L1":a.L1,"L2":a.L2,
                                 "supercell_translation_built_in":True,
-                                "explicit_projection_images":3,
+                                "explicit_projection_images":point_image_count,
+                                "point_group":a.point_group.upper(),
+                                "point_irrep":label,
                                 "c3_m":m,
-                                "target_c3":f"C3:m{m}",
+                                "target_point_group":a.point_group.upper(),
+                                "target_point_irrep":label,
                                 "target_sector_ground_dimension":target["ground_dimension"],
                                 **info,
                             },
@@ -862,24 +876,23 @@ def main():
 
                 if a.restore_time_reversal:
                     run_id+=1
-                    # Choose the real ray with the largest norm before starting
-                    # TR-VAP.  On 1x1 the exact C3-VAP state is available; for
-                    # larger systems use the current trainable phase (or zero)
-                    # and let SR optimize it.
-                    tr_phase0=(
-                        float(params.get("tr_phase",0.0) or 0.0)
-                    )
+                    tr_phase0=float(params.get("tr_phase",0.0) or 0.0)
                     if psi is not None:
                         bilinear=np.dot(psi,psi)
                         if abs(bilinear)>1e-14:
                             tr_phase0=float(-0.5*np.angle(bilinear))
                     print(
-                        f"\n[supercell C3+TR-VAP] seed={seed}, m={m}, "
+                        f"\n[supercell {a.point_group.upper()}+TR-VAP] "
+                        f"seed={seed}, irrep={label}, "
                         f"initial phase={tr_phase0:+.6f}",
                         flush=True,
                     )
-                    tr_method=f"VAP-C3TR-SupercellBloch-{a.correlator}"
-                    tr_dir=f"supercell_c3tr_{a.correlator}__m{m}__{seed}"
+                    tr_method=(
+                        f"VAP-C3vTR-SupercellBloch-{a.correlator}"
+                        if a.point_group=="c3v"
+                        else f"VAP-C3TR-SupercellBloch-{a.correlator}"
+                    )
+                    tr_dir=f"supercell_{pg_tag}tr_{a.correlator}__{label}__{seed}"
                     tr_row,tr_params,tr_psi,_=train_one(
                         g=g,nf=nf,V=a.V,
                         seed_name=seed,seed_amplitude=a.seed_amplitude,
@@ -894,7 +907,9 @@ def main():
                         chunk_size=a.chunk_size,
                         output_dir=out,dir_name=tr_dir,
                         method_name=tr_method,
-                        point_maps=point_maps,point_chars=chars,c3_m=m,
+                        point_maps=point_maps,point_chars=chars,
+                        point_group_name=a.point_group.upper(),
+                        point_label=label,c3_m=m,
                         time_reversal_even=True,
                         initial_tr_phase_override=tr_phase0,
                         initial_params=params,
@@ -903,7 +918,8 @@ def main():
                         validate_hamiltonian=False,
                     )
                     if exact_available:
-                        tr_row["target_c3"]=f"C3:m{m}"
+                        tr_row["target_point_group"]=a.point_group.upper()
+                        tr_row["target_point_irrep"]=label
                         tr_row["target_sector_ground_dimension"]=target["ground_dimension"]
                         rows.append(tr_row)
                         if not a.skip_lanczos:
@@ -915,10 +931,13 @@ def main():
                                     "family":"ring3_supercell_bloch",
                                     "L1":a.L1,"L2":a.L2,
                                     "supercell_translation_built_in":True,
-                                    "explicit_projection_images":3,
+                                    "explicit_projection_images":point_image_count,
+                                    "point_group":a.point_group.upper(),
+                                    "point_irrep":label,
                                     "c3_m":m,
                                     "time_reversal_restored":True,
-                                    "target_c3":f"C3:m{m}",
+                                    "target_point_group":a.point_group.upper(),
+                                    "target_point_irrep":label,
                                     "target_sector_ground_dimension":target["ground_dimension"],
                                     **tr_info,
                                 },
