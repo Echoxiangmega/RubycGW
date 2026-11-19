@@ -1753,3 +1753,64 @@ to skip point-group projection intentionally.
 For symmetry-controlled finite-size scaling, prefer the C3-compatible sequence
 1x1, 2x2, 3x3, ... of ring3 supercells.  Rectangular 2x1, 3x1, 3x2, ... shapes
 are still useful as cheaper performance/profiling and anisotropy cross-checks.
+
+
+### Cheap C3v strategy for large supercells
+
+The 18-image Tint x C3v stage is substantially more expensive than Raw/Tint
+because every Markov proposal and every Jacobian evaluation contains all
+projected determinants. The production runner therefore trains this stage with
+lighter Monte Carlo settings by default:
+
+```text
+--spatial-samples 512
+--spatial-sweep-size max(2,Nf//4)
+```
+
+while final energy and order diagnostics are reevaluated with
+
+```text
+--eval-samples <value>
+```
+
+or, if omitted, the main `--n-samples` value. Thus the expensive SR updates
+do not pay for the same high sample count used for final observables.
+
+Setting
+
+```text
+--spatial-iter 0
+```
+
+turns the A1/A2 spatial branches into PAV-only evaluations: the Tint checkpoint
+is projected to each requested C3v irrep and its energy/CO/LC diagnostics are
+measured, but no QGT/Jacobian or SR solve is constructed. This is useful for a
+cheap sector scan before deciding which irrep deserves a VAP refinement.
+
+For example, after Raw and Tint are already saved:
+
+```powershell
+python ed_benchmark/vmc_zeroT/run_supercell_large.py `
+  --L1 2 --L2 2 --nf 24 `
+  --t 1 --t1 0.5 --t2 -0.5 --V 5.5 `
+  --seeds normal sd isd lc_same lc_opposite `
+  --correlator backflow `
+  --c3v-irrep both `
+  --n-samples 2048 --eval-samples 2048 `
+  --reuse-raw --reuse-tint `
+  --spatial-iter 0 `
+  --output results/large_supercell_2x2_V5p5
+```
+
+After identifying the lower PAV sector for a seed/parameter point, refine only
+that sector, for example
+
+```text
+--c3v-irrep A2 --reuse-raw --reuse-tint
+--spatial-iter 10
+--spatial-samples 512
+--spatial-sweep-size 6
+```
+
+and increase the spatial iteration count only if the projected energy is still
+moving appreciably.
