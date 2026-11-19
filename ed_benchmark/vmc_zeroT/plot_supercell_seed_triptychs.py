@@ -53,17 +53,27 @@ def _stage_dirs(root,seed,correlator,irrep):
     tr=root/f"supercell_tint_c3vtr_{correlator}__{irrep}__{seed}"
     tint=root/f"supercell_tint_{correlator}__Gamma__{seed}"
     raw=root/f"supercell_raw_{correlator}__{seed}"
-    if tr.exists():
-        final=tr
-    elif pre.exists():
-        final=pre
+
+    # "Final" means the highest-accuracy saved state: prefer +1LS when it
+    # exists, otherwise the optimized VAP state.
+    pre_best=Path(str(pre)+"_1ls") if Path(str(pre)+"_1ls").exists() else pre
+    tr_best=Path(str(tr)+"_1ls") if Path(str(tr)+"_1ls").exists() else tr
+
+    if tr_best.exists():
+        final=tr_best
+    elif pre_best.exists():
+        final=pre_best
     elif tint.exists():
         final=tint
     elif raw.exists():
         final=raw
     else:
         final=None
-    return final,pre if pre.exists() else None,tr if tr.exists() else None
+    return (
+        final,
+        pre_best if pre_best.exists() else None,
+        tr_best if tr_best.exists() else None,
+    )
 
 
 def _plot_one(root,g,state_dir: Path,out: Path,title,current_threshold):
