@@ -209,6 +209,13 @@ def train_one(
     if tr0 is None:
         tr0=0.0
 
+    if time_reversal_even and c3_m is not None and int(c3_m)%3 != 0:
+        raise RuntimeError(
+            "The current C3+TR implementation is restricted to the real C3 m=0 "
+            "irrep. For m=1/2, TR pairs conjugate C3 irreps and requires an "
+            "explicit paired-sector construction."
+        )
+
     if point_maps is not None:
         ktot=np.asarray(seed_data["total_supercell_momentum"],float)
         dist=np.linalg.norm(ktot-np.rint(ktot))
