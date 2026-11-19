@@ -1255,3 +1255,25 @@ The comparison utility selects the lowest-energy seed in each family and
 reports energy error, ground-subspace fidelity, exact variance, CO/BOW/LC
 observables and time per optimization iteration. It also records the explicit
 projection-image counts (old full spatial Hex18: 18; new C3-only: 3).
+
+
+For a fast smoke test of the new implementation before the full 1x1 run:
+
+```powershell
+python ed_benchmark/vmc_zeroT/run_supercell_benchmark.py `
+  --L1 1 --L2 1 --nf 6 `
+  --t 1 --t1 0.5 --t2 -0.5 --V 5.5 `
+  --seeds normal `
+  --correlator backflow `
+  --jastrow-mode bond_aware --jastrow-shells 4 `
+  --n-samples 1024 `
+  --n-iter 20 --rotation-iter 20 `
+  --output results/supercell_1x1_smoke
+```
+
+For a unique ED ground state the 1x1 CSV also reports
+`ed_primitive_translation_sector_weight` and
+`ed_full_spatial_sector_weight`. These are diagnostics only: the new ansatz
+does not enforce primitive-cell translations or mirrors. They show whether the
+C3-only optimized state nevertheless returns to the exact ED spatial sector.
+The CSV also reports the gauge-invariant spinless time-reversal residual.
