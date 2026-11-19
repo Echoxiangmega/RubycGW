@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import importlib.util
 import json
 from pathlib import Path
 from math import comb
@@ -34,6 +33,7 @@ sys.path.insert(0, str(NATIVE))
 import geometry as native_geometry
 import core as native_core
 import observables as native_observables
+import symmetry as native_symmetry
 
 from benchmark_observables import benchmark_observables, ruby_star_formfactor
 from vmc_ansatz import (
@@ -133,126 +133,112 @@ def _solve_ed_full(g, nf, V, k=8, degeneracy_tol=1e-8):
     return H, evals, gs, row
 
 
-def _load_quspin_sector_runner():
-    """Load the already verified symmetry-resolved QuSpin ED implementation."""
-    path = REPO / "ed_benchmark" / "quspin_zeroT" / "run_zeroT.py"
-    if not path.is_file():
-        raise RuntimeError(f"QuSpin symmetry ED runner not found: {path}")
-    name = "_ruby_quspin_zeroT_runner"
-    if name in sys.modules:
-        return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load symmetry ED runner: {path}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
 def _solve_ed_symmetry(g, nf, V, k=8, degeneracy_tol=1e-8):
-    """Symmetry-blocked ED, reusing quspin_zeroT/run_zeroT.py.
+    """Pure NumPy/SciPy symmetry-blocked ED using native_ed/symmetry.py.
 
-    Translation sectors are diagonalized first and compatible little-group
-    rotation/mirror blocks are added exactly as in the existing 2x2 ED code.
-    Ground vectors are then expanded back to the complete fixed-N basis so the
-    VMC benchmark can use exactly the same fidelity and observables as Hex18.
+    This reuses the repository's existing finite-group projectors: translation
+    sectors are resolved first and compatible point-group little-group
+    generators are added.  No QuSpin binary extension is required.
     """
-    runner = _load_quspin_sector_runner()
-    t0 = time.perf_counter()
-    records, found = runner.sector_scan(
-        g, V, nf, n_eigs=max(2, int(k)), points=True, twisted=None
-    )
-    t_diag = time.perf_counter() - t0
-    if not found:
-        raise RuntimeError("Symmetry ED returned no eigenstates")
+    t0=time.perf_counter()
+    states=native_core.make_states(g.Ns,nf)
+    H=native_core.FixedHamiltonian(g,nf,V,states=states,method="sparse")
+    t_build=time.perf_counter()-t0
 
-    e0 = float(found[0][0])
-    ground = [x for x in found if float(x[0]) - e0 <= degeneracy_tol]
-    if not ground:
-        raise RuntimeError("Symmetry ED found no ground-state vectors")
+    keep=max(2,int(k))
+    candidates=[]
+    records=[]
+    dim_total=0
+    t1=time.perf_counter()
 
-    # Detect a ground multiplet that may be cut off inside one symmetry block.
-    truncated = False
-    seen_records = set()
-    for _, rec, _, _ in ground:
-        rid = id(rec)
-        if rid in seen_records:
-            continue
-        seen_records.add(rid)
-        vals = np.asarray(rec["eigvals"], float)
-        if (
-            int(rec["dimension"]) > len(vals)
-            and len(vals) >= int(k)
-            and vals[-1] - e0 <= degeneracy_tol
-        ):
-            truncated = True
-
-    basis_type, _ = runner.get_quspin()
-    fullbasis = basis_type(g.Ns, Nf=nf)
-    native_states = native_core.make_states(g.Ns, nf)
-    qstates = np.asarray(fullbasis.states, dtype=np.uint64)
-    q_to_native = np.searchsorted(native_states, qstates)
-    if (
-        np.any(q_to_native >= len(native_states))
-        or np.any(native_states[q_to_native] != qstates)
-        or len(np.unique(q_to_native)) != len(native_states)
+    for label,Q,states_check,_ in native_symmetry.symmetry_projectors(
+        g,nf,kind="point",max_basis=max(900000,len(states)),use_signed=True
     ):
-        raise RuntimeError("QuSpin/native fixed-N basis sets do not match")
+        if not np.array_equal(states_check,states):
+            raise RuntimeError("Native symmetry projector basis mismatch")
+        d=int(Q.shape[1])
+        dim_total+=d
+        clean_label={kk:vv for kk,vv in label.items() if kk!="generators"}
+        if d==0:
+            records.append({"labels":clean_label,"dim":0,"eigenvalues":[]})
+            continue
 
-    cols = []
-    for _, _, basis, vec in ground:
-        qpsi = np.asarray(runner.full_state(basis, vec), np.complex128)
-        psi = np.empty(len(native_states), dtype=np.complex128)
-        psi[q_to_native] = qpsi
-        nrm = np.linalg.norm(psi)
-        if nrm < 1e-14:
-            raise RuntimeError("Zero-norm state reconstructed from symmetry block")
-        cols.append(psi / nrm)
-    gs = np.column_stack(cols)
-    gs, _ = np.linalg.qr(gs)
+        HB=(Q.conj().T@(H.operator@Q)).tocsr()
+        diff=HB-HB.getH()
+        if diff.nnz and np.max(np.abs(diff.data))>1e-8:
+            raise RuntimeError("Native symmetry block Hamiltonian is non-Hermitian")
 
-    # For 24 sites the full sparse Hamiltonian is unnecessary for ED and has a
-    # large construction peak.  Keep only a matrix-free full-basis operator for
-    # exact post-processing, PAV and the optional one-Lanczos-step correction.
-    t1 = time.perf_counter()
-    H = native_core.FixedHamiltonian(
-        g, nf, V, states=native_states, method="matrixfree"
-    )
-    t_build = time.perf_counter() - t1
+        nev=min(keep,d)
+        evals_block,vecs_block=native_core.lowest(HB,nev)
+        records.append({
+            "labels":clean_label,
+            "dim":d,
+            "eigenvalues":[float(x) for x in evals_block],
+        })
 
-    t2 = time.perf_counter()
-    obs = benchmark_observables(g, H.states, gs, native_observables)
-    t_obs = time.perf_counter() - t2
+        for j,en in enumerate(evals_block):
+            psi=np.asarray(Q@vecs_block[:,j]).ravel().astype(np.complex128,copy=False)
+            nrm=float(np.linalg.norm(psi))
+            if nrm<1e-14:
+                raise RuntimeError("Zero-norm state reconstructed from native symmetry block")
+            psi=psi/nrm
+            candidates.append((float(en),psi,clean_label,d,len(evals_block)))
 
-    evals = np.asarray([float(x[0]) for x in found[:max(int(k), len(ground) + 1)]])
-    row = {
-        "method": "ED",
-        "seed": "exact",
-        "E": e0,
-        "E_per_site": e0 / g.Ns,
-        "ground_degeneracy": int(gs.shape[1]),
-        "ground_manifold_truncated": bool(truncated),
-        "ed_backend": "quspin_symmetry_blocks",
-        "ed_symmetry_sector_count": int(len(records)),
-        "ed_full_dimension": int(comb(g.Ns, nf)),
-        "mc_E": None,
-        "mc_E_error": None,
-        "fidelity_ground_subspace": 1.0,
-        "time_build_s": t_build,
-        "time_solve_or_opt_s": t_diag,
-        "time_postprocess_s": t_obs,
-        "time_total_s": t_build + t_diag + t_obs,
+        # Retain only the globally lowest requested states, so large-projector
+        # matrices can be released sector by sector instead of accumulating.
+        candidates.sort(key=lambda x:x[0])
+        if len(candidates)>keep:
+            candidates=candidates[:keep]
+
+    t_diag=time.perf_counter()-t1
+    if dim_total!=len(states):
+        raise RuntimeError(
+            f"Incomplete native symmetry decomposition: {dim_total} != {len(states)}"
+        )
+    if not candidates:
+        raise RuntimeError("Native symmetry ED returned no eigenstates")
+
+    candidates.sort(key=lambda x:x[0])
+    evals=np.asarray([x[0] for x in candidates],dtype=float)
+    e0=float(evals[0])
+    mask=(evals-e0)<=degeneracy_tol
+    ground=[x for x,m in zip(candidates,mask) if m]
+    truncated=bool(len(candidates)>=keep and evals[-1]-e0<=degeneracy_tol)
+
+    gs=np.column_stack([x[1] for x in ground])
+    gs,_=np.linalg.qr(gs)
+
+    t2=time.perf_counter()
+    obs=benchmark_observables(g,H.states,gs,native_observables)
+    t_obs=time.perf_counter()-t2
+
+    row={
+        "method":"ED",
+        "seed":"exact",
+        "E":e0,
+        "E_per_site":e0/g.Ns,
+        "ground_degeneracy":int(gs.shape[1]),
+        "ground_manifold_truncated":truncated,
+        "ed_backend":"native_symmetry_blocks",
+        "ed_symmetry_sector_count":int(len(records)),
+        "ed_full_dimension":int(comb(g.Ns,nf)),
+        "mc_E":None,
+        "mc_E_error":None,
+        "fidelity_ground_subspace":1.0,
+        "time_build_s":t_build,
+        "time_solve_or_opt_s":t_diag,
+        "time_postprocess_s":t_obs,
+        "time_total_s":t_build+t_diag+t_obs,
         **obs.as_dict(),
     }
-    return H, evals, gs, row
+    return H,evals,gs,row
 
 
 def solve_ed(g, nf, V, k=8, degeneracy_tol=1e-8, backend="auto"):
     """ED frontend shared by Hex18 and larger finite-cluster benchmarks.
 
     backend='auto' keeps the original full sparse ED for small Hilbert spaces
-    and switches to the existing QuSpin symmetry-blocked solver once the full
+    and switches to the native NumPy/SciPy symmetry-blocked solver once the full
     fixed-N dimension exceeds 2e5.
     """
     if backend not in ("auto", "full", "symmetry"):
