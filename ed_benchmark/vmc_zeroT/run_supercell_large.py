@@ -578,6 +578,16 @@ def parser():
     )
     p.add_argument("--jastrow-shells",type=int,default=4)
     p.add_argument(
+        "--spatial-symmetry",
+        choices=["auto","c3v","none"],
+        default="auto",
+        help=(
+            "Residual point-group projection. auto uses C3v only when the "
+            "finite torus supports ordinary C3v; otherwise it stops after Tint. "
+            "Use c3v to require it or none to skip it explicitly."
+        ),
+    )
+    p.add_argument(
         "--c3v-irrep",
         choices=["A1","A2","E","both","all"],
         default="both",
@@ -664,29 +674,48 @@ def main():
     tint_maps=np.asarray([p for _,p in tint_ops],np.int32)
     tint_chars=np.ones(3,np.complex128)
 
-    spatial_ops=internal_c3v_space_group_site_maps(g)
-    spatial_maps=np.asarray([p for _,p in spatial_ops],np.int32)
-
-    if a.c3v_irrep=="both":
-        requested_irreps=["A1","A2"]
-    elif a.c3v_irrep=="all":
-        requested_irreps=["A1","A2","E"]
-    else:
-        requested_irreps=[a.c3v_irrep]
-
-    # The full residual group is Tint x C3v. At internal Gamma the
-    # characters of the one-dimensional irreps are repeated across the three
-    # translation cosets. For E we use the central character projector,
-    # proportional to [2,-1,-1,0,0,0] on every Tint coset.
+    spatial_maps=None
     spatial_chars_by_irrep={}
-    for ir in requested_irreps:
-        if ir in ("A1","A2"):
-            spatial_chars_by_irrep[ir]=internal_gamma_c3v_characters(ir)
+    requested_irreps=[]
+    spatial_symmetry_effective="none"
+
+    if a.spatial_symmetry!="none":
+        try:
+            spatial_ops=internal_c3v_space_group_site_maps(g)
+            spatial_maps=np.asarray([p for _,p in spatial_ops],np.int32)
+            spatial_symmetry_effective="c3v"
+        except RuntimeError as exc:
+            if a.spatial_symmetry=="c3v":
+                raise RuntimeError(
+                    "This finite torus does not preserve ordinary C3v. "
+                    "Choose a C3-compatible shape such as L1=L2, or use "
+                    "--spatial-symmetry auto/none to stop after Tint."
+                ) from exc
+            print(
+                "[symmetry] ordinary C3v is unavailable for "
+                f"L1={a.L1}, L2={a.L2}; auto mode will run Raw -> Tint only.",
+                flush=True,
+            )
+
+    if spatial_symmetry_effective=="c3v":
+        if a.c3v_irrep=="both":
+            requested_irreps=["A1","A2"]
+        elif a.c3v_irrep=="all":
+            requested_irreps=["A1","A2","E"]
         else:
-            from symmetry_projection import c3v_irrep_characters
-            spatial_chars_by_irrep[ir]=np.tile(
-                c3v_irrep_characters("E"),3
-            ).astype(np.complex128)
+            requested_irreps=[a.c3v_irrep]
+
+        # The full residual group is Tint x C3v. At internal Gamma the
+        # characters of the one-dimensional irreps are repeated across the
+        # three translation cosets. For E use the central character projector.
+        for ir in requested_irreps:
+            if ir in ("A1","A2"):
+                spatial_chars_by_irrep[ir]=internal_gamma_c3v_characters(ir)
+            else:
+                from symmetry_projection import c3v_irrep_characters
+                spatial_chars_by_irrep[ir]=np.tile(
+                    c3v_irrep_characters("E"),3
+                ).astype(np.complex128)
 
     settings={
         **vars(a),
@@ -697,7 +726,11 @@ def main():
         "sparse_correlators":True,
         "packed_orbitals":True,
         "internal_translation_images":3,
-        "full_residual_spatial_images":18,
+        "full_residual_spatial_images":(
+            18 if spatial_symmetry_effective=="c3v" else 0
+        ),
+        "spatial_symmetry_requested":a.spatial_symmetry,
+        "spatial_symmetry_effective":spatial_symmetry_effective,
         "requested_c3v_irreps":requested_irreps,
         "notes":[
             "No ED/full-state enumeration is performed.",
@@ -826,6 +859,13 @@ def main():
                 rows.append(tr_summary)
 
         _write_csv(out/"large_supercell_summary.csv",rows)
+
+    if spatial_symmetry_effective=="none":
+        print(
+            "\n[large supercell] point-group projection skipped: "
+            "this torus does not preserve ordinary C3v.",
+            flush=True,
+        )
 
     print("\n[large supercell] summary")
     for r in rows:
