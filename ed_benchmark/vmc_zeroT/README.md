@@ -869,3 +869,68 @@ A light regression test for parameter transfer is
 \`\`\`bash
 python ed_benchmark/vmc_zeroT/test_staged_vap_warmstart.py
 \`\`\`
+
+
+## Larger Ruby supercells for finite-size scaling
+
+The native geometry module now contains two families of larger periodic Ruby
+clusters.
+
+The preferred **same-shape high-symmetry sequence** is
+
+\[
+M_L=L I,\qquad N_{\rm cell}=L^2,\qquad N_s=6L^2,
+\]
+
+with the named clusters
+
+\`\`\`text
+2x2   :  24 sites
+3x3   :  54 sites
+4x4   :  96 sites
+5x5   : 150 sites
+6x6   : 216 sites
+\`\`\`
+
+For generic \(t_1,t_2\), these finite tori retain the ordinary \(C_3\) and
+mirror symmetries of the existing 2x2 cluster. When \(t_1=t_2\), ordinary
+\(C_6\) is also retained. This same-shape family should be the primary sequence
+for thermodynamic finite-size fits.
+
+A second **compact tilted C3-compatible family** uses
+
+\[
+M(a,b)=
+\begin{pmatrix}
+a&b\\
+-b&a+b
+\end{pmatrix},
+\qquad
+N_{\rm cell}=a^2+ab+b^2.
+\]
+
+Named examples are
+
+\`\`\`text
+ring3  :  18 sites   (a,b)=(1,1)
+ring7  :  42 sites   (2,1)
+ring12 :  72 sites   (2,2)
+ring13 :  78 sites   (3,1)
+ring19 : 114 sites   (3,2)
+ring21 : 126 sites   (4,1)
+ring28 : 168 sites   (4,2)
+ring31 : 186 sites   (5,1)
+\`\`\`
+
+These tilted clusters are useful for checking boundary-shape and shell effects.
+They should not be mixed blindly with the \(L\times L\) sequence in a single
+finite-size fit.
+
+Geometry and symmetry checks can be run with
+
+\`\`\`bash
+python ed_benchmark/native_ed/test_large_supercells.py
+\`\`\`
+
+The test verifies the site count, quotient-cell count, permitted-momentum
+count, PBC bond consistency, and finite-torus point-group compatibility.
