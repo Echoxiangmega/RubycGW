@@ -8,7 +8,7 @@ are represented by separate rotation-eigenvalue blocks without mirrors.
 from itertools import product
 from math import comb
 import numpy as np
-from scipy.sparse import csc_matrix, identity
+from scipy.sparse import csc_matrix, coo_matrix, diags, identity
 from core import make_states
 from geometry import twisted_c6_gauge
 
@@ -168,31 +168,89 @@ def map_fock(state,perm,ns,onsite=None):
     return target,phase
 
 
+def _uint64_parity(values):
+    """Vectorized popcount parity for uint64 arrays."""
+    x=np.asarray(values,dtype=np.uint64).copy()
+    for shift in (32,16,8,4):
+        x ^= x >> np.uint64(shift)
+    return ((np.uint64(0x6996) >> (x & np.uint64(15))) & np.uint64(1)).astype(np.int8)
+
+
+def _fock_action_arrays(states,perm,ns,onsite=None):
+    """Vectorized fixed-N action of one signed site permutation."""
+    states=np.asarray(states,dtype=np.uint64)
+    perm=np.asarray(perm,dtype=np.int64)
+    mapped=np.zeros(len(states),dtype=np.uint64)
+    prefix=np.zeros(len(states),dtype=np.uint64)
+    parity=np.zeros(len(states),dtype=np.int8)
+    phase=np.ones(len(states),dtype=np.int8)
+    if onsite is None:
+        onsite=np.ones(ns,dtype=np.int8)
+    else:
+        onsite=np.asarray(onsite,dtype=np.int8)
+
+    for i in range(ns):
+        srcbit=np.uint64(1 << (ns-1-i))
+        occ=(states & srcbit)!=0
+        pi=int(perm[i])
+        if pi+1<ns:
+            greater_mask=np.uint64((1 << (ns-1-pi)) - 1)
+            odd=_uint64_parity(prefix & greater_mask).astype(bool)
+            parity ^= (occ & odd).astype(np.int8)
+        if onsite[i] == -1:
+            phase[occ] *= -1
+        dstbit=np.uint64(1 << (ns-1-pi))
+        mapped[occ] |= dstbit
+        prefix[occ] |= dstbit
+
+    target=np.searchsorted(states,mapped)
+    if np.any(target>=len(states)) or np.any(states[target]!=mapped):
+        raise RuntimeError('Symmetry action left the fixed-N basis')
+    phase *= (1-2*parity).astype(np.int8)
+    return target.astype(np.int64),phase
+
+
 def projected_basis(states,ns,generators):
+    """Build one symmetry-sector basis using vectorized group actions.
+
+    This is algebraically identical to the former orbit-by-orbit Python loop,
+    but maps every fixed-N basis state at once for each group element.  The
+    speedup is essential for the 24-site Nf=8 space (735471 states).
+    """
     group=group_closure(generators,ns)
-    indexes={int(s):i for i,s in enumerate(states)}
-    visited=np.zeros(len(states),dtype=bool)
-    rr,cc,dd=[],[],[]
-    nc=0
-    for ix,state in enumerate(states):
-        if visited[ix]:continue
-        orbit={};coefs={}
-        for p,z,char in group:
-            target,sgn=map_fock(int(state),p,ns,z)
-            j=indexes[target]
-            orbit[j]=True
-            coefs[j]=coefs.get(j,0j)+np.conj(char)*sgn
-        for j in orbit:visited[j]=True
-        norm=np.sqrt(sum(abs(z)**2 for z in coefs.values()))
-        if norm<1e-9:continue
-        for j,z in coefs.items():
-            if abs(z)>1e-12:
-                rr.append(j);cc.append(nc);dd.append(z/norm)
-        nc+=1
-    Q=csc_matrix((np.asarray(dd,complex),(np.asarray(rr,dtype=int),np.asarray(cc,dtype=int))),
-                shape=(len(states),nc))
-    if nc:
-        diff=Q.conj().T@Q-identity(nc,format='csc',dtype=complex)
+    states=np.asarray(states,dtype=np.uint64)
+    dim=len(states)
+    ng=len(group)
+
+    targets=np.empty((ng,dim),dtype=np.int64)
+    phases=np.empty((ng,dim),dtype=np.int8)
+    chars=np.empty(ng,dtype=np.complex128)
+    for ig,(p,z,char) in enumerate(group):
+        targets[ig],phases[ig]=_fock_action_arrays(states,p,ns,z)
+        chars[ig]=complex(char)
+
+    # Every orbit contains exactly one smallest full-basis index.  Retain only
+    # that representative, matching the visited-orbit logic of the old code.
+    indices=np.arange(dim,dtype=np.int64)
+    representatives=np.flatnonzero(np.min(targets,axis=0)==indices)
+    nc0=len(representatives)
+    if nc0==0:
+        return csc_matrix((dim,0),dtype=np.complex128)
+
+    rows=targets[:,representatives].reshape(-1)
+    cols=np.tile(np.arange(nc0,dtype=np.int64),ng)
+    data=(np.conj(chars)[:,None]*phases[:,representatives]).reshape(-1)
+    Q=coo_matrix((data,(rows,cols)),shape=(dim,nc0),dtype=np.complex128).tocsc()
+    Q.sum_duplicates()
+    Q.eliminate_zeros()
+
+    norm2=np.asarray(Q.conj().multiply(Q).sum(axis=0)).ravel().real
+    keep=norm2>1e-18
+    Q=Q[:,keep]
+    norm2=norm2[keep]
+    if Q.shape[1]:
+        Q=(Q@diags(1.0/np.sqrt(norm2),format='csc')).tocsc()
+        diff=Q.conj().T@Q-identity(Q.shape[1],format='csc',dtype=complex)
         if diff.nnz and np.max(np.abs(diff.data))>1e-8:
             raise AssertionError('Nonorthonormal projected basis')
     return Q
