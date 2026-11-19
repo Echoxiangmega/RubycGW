@@ -955,6 +955,7 @@ python ed_benchmark/vmc_zeroT/run_projection_comparison.py `
   --t 1 --t1 0.5 --t2 -0.5 --V 5.5 `
   --seeds normal sd isd lc_same lc_opposite `
   --correlator backflow `
+  --point-group c3v `
   --jastrow-mode bond_aware `
   --jastrow-shells 4 `
   --n-samples 4096 `
@@ -1179,6 +1180,7 @@ python ed_benchmark/vmc_zeroT/run_supercell_benchmark.py `
   --t 1 --t1 0.5 --t2 -0.5 --V 5.5 `
   --seeds normal sd isd lc_same lc_opposite `
   --correlator backflow `
+  --point-group c3v `
   --jastrow-mode bond_aware `
   --jastrow-shells 4 `
   --n-samples 4096 `
@@ -1198,8 +1200,9 @@ settings.json
 geometry.json
 ed/final_state.npz
 supercell_raw_backflow__<seed>/
-supercell_c3_backflow__m<M>__<seed>/
-supercell_c3_backflow__m<M>__<seed>_1ls/
+supercell_c3v_backflow__A1__<seed>/
+supercell_c3v_backflow__A1__<seed>_1ls/
+supercell_c3vtr_backflow__A1__<seed>/
 ```
 
 The relevant comparison columns include
@@ -1218,12 +1221,13 @@ explicit_projection_images
 time_per_iteration_s
 ```
 
-The new C3-VAP uses exactly three explicit point-group images. In contrast,
-the historical full ring3 spatial projector contains 3 primitive translations
+The default supercell VAP now restores the full ordinary C3v point group:
+E, C3, C3^2 and the three mirrors, for exactly six explicit spatial images.
+The historical full ring3 spatial projector contains 3 primitive translations
 times 6 C3v point operations = 18 images. The 1x1 benchmark therefore measures
-directly how much speed is gained, and how much accuracy is lost or retained,
-when primitive translation/mirror restoration is replaced by the 18-site
-variational-supercell assumption plus C3 rotation restoration.
+directly how much speed is gained when primitive translations are built into
+the 18-site supercell ansatz while the complete residual point group is still
+restored explicitly.
 
 No spinless time-reversal restoration is imposed in this new path by default,
 because the intended thermodynamic LC branch must be allowed to carry a
@@ -1253,8 +1257,8 @@ python ed_benchmark/vmc_zeroT/compare_supercell_vs_hex18.py `
 
 The comparison utility selects the lowest-energy seed in each family and
 reports energy error, ground-subspace fidelity, exact variance, CO/BOW/LC
-observables and time per optimization iteration. It also records the explicit
-projection-image counts (old full spatial Hex18: 18; new C3-only: 3).
+observables and time per optimization iteration. It also records the explicit projection-image counts
+(old full spatial Hex18: 18; new residual C3v: 6).
 
 
 For a fast smoke test of the new implementation before the full 1x1 run:
@@ -1265,6 +1269,7 @@ python ed_benchmark/vmc_zeroT/run_supercell_benchmark.py `
   --t 1 --t1 0.5 --t2 -0.5 --V 5.5 `
   --seeds normal `
   --correlator backflow `
+  --point-group c3v `
   --jastrow-mode bond_aware --jastrow-shells 4 `
   --n-samples 1024 `
   --n-iter 20 --rotation-iter 20 `
@@ -1275,7 +1280,7 @@ For a unique ED ground state the 1x1 CSV also reports
 `ed_primitive_translation_sector_weight` and
 `ed_full_spatial_sector_weight`. These are diagnostics only: the new ansatz
 does not enforce primitive-cell translations or mirrors. They show whether the
-C3-only optimized state nevertheless returns to the exact ED spatial sector.
+C3v-optimized state also returns to the exact primitive-translation sector.
 The CSV also reports the gauge-invariant spinless time-reversal residual.
 
 
@@ -1284,7 +1289,7 @@ The CSV also reports the gauge-invariant spinless time-reversal residual.
 The supercell runner now supports a third optimization stage
 
 ```text
-Raw supercell -> C3 VAP -> C3+TR VAP
+Raw supercell -> C3v VAP -> C3v+TR VAP
 ```
 
 without restoring primitive-cell translations or mirrors. Enable it with
@@ -1295,6 +1300,7 @@ python ed_benchmark/vmc_zeroT/run_supercell_benchmark.py `
   --t 1 --t1 0.5 --t2 -0.5 --V 5.5 `
   --seeds normal sd isd lc_same lc_opposite `
   --correlator backflow `
+  --point-group c3v `
   --jastrow-mode bond_aware --jastrow-shells 4 `
   --n-samples 4096 `
   --n-iter 300 `
@@ -1307,19 +1313,20 @@ python ed_benchmark/vmc_zeroT/run_supercell_benchmark.py `
 ```
 
 For the 1x1 exact benchmark, the initial TR phase is chosen from the preceding
-C3-VAP wavefunction to maximize the norm of its TR-even real ray before SR
+C3v-VAP wavefunction to maximize the norm of its TR-even real ray before SR
 optimization. The TR phase is then trainable. Spinless time reversal is
 (T=K) in the occupation basis, so the projected amplitude is proportional to
 
 [
-e^{i\phi}\Psi_{C_3}(x)+
-\left[e^{i\phi}\Psi_{C_3}(x)\right]^*.
+e^{i\phi}\Psi_{C_{3v}}(x)+
+\left[e^{i\phi}\Psi_{C_{3v}}(x)\right]^*.
 ]
 
-This adds no new spatial images: the explicit spatial image count remains 3.
-The current implementation applies this C3+TR stage to the real C3 (m=0)
-irrep. A complex (m=1/2) irrep must be treated together with its conjugate
-partner and is deliberately rejected rather than silently mixed.
+This adds no new spatial images: the explicit spatial image count remains 6.
+The default C3v implementation supports the one-dimensional A1 and A2 irreps.
+The two-dimensional E irrep is not used by the runner until a matrix-valued
+irrep projector is added. Legacy C3-only runs remain available through
+`--point-group c3`.
 
 The symmetry diagnostic columns have explicit names:
 `ed_primitive_translation_sector_weight` and
@@ -1328,7 +1335,7 @@ reversal. They are projector weights into the symmetry sector of the unique ED
 ground state, not order parameters and not fidelities.
 
 
-If the Raw and C3 stages were already completed in the same output directory,
+If the Raw and C3v stages were already completed in the same output directory,
 the TR refinement can be continued without rerunning them:
 
 ```powershell
@@ -1337,13 +1344,15 @@ python ed_benchmark/vmc_zeroT/run_supercell_benchmark.py `
   --t 1 --t1 0.5 --t2 -0.5 --V 5.5 `
   --seeds normal sd isd lc_same lc_opposite `
   --correlator backflow `
+  --point-group c3v `
   --jastrow-mode bond_aware --jastrow-shells 4 `
   --n-samples 4096 `
-  --skip-raw --reuse-c3 `
+  --skip-raw --reuse-point-group `
   --restore-time-reversal `
   --tr-iter 100 --tr-learning-rate 0.01 `
   --output results/supercell_1x1_N6_V5p5
 ```
 
-`--reuse-c3` loads the saved C3 parameters and, on the 1x1 benchmark, the
-saved exact C3 wavefunction to choose a non-cancelling initial TR phase.
+`--reuse-point-group` loads the saved C3v parameters and, on the 1x1
+benchmark, the saved exact projected wavefunction to choose a non-cancelling
+initial TR phase.
