@@ -553,7 +553,7 @@ def parser():
     p.add_argument("--rotation-learning-rate",type=float,default=0.01)
     p.add_argument(
         "--restore-time-reversal",action="store_true",
-        help="After C3 VAP, run an additional spinless T=K restored C3+TR VAP stage.",
+        help="After point-group VAP, run an additional spinless T=K restored point-group+TR VAP stage.",
     )
     p.add_argument("--tr-iter",type=int,default=100)
     p.add_argument("--tr-learning-rate",type=float,default=0.01)
@@ -561,14 +561,22 @@ def parser():
     p.add_argument("--chunk-size",type=int,default=512)
     p.add_argument("--rng-seed",type=int,default=2026)
     p.add_argument(
+        "--point-group",choices=["c3v","c3"],default="c3v",
+        help="Residual point group projected explicitly after ring3-supercell translation is built in.",
+    )
+    p.add_argument(
+        "--c3v-irrep",choices=["A1","A2","E"],default=None,
+        help="C3v irrep for runs without exact 1x1 ED. Unique 1x1 ED selects its exact irrep automatically.",
+    )
+    p.add_argument(
         "--c3-m",nargs="*",type=int,default=None,
-        help="C3 sectors to optimize. For 1x1 with ED, default uses only C3 sectors present in the exact ground manifold.",
+        help="Legacy C3-only sectors, used only with --point-group c3.",
     )
     p.add_argument("--skip-raw",action="store_true")
     p.add_argument("--skip-c3",action="store_true")
     p.add_argument(
         "--reuse-c3",action="store_true",
-        help="Reuse existing C3 stage parameters in --output and continue to TR without rerunning C3.",
+        help="Reuse an existing point-group stage in --output and continue to TR without rerunning it.",
     )
     p.add_argument("--skip-lanczos",action="store_true")
     p.add_argument("--ed-k",type=int,default=12)
@@ -584,7 +592,7 @@ def main():
     if a.L1<1 or a.L2<1:
         raise ValueError("L1,L2 must be positive")
     if a.restore_time_reversal and a.skip_c3:
-        raise ValueError("--restore-time-reversal requires the C3 stage; remove --skip-c3")
+        raise ValueError("--restore-time-reversal requires the point-group stage; remove --skip-c3")
     if a.reuse_c3 and a.skip_c3:
         raise ValueError("--reuse-c3 and --skip-c3 are mutually exclusive")
     out=Path(a.output).resolve()
@@ -612,9 +620,14 @@ def main():
         )
         if ed_row.get("ground_manifold_truncated"):
             raise RuntimeError("ED ground manifold truncated; increase --ed-k")
-        c3_group,targets=c3_targets_from_ed(
-            g,native_H,ed_gs,a.ed_degeneracy_tol
-        )
+        if a.point_group=="c3v":
+            c3_group,targets=c3v_targets_from_ed(
+                g,native_H,ed_gs,a.ed_degeneracy_tol
+            )
+        else:
+            c3_group,targets=c3_targets_from_ed(
+                g,native_H,ed_gs,a.ed_degeneracy_tol
+            )
         if ed_gs.shape[1]==1:
             tg=build_translation_group(g,native_H.states)
             tchars=characterize_unique_state(
@@ -639,29 +652,51 @@ def main():
         )
         atomic_json(ed_dir/"summary.json",ed_row)
     else:
-        if a.c3_m is None:
+        if a.point_group=="c3v":
+            ir=a.c3v_irrep or "A1"
+            targets=[{
+                "label":ir,
+                "characters":c3v_irrep_characters(ir),
+                "ground_dimension":None,
+            }]
+        elif a.c3_m is None:
             targets=[
-                {"m":m,"characters":c3_characters(m),"ground_dimension":None}
+                {
+                    "m":m,
+                    "label":f"m{m}",
+                    "characters":c3_characters(m),
+                    "ground_dimension":None,
+                }
                 for m in (0,1,2)
             ]
 
-    if a.c3_m is not None:
+    if a.point_group=="c3" and a.c3_m is not None:
         wanted=sorted({int(m)%3 for m in a.c3_m})
         targets=[
-            {"m":m,"characters":c3_characters(m),"ground_dimension":None}
+            {
+                "m":m,
+                "label":f"m{m}",
+                "characters":c3_characters(m),
+                "ground_dimension":None,
+            }
             for m in wanted
         ]
 
+    for t in targets:
+        if "label" not in t:
+            t["label"]=f"m{int(t.get('m',0))}"
+
     point_maps=None
+    point_image_count=0
     if not a.skip_c3:
         try:
-            point_maps=np.asarray(
-                [p for _,p in c3_site_maps(g)],np.int32
-            )
+            site_ops=(c3v_site_maps(g) if a.point_group=="c3v" else c3_site_maps(g))
+            point_maps=np.asarray([p for _,p in site_ops],np.int32)
+            point_image_count=len(site_ops)
         except RuntimeError as exc:
             raise RuntimeError(
-                "This total ring3-supercell torus does not retain ordinary C3. "
-                "Use a C3-compatible shape (normally L1=L2) or pass --skip-c3."
+                f"This torus does not retain ordinary {a.point_group.upper()}. "
+                "Use a compatible shape (normally L1=L2) or pass --skip-c3."
             ) from exc
     settings={
         **vars(a),
@@ -670,11 +705,11 @@ def main():
         "n_supercells":a.L1*a.L2,
         "variational_supercell_sites":18,
         "supercell_translation_built_in":True,
-        "explicit_rotation_group":"C3",
-        "explicit_rotation_images":3,
+        "explicit_rotation_group":a.point_group.upper(),
+        "explicit_rotation_images":point_image_count,
         "exact_available":exact_available,
-        "c3_targets":[{
-            "m":int(t["m"]),
+        "point_group_targets":[{
+            "label":str(t["label"]),
             "ground_dimension":t["ground_dimension"],
         } for t in targets],
     }
@@ -694,7 +729,7 @@ def main():
         rows.append(ed)
         print(
             f"[ED] E0={ed['E']:.12g}, ground_dim={ed_gs.shape[1]}, "
-            f"C3 targets={[t['m'] for t in targets]}",
+            f"{a.point_group.upper()} targets={[t['label'] for t in targets]}",
             flush=True,
         )
 
