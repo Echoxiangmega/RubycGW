@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Regression tests for vectorized Fock maps/operator application and ED bridge."""
 from pathlib import Path
+from itertools import combinations
 import sys
 import numpy as np
 
@@ -32,13 +33,13 @@ def reference_map(states,ns,p):
     return target,phase
 
 
-def reference_apply(ket,states,ns,ops):
-    out=np.zeros_like(ket,dtype=np.complex128)
-    index={int(s):i for i,s in enumerate(states)}
+def reference_apply_general(ket,ket_states,bra_states,ns,ops):
+    out=np.zeros(len(bra_states),dtype=np.complex128)
+    index={int(s):i for i,s in enumerate(bra_states)}
     for a,amp in enumerate(ket):
         if abs(amp)<=1e-16:
             continue
-        new=int(states[a]); sign=1
+        new=int(ket_states[a]); sign=1
         for what,site in reversed(ops):
             bit=1 << (ns-1-site)
             filled=(new&bit)!=0
@@ -50,9 +51,13 @@ def reference_apply(ket,states,ns,ops):
                 new|=bit
             else:
                 new^=bit
-        if sign:
+        if sign and new in index:
             out[index[new]]+=sign*amp
     return out
+
+
+def reference_apply(ket,states,ns,ops):
+    return reference_apply_general(ket,states,states,ns,ops)
 
 
 def main():
@@ -67,10 +72,20 @@ def main():
     rng=np.random.default_rng(20261119)
     x=rng.normal(size=len(states))+1j*rng.normal(size=len(states))
     x/=np.linalg.norm(x)
-    for ops in ([("+",0),("-",5)],[("-",1),("-",7)]):
-        got=observables.apply_ops(x,states,states,g.Ns,ops)
-        ref=reference_apply(x,states,g.Ns,ops)
-        assert np.linalg.norm(got-ref)<1e-12
+    ops=[("+",0),("-",5)]
+    got=observables.apply_ops(x,states,states,g.Ns,ops)
+    ref=reference_apply(x,states,g.Ns,ops)
+    assert np.linalg.norm(got-ref)<1e-12
+
+    lower=np.array([
+        sum(1 << (g.Ns-1-i) for i in occ)
+        for occ in combinations(range(g.Ns),1)
+    ],dtype=np.uint64)
+    lower=np.sort(lower)[::-1]
+    ops=[("-",1),("-",7)]
+    got=observables.apply_ops(x,states,lower,g.Ns,ops)
+    ref=reference_apply_general(x,states,lower,g.Ns,ops)
+    assert np.linalg.norm(got-ref)<1e-12
 
     # The symmetry bridge reuses quspin_zeroT/run_zeroT.py.  Compare it with
     # full ED on a small problem when QuSpin is available.
