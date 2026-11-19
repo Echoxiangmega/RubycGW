@@ -178,6 +178,55 @@ def assemble_bloch_orbitals_numpy(
     return np.concatenate(parts, axis=1)
 
 
+def _sparse_jastrow_channels(shell_matrices: np.ndarray):
+    """Compress symmetric Jastrow matrices to upper-triangle pair lists.
+
+    For symmetric S, 0.5*dn^T S dn equals the sum over i<j of
+    S_ij*dn_i*dn_j plus half of diagonal terms.  Current Ruby channels have
+    zero diagonal, but the conversion keeps diagonal support for completeness.
+    """
+    mats=np.asarray(shell_matrices,np.float64)
+    if mats.ndim!=3 or mats.shape[1]!=mats.shape[2]:
+        raise ValueError("shell_matrices must have shape (n_channels,Ns,Ns)")
+    if np.max(np.abs(mats-mats.transpose(0,2,1)))>1e-12:
+        raise ValueError("Jastrow channel matrices must be symmetric")
+    ch=[]; ii=[]; jj=[]; vv=[]
+    for s,m in enumerate(mats):
+        rows,cols=np.nonzero(np.triu(np.abs(m)>0,k=0))
+        for i,j in zip(rows,cols):
+            val=float(m[i,j])*(0.5 if i==j else 1.0)
+            if val!=0.0:
+                ch.append(s);ii.append(i);jj.append(j);vv.append(val)
+    return (
+        np.asarray(ch,np.int32),
+        np.asarray(ii,np.int32),
+        np.asarray(jj,np.int32),
+        np.asarray(vv,np.float64),
+    )
+
+
+def _sparse_backflow_channels(backflow_matrices: np.ndarray):
+    """Compress directed nonzero backflow adjacency entries.
+
+    The dense formula sum_j B[k,i,j] dn[j] Q[j,:] is evaluated as a sparse
+    scatter-add over only nonzero directed graph entries.
+    """
+    mats=np.asarray(backflow_matrices,np.float64)
+    if mats.ndim!=3 or mats.shape[1]!=mats.shape[2]:
+        raise ValueError("backflow_matrices must have shape (n_channels,Ns,Ns)")
+    ch=[]; dst=[]; src=[]; vv=[]
+    for k,m in enumerate(mats):
+        rows,cols=np.nonzero(np.abs(m)>0)
+        for i,j in zip(rows,cols):
+            ch.append(k);dst.append(i);src.append(j);vv.append(float(m[i,j]))
+    return (
+        np.asarray(ch,np.int32),
+        np.asarray(dst,np.int32),
+        np.asarray(src,np.int32),
+        np.asarray(vv,np.float64),
+    )
+
+
 def build_supercell_netket_model(
     initial_blocks,
     sc_coords: np.ndarray,
@@ -193,6 +242,8 @@ def build_supercell_netket_model(
     point_characters: np.ndarray | None = None,
     time_reversal_even: bool = False,
     initial_tr_phase: float = 0.0,
+    sparse_correlators: bool = False,
+    packed_orbitals: bool = False,
 ):
     """Build a translation-exact ring3-supercell Slater-Jastrow-backflow model.
 
@@ -225,8 +276,24 @@ def build_supercell_netket_model(
     v0_np = None if initial_v is None else np.asarray(initial_v, np.float64)
     eta0_np = None if initial_eta is None else np.asarray(initial_eta, np.complex128)
 
+    if sparse_correlators:
+        j_ch_np,j_i_np,j_j_np,j_v_np=_sparse_jastrow_channels(shells_np)
+        if bf_np is not None:
+            bf_ch_np,bf_dst_np,bf_src_np,bf_v_np=_sparse_backflow_channels(bf_np)
+        else:
+            bf_ch_np=bf_dst_np=bf_src_np=bf_v_np=None
+    else:
+        j_ch_np=j_i_np=j_j_np=j_v_np=None
+        bf_ch_np=bf_dst_np=bf_src_np=bf_v_np=None
+
     ns = len(internal_np)
     nf = int(sum(x.shape[1] for x in blocks0))
+    nocc_np=np.asarray([x.shape[1] for x in blocks0],np.int32)
+    offsets_np=np.concatenate(([0],np.cumsum(nocc_np))).astype(np.int32)
+    packed0=(
+        np.concatenate([x for x in blocks0 if x.shape[1]],axis=1)
+        if nf else np.empty((18,0),np.complex128)
+    )
     nsc = len(np.unique(sc_np, axis=0))
     if k_np.shape[0] != len(blocks0):
         raise ValueError("kpoint/block count mismatch")
@@ -240,16 +307,29 @@ def build_supercell_netket_model(
         @nn.compact
         def __call__(self, n):
             params = []
-            for ik, b0 in enumerate(blocks0):
-                if b0.shape[1] == 0:
-                    params.append(None)
-                    continue
-
-                def init_block(key, arr=b0):
+            if packed_orbitals:
+                def init_packed(key):
                     del key
-                    return jnp.asarray(arr)
+                    return jnp.asarray(packed0)
+                Mpacked=self.param("M_packed",init_packed)
+                for ik,b0 in enumerate(blocks0):
+                    nki=int(nocc_np[ik])
+                    if nki==0:
+                        params.append(None)
+                    else:
+                        lo=int(offsets_np[ik]);hi=int(offsets_np[ik+1])
+                        params.append(Mpacked[:,lo:hi])
+            else:
+                for ik, b0 in enumerate(blocks0):
+                    if b0.shape[1] == 0:
+                        params.append(None)
+                        continue
 
-                params.append(self.param(f"M_{ik}", init_block))
+                    def init_block(key, arr=b0):
+                        del key
+                        return jnp.asarray(arr)
+
+                    params.append(self.param(f"M_{ik}", init_block))
 
             if use_jastrow:
                 def init_v(key):
@@ -282,8 +362,24 @@ def build_supercell_netket_model(
             sc = jnp.asarray(sc_np)
             internal = jnp.asarray(internal_np)
             ks = jnp.asarray(k_np)
-            shells = jnp.asarray(shells_np)
-            backflow = None if bf_np is None else jnp.asarray(bf_np)
+            shells = None if sparse_correlators else jnp.asarray(shells_np)
+            backflow = (
+                None if (bf_np is None or sparse_correlators)
+                else jnp.asarray(bf_np)
+            )
+            if sparse_correlators:
+                j_ch=jnp.asarray(j_ch_np); j_i=jnp.asarray(j_i_np)
+                j_j=jnp.asarray(j_j_np); j_v=jnp.asarray(j_v_np)
+                if bf_np is not None:
+                    bf_ch=jnp.asarray(bf_ch_np)
+                    bf_dst=jnp.asarray(bf_dst_np)
+                    bf_src=jnp.asarray(bf_src_np)
+                    bf_v=jnp.asarray(bf_v_np)
+                else:
+                    bf_ch=bf_dst=bf_src=bf_v=None
+            else:
+                j_ch=j_i=j_j=j_v=None
+                bf_ch=bf_dst=bf_src=bf_v=None
             maps = None if maps_np is None else jnp.asarray(maps_np)
             chars = None if chars_np is None else jnp.asarray(chars_np)
             filling = nf / ns
@@ -302,15 +398,34 @@ def build_supercell_netket_model(
             def base_logpsi(x):
                 occupied = jnp.nonzero(x, size=nf)[0]
                 dn = x - filling
-                if backflow is not None:
-                    dQ = jnp.einsum("k,kij,j,ja->ia", eta, backflow, dn, Q)
+                if bf_np is not None:
+                    if sparse_correlators:
+                        contrib=(
+                            eta[bf_ch,None]
+                            * bf_v[:,None]
+                            * dn[bf_src,None]
+                            * Q[bf_src,:]
+                        )
+                        dQ=jnp.zeros_like(Q).at[bf_dst,:].add(contrib)
+                    else:
+                        dQ = jnp.einsum(
+                            "k,kij,j,ja->ia", eta, backflow, dn, Q
+                        )
                     Qx = Q + dQ
                 else:
                     Qx = Q
                 A = Qx[occupied]
                 out = nk.jax.logdet_cmplx(A)
-                if use_jastrow and shells.shape[0] > 0:
-                    features = 0.5 * jnp.einsum("i,sij,j->s", dn, shells, dn)
+                if use_jastrow and shells_np.shape[0] > 0:
+                    if sparse_correlators:
+                        vals=j_v*dn[j_i]*dn[j_j]
+                        features=jnp.zeros(
+                            (shells_np.shape[0],),dtype=dn.dtype
+                        ).at[j_ch].add(vals)
+                    else:
+                        features = 0.5 * jnp.einsum(
+                            "i,sij,j->s", dn, shells, dn
+                        )
                     out = out + jnp.dot(v, features)
                 return out
 
@@ -324,7 +439,7 @@ def build_supercell_netket_model(
             def one(x):
                 if maps is None:
                     return base_logpsi(x)
-                sources = jax.vmap(lambda p: x[p])(maps)
+                sources = x[maps]
                 logs = jax.vmap(base_logpsi)(sources)
                 signs = jax.vmap(fock_sign)(maps, sources)
                 shift = jnp.max(jnp.real(logs))
@@ -340,20 +455,37 @@ def build_supercell_netket_model(
                 tiny = jnp.asarray(1e-300 + 0j, dtype=z.dtype)
                 return shift + jnp.log(jnp.where(jnp.abs(z) > 1e-300, z, tiny))
 
-            return jnp.vectorize(one, signature="(n)->()")(n)
+            n_arr=jnp.asarray(n)
+            leading=n_arr.shape[:-1]
+            flat=n_arr.reshape((-1,ns))
+            vals=jax.vmap(one)(flat)
+            return vals.reshape(leading)
 
     return SupercellBlochSlaterJastrow()
 
 
-def extract_supercell_parameters(parameters, nkpoints: int) -> dict:
+def extract_supercell_parameters(
+    parameters, nkpoints: int, occupations_per_k=None
+) -> dict:
     """Convert a NetKet/Flax parameter tree to NumPy warm-start arrays."""
     blocks = []
-    for ik in range(int(nkpoints)):
-        key = f"M_{ik}"
-        if key in parameters:
-            blocks.append(np.asarray(parameters[key], np.complex128))
-        else:
-            blocks.append(np.empty((18, 0), np.complex128))
+    if "M_packed" in parameters:
+        if occupations_per_k is None:
+            raise ValueError(
+                "occupations_per_k is required to unpack M_packed"
+            )
+        packed=np.asarray(parameters["M_packed"],np.complex128)
+        counts=np.asarray(occupations_per_k,int)
+        off=np.concatenate(([0],np.cumsum(counts)))
+        for ik in range(int(nkpoints)):
+            blocks.append(packed[:,off[ik]:off[ik+1]].copy())
+    else:
+        for ik in range(int(nkpoints)):
+            key = f"M_{ik}"
+            if key in parameters:
+                blocks.append(np.asarray(parameters[key], np.complex128))
+            else:
+                blocks.append(np.empty((18, 0), np.complex128))
     return {
         "blocks": blocks,
         "v": (
