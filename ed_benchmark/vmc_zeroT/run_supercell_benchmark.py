@@ -5,17 +5,20 @@ The 18-site ring3 cluster is treated as the variational unit cell.  A total
 L1 x L2 superlattice contains Ns=18*L1*L2 sites.  Ring3-supercell translation
 is exact in the Bloch orbital construction and is never explicitly projected.
 
-For L1=L2=1, exact ED is available and this runner compares:
+For L1=L2=1, exact ED is available and the recommended staged comparison is
   ED
   Raw-Supercell-Bloch
-  VAP-C3v-Supercell-Bloch
-  VAP-C3v-Supercell-Bloch + one exact Lanczos step
+  Tint-VAP                    (3 residual primitive translations)
+  Tint x C3v VAP             (18 fixed residual spatial images)
+  Tint x C3v + TR VAP        (18 spatial images + spinless T=K)
 
 This 1x1 case is deliberately designed as a fair comparison with the existing
 Hex18 benchmark: the raw one-body variational space is the same full complex
-18 x Nf matrix. The default C3v VAP sums only 6 residual point-group images,
-because ring3-supercell translations are exact in the ansatz, instead of the
-old primitive-translations x C3v spatial projection (18 images on ring3).
+18 x Nf matrix.  The 3 internal translations are exactly the primitive
+translation cosets inside the ring3 supercell, so Tint x C3v reproduces the
+same 18-element ordinary spatial group used by the historical Hex18 VAP.
+For larger systems the same 18-image residual group remains fixed because all
+ring3-supercell translations are already exact in the ansatz.
 
 For larger superlattices the runner currently performs MC optimization and
 saves the scalable ansatz state/parameters, but exact full-basis postprocessing
@@ -303,7 +306,7 @@ def train_one(
                 "Complex C3 m=1/2 sectors must be paired with their conjugates."
             )
 
-    if point_maps is not None:
+    if point_maps is not None and str(point_group_name).upper()!="TINT":
         ktot=np.asarray(seed_data["total_supercell_momentum"],float)
         dist=np.linalg.norm(ktot-np.rint(ktot))
         if dist>1e-9:
