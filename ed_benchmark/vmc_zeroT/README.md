@@ -1455,3 +1455,10 @@ The plots can also be regenerated without rerunning VMC:
 python ed_benchmark/vmc_zeroT/plot_supercell_seed_triptychs.py `
   --result-root results/supercell_1x1_N6_V5p5
 ```
+
+
+For the automatic per-seed triptychs, "final" means the highest-accuracy saved
+state: a corresponding `+1LS` state is preferred when available; otherwise
+the last VAP state is used.  The optional `pre_tr` triptych follows the same
+rule and is useful for inspecting a nonzero loop-current pattern before the
+finite-size TR restoration removes the one-point current.
