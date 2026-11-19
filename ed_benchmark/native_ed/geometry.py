@@ -18,11 +18,83 @@ BONDS = [(0,1,0,0,'t'),(0,2,0,0,'t'),(2,1,0,0,'t'),
          (3,4,0,0,'t'),(3,5,0,0,'t'),(4,5,0,0,'t'),
          (1,4,0,0,'t1'),(5,0,0,-1,'t1'),(2,3,-1,0,'t1'),
          (3,1,0,-1,'t2'),(2,5,0,0,'t2'),(0,4,-1,0,'t2')]
+def _rect_reps(nx, ny):
+    return [(i, j) for i in range(nx) for j in range(ny)]
+
+
+def _quotient_reps(matrix):
+    """Compact representatives of Z^2 / M Z^2 for a 2x2 integer matrix.
+
+    Candidates are taken in increasing real-space distance from the origin.
+    This is used only to construct finite tori; physical results do not depend
+    on which representative is chosen for each quotient class.
+    """
+    M = np.asarray(matrix, dtype=int)
+    det = int(round(np.linalg.det(M)))
+    d = abs(det)
+    if d < 1:
+        raise ValueError("Supercell matrix must have nonzero determinant")
+    adj = np.array([[M[1,1], -M[0,1]], [-M[1,0], M[0,0]]], dtype=int)
+    # Two primitive-cell vectors r,r' are equivalent iff
+    # adj(M)@(r-r') is divisible by det(M).
+    radius = max(2, d)
+    cand = [(i,j) for i in range(-radius, radius+1)
+                  for j in range(-radius, radius+1)]
+    cand.sort(key=lambda r: (
+        float(np.dot(A@np.asarray(r,float), A@np.asarray(r,float))),
+        abs(r[0])+abs(r[1]), r[0], r[1]
+    ))
+    reps = []
+    seen = set()
+    for r in cand:
+        key = tuple(int(x % d) for x in (adj @ np.asarray(r,dtype=int)))
+        if key in seen:
+            continue
+        seen.add(key)
+        reps.append(tuple(map(int,r)))
+        if len(reps) == d:
+            return reps
+    raise RuntimeError(f"Failed to enumerate quotient representatives for M={M.tolist()}")
+
+
+def _c3_matrix(a, b):
+    """C3-compatible hexagonal/triangular-lattice supercell.
+
+    M(a,b)=[[a,b],[-b,a+b]], det=a^2+a*b+b^2.
+    """
+    return [[int(a), int(b)], [-int(b), int(a+b)]]
+
+
+# Named finite tori.
+#
+# The LxL sequence is the preferred high-symmetry scaling family:
+# Ns=6 L^2 = 24,54,96,150,216,... and retains the full finite-torus
+# point-group compatibility of the primitive rhombus.
+#
+# The ringN entries are compact tilted C3-compatible tori with
+# N=a^2+a*b+b^2 primitive cells. They are useful for checking boundary-shape
+# dependence between the main LxL sizes.
 SPECS = {
-    '2x2': ([[2,0],[0,2]], [(0,0),(1,0),(0,1),(1,1)]),
-    '3x1': ([[3,0],[0,1]], [(0,0),(1,0),(2,0)]),
+    '2x2': ([[2,0],[0,2]], _rect_reps(2,2)),
+    '3x3': ([[3,0],[0,3]], _rect_reps(3,3)),
+    '4x4': ([[4,0],[0,4]], _rect_reps(4,4)),
+    '5x5': ([[5,0],[0,5]], _rect_reps(5,5)),
+    '6x6': ([[6,0],[0,6]], _rect_reps(6,6)),
+    '3x1': ([[3,0],[0,1]], _rect_reps(3,1)),
     'ring3': ([[1,1],[-1,2]], [(0,0),(1,0),(1,1)]),
 }
+
+for _name, _ab in {
+    'ring7': (2,1),     # 42 sites
+    'ring12': (2,2),    # 72 sites
+    'ring13': (3,1),    # 78 sites
+    'ring19': (3,2),    # 114 sites
+    'ring21': (4,1),    # 126 sites
+    'ring28': (4,2),    # 168 sites
+    'ring31': (5,1),    # 186 sites
+}.items():
+    _M = _c3_matrix(*_ab)
+    SPECS[_name] = (_M, _quotient_reps(_M))
 # A physical hexagon center. Its 60-degree rotations exchange t1 and t2.
 POINT_CENTER = np.array([0., -2.-SQ3/2])
 
