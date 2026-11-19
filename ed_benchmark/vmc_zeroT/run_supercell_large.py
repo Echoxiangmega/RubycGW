@@ -217,8 +217,8 @@ def _current_operators(hi,g):
                 1j*t*(cdag(hi,i)@c(hi,j))
                 -1j*t*(cdag(hi,j)@c(hi,i))
             )
-        same += loopop/ntri
-        opp += sign_ab*loopop/ntri
+        same += (1.0/ntri)*loopop
+        opp += (sign_ab/ntri)*loopop
 
     def collect(op):
         try:
@@ -542,7 +542,15 @@ def parser():
         default="bond_aware",
     )
     p.add_argument("--jastrow-shells",type=int,default=4)
-    p.add_argument("--c3v-irrep",choices=["A1","A2"],default="A2")
+    p.add_argument(
+        "--c3v-irrep",
+        choices=["A1","A2","E","both","all"],
+        default="both",
+        help=(
+            "Residual C3v sector(s). both=A1+A2; all=A1+A2+E. "
+            "Raw and Tint are optimized once and shared by all requested sectors."
+        ),
+    )
 
     p.add_argument("--raw-iter",type=int,default=50)
     p.add_argument("--tint-iter",type=int,default=50)
@@ -617,7 +625,27 @@ def main():
 
     spatial_ops=internal_c3v_space_group_site_maps(g)
     spatial_maps=np.asarray([p for _,p in spatial_ops],np.int32)
-    spatial_chars=internal_gamma_c3v_characters(a.c3v_irrep)
+
+    if a.c3v_irrep=="both":
+        requested_irreps=["A1","A2"]
+    elif a.c3v_irrep=="all":
+        requested_irreps=["A1","A2","E"]
+    else:
+        requested_irreps=[a.c3v_irrep]
+
+    # The full residual group is Tint x C3v. At internal Gamma the
+    # characters of the one-dimensional irreps are repeated across the three
+    # translation cosets. For E we use the central character projector,
+    # proportional to [2,-1,-1,0,0,0] on every Tint coset.
+    spatial_chars_by_irrep={}
+    for ir in requested_irreps:
+        if ir in ("A1","A2"):
+            spatial_chars_by_irrep[ir]=internal_gamma_c3v_characters(ir)
+        else:
+            from symmetry_projection import c3v_irrep_characters
+            spatial_chars_by_irrep[ir]=np.tile(
+                c3v_irrep_characters("E"),3
+            ).astype(np.complex128)
 
     settings={
         **vars(a),
@@ -629,6 +657,7 @@ def main():
         "packed_orbitals":True,
         "internal_translation_images":3,
         "full_residual_spatial_images":18,
+        "requested_c3v_irreps":requested_irreps,
         "notes":[
             "No ED/full-state enumeration is performed.",
             "QGTOnTheFly+CG is matrix-free and is the default.",
@@ -706,52 +735,54 @@ def main():
             )
         rows.append(tint_summary)
 
-        spatial_dir=out/(
-            f"large_tint_c3v_{a.correlator}__{a.c3v_irrep}__{seed}"
-        )
-        if a.reuse_spatial:
-            spatial_summary,params=_load_params(spatial_dir)
-        else:
-            spatial_summary,params=_stage(
-                stage_name="Tint+C3v",
-                directory=spatial_dir,
-                g=g,nf=nf,V=a.V,
-                hi=hi,H_fast=H_fast,graph=graph,current_ops=current_ops,
-                seed_data=seed_data,
-                shell_mats=shell_mats,bf_mats=bf_mats,
-                use_backflow=use_backflow,
-                initial_params=params,
-                maps=spatial_maps,chars=spatial_chars,
-                point_label=a.c3v_irrep,
-                time_reversal_even=False,
-                n_iter=a.spatial_iter,
-                learning_rate=a.spatial_learning_rate,
-                args=a,rng_seed=base_seed+3,
+        for ir in requested_irreps:
+            spatial_chars=spatial_chars_by_irrep[ir]
+            spatial_dir=out/(
+                f"large_tint_c3v_{a.correlator}__{ir}__{seed}"
             )
-        rows.append(spatial_summary)
+            if a.reuse_spatial:
+                spatial_summary,spatial_params=_load_params(spatial_dir)
+            else:
+                spatial_summary,spatial_params=_stage(
+                    stage_name="Tint+C3v",
+                    directory=spatial_dir,
+                    g=g,nf=nf,V=a.V,
+                    hi=hi,H_fast=H_fast,graph=graph,current_ops=current_ops,
+                    seed_data=seed_data,
+                    shell_mats=shell_mats,bf_mats=bf_mats,
+                    use_backflow=use_backflow,
+                    initial_params=params,
+                    maps=spatial_maps,chars=spatial_chars,
+                    point_label=ir,
+                    time_reversal_even=False,
+                    n_iter=a.spatial_iter,
+                    learning_rate=a.spatial_learning_rate,
+                    args=a,rng_seed=base_seed+3+17*requested_irreps.index(ir),
+                )
+            rows.append(spatial_summary)
 
-        if a.restore_time_reversal:
-            tr_dir=out/(
-                f"large_tint_c3vtr_{a.correlator}__"
-                f"{a.c3v_irrep}__{seed}"
-            )
-            tr_summary,params=_stage(
-                stage_name="Tint+C3v+TR",
-                directory=tr_dir,
-                g=g,nf=nf,V=a.V,
-                hi=hi,H_fast=H_fast,graph=graph,current_ops=current_ops,
-                seed_data=seed_data,
-                shell_mats=shell_mats,bf_mats=bf_mats,
-                use_backflow=use_backflow,
-                initial_params=params,
-                maps=spatial_maps,chars=spatial_chars,
-                point_label=a.c3v_irrep,
-                time_reversal_even=True,
-                n_iter=a.tr_iter,
-                learning_rate=a.tr_learning_rate,
-                args=a,rng_seed=base_seed+4,
-            )
-            rows.append(tr_summary)
+            if a.restore_time_reversal:
+                tr_dir=out/(
+                    f"large_tint_c3vtr_{a.correlator}__"
+                    f"{ir}__{seed}"
+                )
+                tr_summary,_=_stage(
+                    stage_name="Tint+C3v+TR",
+                    directory=tr_dir,
+                    g=g,nf=nf,V=a.V,
+                    hi=hi,H_fast=H_fast,graph=graph,current_ops=current_ops,
+                    seed_data=seed_data,
+                    shell_mats=shell_mats,bf_mats=bf_mats,
+                    use_backflow=use_backflow,
+                    initial_params=spatial_params,
+                    maps=spatial_maps,chars=spatial_chars,
+                    point_label=ir,
+                    time_reversal_even=True,
+                    n_iter=a.tr_iter,
+                    learning_rate=a.tr_learning_rate,
+                    args=a,rng_seed=base_seed+4+17*requested_irreps.index(ir),
+                )
+                rows.append(tr_summary)
 
         _write_csv(out/"large_supercell_summary.csv",rows)
 
@@ -759,6 +790,7 @@ def main():
     for r in rows:
         print(
             f"  seed={r['seed']:11s} stage={r['stage']:14s} "
+            f"irrep={str(r.get('point_label','-')):4s} "
             f"E={r['mc_E']:+.8f} +/- {r['mc_E_error']:.2e} "
             f"SCO={r['S_CO']:.5g} "
             f"SLC-={r['S_LC_opposite']:.5g} "
