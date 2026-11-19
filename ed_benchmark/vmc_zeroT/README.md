@@ -1358,3 +1358,100 @@ python ed_benchmark/vmc_zeroT/run_supercell_benchmark.py `
 `--reuse-point-group` loads the saved C3v parameters and, on the 1x1
 benchmark, the saved exact projected wavefunction to choose a non-cancelling
 initial TR phase.
+
+
+### Staged residual-space VAP: internal translation -> C3v -> TR
+
+The recommended supercell benchmark path now restores the residual spatial
+symmetry in stages:
+
+```text
+Raw
+  -> Tint VAP
+  -> Tint x C3v VAP
+  -> Tint x C3v + TR VAP
+```
+
+Here
+
+[
+T_{\rm int}=T_{\rm primitive}/T_{\rm ring3}\cong Z_3
+]
+
+contains exactly three primitive-translation cosets inside the 18-site ring3
+variational supercell.  The full residual spatial projector therefore has
+
+[
+3\times 6=18
+]
+
+images, independent of the total (L_1\times L_2) number of ring3
+supercells.  Supercell translations themselves are never summed explicitly.
+
+For the current 1x1, Nf=6, V=5.5 benchmark, reuse the already completed Raw
+states and run the new staged refinement with
+
+```powershell
+python ed_benchmark/vmc_zeroT/run_supercell_benchmark.py `
+  --L1 1 --L2 1 --nf 6 `
+  --t 1 --t1 0.5 --t2 -0.5 --V 5.5 `
+  --seeds normal sd isd lc_same lc_opposite `
+  --correlator backflow `
+  --point-group c3v `
+  --jastrow-mode bond_aware --jastrow-shells 4 `
+  --n-samples 4096 `
+  --skip-raw `
+  --internal-translation-iter 100 `
+  --internal-translation-learning-rate 0.01 `
+  --full-spatial-iter 100 `
+  --full-spatial-learning-rate 0.01 `
+  --restore-time-reversal `
+  --tr-iter 100 --tr-learning-rate 0.01 `
+  --output results/supercell_1x1_N6_V5p5
+```
+
+The stage directories are
+
+```text
+supercell_tint_backflow__Gamma__<seed>/
+supercell_tint_c3v_backflow__A2__<seed>/
+supercell_tint_c3vtr_backflow__A2__<seed>/
+```
+
+for the current unique A2 exact ground state.  Each stage records its explicit
+image count and timing, so the optimization effect of the 3-image internal
+translation stage can be separated from the 18-image full residual spatial
+stage.
+
+Use `--reuse-internal-translation` to reuse an existing Tint stage and
+`--reuse-point-group` to reuse an existing Tint x C3v stage.
+
+### Per-seed site/bond/current triptychs
+
+For 1x1 exact benchmarks the runner automatically creates
+
+```text
+seed_final_maps/<seed>/final/site_bond_current_triptych.png
+seed_final_maps/<seed>/final/site_bond_current_triptych.svg
+```
+
+for every seed.  The three panels are site density, bond order and directed
+bond current.
+
+If TR restoration is enabled, the final TR-even current panel should vanish
+up to numerical noise.  Therefore the default also saves the preceding
+TR-broken residual-spatial branch:
+
+```text
+seed_final_maps/<seed>/pre_tr/site_bond_current_triptych.png
+```
+
+together with `site_density.csv`, `bond_observables.csv` and
+`summary.json`.
+
+The plots can also be regenerated without rerunning VMC:
+
+```powershell
+python ed_benchmark/vmc_zeroT/plot_supercell_seed_triptychs.py `
+  --result-root results/supercell_1x1_N6_V5p5
+```
