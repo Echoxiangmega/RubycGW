@@ -276,19 +276,46 @@ def _memory_estimates(n_parameters,n_samples):
 
 
 def _qgt_and_solver(nk,jax,args):
-    if args.qgt=="onthefly":
+    """Choose a QGT implementation compatible with the mixed real/complex ansatz.
+
+    The current large-supercell model always has a real Jastrow leaf v and
+    complex orbital/backflow leaves.  It is therefore non-holomorphic as a
+    parameter PyTree.  QGTOnTheFly + CG can map the real v tangent to complex
+    output, which violates JAX CG's fixed-leaf-dtype requirement.  The safe
+    memory-scalable choice is QGTJacobianPyTree(mode="complex"): it stores the
+    Jacobian but never constructs the dense P x P QGT.
+    """
+    requested=str(args.qgt).lower()
+    if requested=="dense":
+        effective="dense"
         qgt=partial(
-            nk.optimizer.qgt.QGTOnTheFly,
+            nk.optimizer.qgt.QGTJacobianDense,
+            mode="complex",
+            holomorphic=False,
             chunk_size=args.qgt_chunk_size,
         )
-    elif args.qgt=="pytree":
+    elif requested=="pytree":
+        effective="pytree"
         qgt=partial(
             nk.optimizer.qgt.QGTJacobianPyTree,
             mode="complex",
+            holomorphic=False,
+            chunk_size=args.qgt_chunk_size,
+        )
+    elif requested in ("auto","onthefly"):
+        # Even an explicit --qgt onthefly request is redirected because the
+        # present parameter tree is mixed float64/complex128.  This preserves
+        # the physical real-Jastrow ansatz instead of complexifying v merely
+        # to satisfy the iterative solver.
+        effective="pytree"
+        qgt=partial(
+            nk.optimizer.qgt.QGTJacobianPyTree,
+            mode="complex",
+            holomorphic=False,
             chunk_size=args.qgt_chunk_size,
         )
     else:
-        raise ValueError(args.qgt)
+        raise ValueError(requested)
 
     if args.sr_solver=="cg":
         solver=partial(
@@ -306,7 +333,7 @@ def _qgt_and_solver(nk,jax,args):
         )
     else:
         raise ValueError(args.sr_solver)
-    return qgt,solver
+    return qgt,solver,effective
 
 
 def _stage(
@@ -388,7 +415,15 @@ def _stage(
     warm=vstate.expect(H_fast)
     warmup_s=time.perf_counter()-tw
 
-    qgt_ctor,solver=_qgt_and_solver(nk,jax,args)
+    qgt_ctor,solver,effective_qgt=_qgt_and_solver(nk,jax,args)
+    if str(args.qgt).lower()=="onthefly" and effective_qgt!="onthefly":
+        print(
+            "[QGT] requested onthefly, but this ansatz has mixed real/complex "
+            "parameters (real Jastrow v, complex orbitals/backflow). "
+            "Falling back to QGTJacobianPyTree(mode='complex') + iterative "
+            "solver; no dense P x P QGT is formed.",
+            flush=True,
+        )
     optimizer=nk.optimizer.Sgd(learning_rate=learning_rate)
     try:
         sr=nk.optimizer.SR(
@@ -415,7 +450,7 @@ def _stage(
     print(
         f"[large {stage_name}] Ns={g.Ns} Nf={nf} "
         f"params={vstate.n_parameters} images={n_images} "
-        f"sweep={sweep_size} qgt={args.qgt}/{args.sr_solver}",
+        f"sweep={sweep_size} qgt={args.qgt}->{effective_qgt}/{args.sr_solver}",
         flush=True,
     )
 
@@ -472,7 +507,10 @@ def _stage(
         "n_parameters":int(vstate.n_parameters),
         "packed_orbitals":True,
         "sparse_correlators":True,
-        "qgt":args.qgt,
+        "qgt_requested":args.qgt,
+        "qgt":effective_qgt,
+        "qgt_mode":"complex",
+        "qgt_holomorphic":False,
         "sr_solver":args.sr_solver,
         "cg_tol":float(args.cg_tol),
         "cg_maxiter":int(args.cg_maxiter),
@@ -573,7 +611,13 @@ def parser():
     p.add_argument("--chunk-size",type=int,default=256)
 
     p.add_argument(
-        "--qgt",choices=["onthefly","pytree"],default="onthefly"
+        "--qgt",choices=["auto","pytree","onthefly","dense"],default="auto",
+        help=(
+            "QGT backend. auto selects QGTJacobianPyTree(mode=complex) for "
+            "the mixed real/complex ansatz. onthefly is accepted for backward "
+            "compatibility but safely falls back to pytree. dense is for small "
+            "profiling only."
+        ),
     )
     p.add_argument(
         "--sr-solver",choices=["cg","gmres"],default="cg"
@@ -660,7 +704,7 @@ def main():
         "requested_c3v_irreps":requested_irreps,
         "notes":[
             "No ED/full-state enumeration is performed.",
-            "QGTOnTheFly+CG is matrix-free and is the default.",
+            "Mixed real/complex parameters use QGTJacobianPyTree(mode=complex)+iterative solver by default; the dense P x P QGT is not formed.",
             "Metropolis sweep_size defaults to Nf rather than Ns.",
             "Determinant evaluation remains stateless/exact; no inverse cache is used.",
         ],
