@@ -1707,7 +1707,7 @@ The production runner therefore defaults to
 which currently selects
 
 ```text
-QGTJacobianPyTree(mode="complex", holomorphic=False) + iterative CG
+QGTJacobianPyTree(mode="complex") + iterative CG
 ```
 
 for this ansatz. This stores the sample Jacobian but does **not** construct the
@@ -1715,3 +1715,10 @@ dense (P\times P) QGT. An explicit `--qgt onthefly` request is accepted for
 backward compatibility but is automatically redirected to the same safe
 PyTree implementation with a console message. `--qgt dense` is retained only
 for small profiling runs.
+
+
+NetKet QGT note: for `QGTJacobianPyTree` and `QGTJacobianDense`, the
+production runner passes `mode="complex"` only. Recent NetKet versions reject
+specifying both `mode` and `holomorphic` in the same constructor. Complex
+mode is the general Jacobian representation for complex-valued wave functions
+with mixed real/complex parameters.
