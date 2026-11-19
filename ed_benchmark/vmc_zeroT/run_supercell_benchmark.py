@@ -261,7 +261,8 @@ def train_one(
     n_samples,n_discard,n_chains,n_iter,learning_rate,diag_shift,
     rng_seed,chunk_size,
     output_dir,dir_name,method_name,
-    point_maps=None,point_chars=None,c3_m=None,
+    point_maps=None,point_chars=None,
+    point_group_name=None,point_label=None,c3_m=None,
     time_reversal_even=False,initial_tr_phase_override=None,
     initial_params=None,
     native_H=None,ed_gs=None,ed_row=None,
@@ -287,22 +288,22 @@ def train_one(
     if tr0 is None:
         tr0=0.0
 
-    if time_reversal_even and c3_m is not None and int(c3_m)%3 != 0:
-        raise RuntimeError(
-            "The current C3+TR implementation is restricted to the real C3 m=0 "
-            "irrep. For m=1/2, TR pairs conjugate C3 irreps and requires an "
-            "explicit paired-sector construction."
-        )
+    if time_reversal_even and point_chars is not None:
+        if np.max(np.abs(np.imag(np.asarray(point_chars,complex))))>1e-10:
+            raise RuntimeError(
+                "TR restoration requires a real point-group character projector. "
+                "Complex C3 m=1/2 sectors must be paired with their conjugates."
+            )
 
     if point_maps is not None:
         ktot=np.asarray(seed_data["total_supercell_momentum"],float)
         dist=np.linalg.norm(ktot-np.rint(ktot))
         if dist>1e-9:
             raise RuntimeError(
-                "C3-only projection requires a C3-compatible supercell-translation "
-                "sector. The fixed seed occupation pattern has total supercell "
-                f"momentum {ktot.tolist()}, not Gamma. Choose a closed-shell/filling "
-                "or run this branch without C3 projection."
+                "Point-group projection requires a compatible Gamma total "
+                "supercell-translation sector. The fixed seed occupation pattern "
+                f"has total supercell momentum {ktot.tolist()}, not Gamma. "
+                "Choose a closed-shell/filling or run without point-group projection."
             )
 
     model=build_supercell_netket_model(
@@ -395,6 +396,8 @@ def train_one(
             "supercell_translation_built_in":True,
             "explicit_projection_images":n_images,
             "c3_m":c3_m,
+            "point_group":point_group_name,
+            "point_irrep":point_label,
             "time_reversal_restored":bool(time_reversal_even),
             "initial_tr_phase":float(tr0) if time_reversal_even else None,
             "n_parameters":int(vstate.n_parameters),
@@ -475,6 +478,8 @@ def train_one(
         "supercell_translation_built_in":True,
         "explicit_projection_images":n_images,
         "c3_m":c3_m,
+        "point_group":point_group_name,
+        "point_irrep":point_label,
         "time_reversal_restored":bool(time_reversal_even),
         "initial_tr_phase":float(tr0) if time_reversal_even else None,
         "optimized_tr_phase":params.get("tr_phase",None),
