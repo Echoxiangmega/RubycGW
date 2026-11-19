@@ -565,6 +565,10 @@ def parser():
     p.add_argument("--rng-seed", type=int, default=2026)
     p.add_argument("--ed-k", type=int, default=12)
     p.add_argument(
+        "--ed-sector-low", type=int, default=4,
+        help="Lowest eigenpairs computed in each native symmetry block."
+    )
+    p.add_argument(
         "--ed-backend", choices=["auto", "full", "symmetry"], default="auto",
         help="auto uses full sparse ED on Hex18 and the native NumPy/SciPy symmetry-blocked ED on 2x2."
     )
@@ -606,9 +610,14 @@ def main():
         )
     H, evals, ed_gs, ed_row = solve_ed(
         g, a.nf, a.V, k=a.ed_k, degeneracy_tol=a.ed_degeneracy_tol,
-        backend=a.ed_backend,
+        backend=a.ed_backend, sector_low=a.ed_sector_low,
     )
     if ed_row.get("ground_manifold_truncated"):
+        if ed_row.get("ed_backend") == "native_symmetry_blocks":
+            raise RuntimeError(
+                "ED ground manifold truncated inside a symmetry block; "
+                "increase --ed-sector-low"
+            )
         raise RuntimeError("ED ground manifold truncated; increase --ed-k")
 
     # The 24-site native symmetry ED already validates a complete, non-overlapping
