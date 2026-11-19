@@ -303,6 +303,20 @@ def _stage(
     _save_params(directory/"final_params.npz",params,seed_data)
     atomic_json(directory/"history.json",_history(log))
 
+    def _scalar_stat(obj,name):
+        try:
+            x=getattr(obj,name)
+            arr=np.asarray(x)
+            return float(np.real(arr.reshape(-1)[0]))
+        except Exception:
+            return None
+
+    acceptance=None
+    try:
+        acceptance=float(np.asarray(vstate.sampler_state.acceptance).mean())
+    except Exception:
+        pass
+
     summary={
         "stage":stage_name,
         "Ns":int(g.Ns),"Nf":int(nf),"V":float(V),
@@ -336,6 +350,9 @@ def _stage(
         "warmup_E_error":stats_error(warm),
         "mc_E":float(np.real(final_stats.mean)),
         "mc_E_error":stats_error(final_stats),
+        "mc_tau_corr":_scalar_stat(final_stats,"tau_corr"),
+        "mc_R_hat":_scalar_stat(final_stats,"R_hat"),
+        "sampler_acceptance":acceptance,
         "time_setup_s":float(setup_s),
         "time_jit_warmup_s":float(warmup_s),
         "time_opt_s":float(opt_s),
