@@ -87,16 +87,10 @@ def main():
     ref=reference_apply_general(x,states,lower,g.Ns,ops)
     assert np.linalg.norm(got-ref)<1e-12
 
-    # The symmetry bridge reuses quspin_zeroT/run_zeroT.py.  Compare it with
-    # full ED on a small problem when QuSpin is available.
-    try:
-        _,_,_,full=solve_ed(g,3,1.3,k=6,degeneracy_tol=1e-8,backend="full")
-        _,_,_,sym=solve_ed(g,3,1.3,k=6,degeneracy_tol=1e-8,backend="symmetry")
-        assert abs(full["E"]-sym["E"])<1e-9,(full["E"],sym["E"])
-    except RuntimeError as exc:
-        if "QuSpin import failed" not in str(exc):
-            raise
-        print("QuSpin unavailable: symmetry-ED bridge energy cross-check skipped")
+    # Native symmetry ED must reproduce the full-basis result on a small case.
+    _,_,_,full=solve_ed(g,3,1.3,k=6,degeneracy_tol=1e-8,backend="full")
+    _,_,_,sym=solve_ed(g,3,1.3,k=6,degeneracy_tol=1e-8,backend="symmetry")
+    assert abs(full["E"]-sym["E"])<1e-9,(full["E"],sym["E"])
 
     g2=geometry.RubyPBC("2x2",t=1.0,t1=0.5,t2=-0.5)
     assert g2.Ns==24
