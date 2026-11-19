@@ -136,6 +136,11 @@ def seed_bloch_blocks(
     shell_gap = None
     if 0 < nf < len(levels):
         shell_gap = float(levels[nf][0] - levels[nf - 1][0])
+    total_k = np.mod(
+        np.sum(np.asarray(counts,float)[:,None] * kpoints, axis=0),
+        1.0,
+    )
+    total_k[np.isclose(total_k,1.0,atol=1e-10)] = 0.0
 
     return {
         "blocks": blocks,
@@ -146,6 +151,7 @@ def seed_bloch_blocks(
         "star_formfactor": star,
         "one_body_levels": np.asarray([x[0] for x in levels], float),
         "shell_gap": shell_gap,
+        "total_supercell_momentum": total_k,
         "Q0_full": Q,
     }
 
