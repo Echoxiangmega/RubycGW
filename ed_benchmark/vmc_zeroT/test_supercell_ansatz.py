@@ -18,6 +18,7 @@ from supercell_ansatz import (
     seed_bloch_blocks,
     assemble_bloch_orbitals_numpy,
 )
+from symmetry_projection import c3v_site_maps
 
 
 def projector(Q):
@@ -35,6 +36,10 @@ def main():
     assert [(e.i,e.j,e.kind,e.delta,e.winding) for e in g.edges] == [
         (e.i,e.j,e.kind,e.delta,e.winding) for e in old.edges
     ]
+
+    ops1=c3v_site_maps(g)
+    assert len(ops1)==6
+    assert len({tuple(map(int,p)) for _,p in ops1})==6
 
     f_old=ruby_star_formfactor(old)
     f_new=ring3_periodic_star_formfactor(g,1,1)
@@ -58,6 +63,9 @@ def main():
     # the two ring3-supercell translations.
     big=geometry.make_ring3_supercell(2,2,t=1.0,t1=0.5,t2=-0.5)
     assert big.Ns==72 and big.num_cells==12
+    ops2=c3v_site_maps(big)
+    assert len(ops2)==6
+    assert len({tuple(map(int,p)) for _,p in ops2})==6
     data=seed_bloch_blocks(big,24,2,2,"sd",0.08)
     assert sum(data["occupations_per_k"])==24
     Q=assemble_bloch_orbitals_numpy(
@@ -79,6 +87,7 @@ def main():
     print("1x1: exact Hex18 one-body variational space")
     print("2x2 ring3 superlattice: Ns=",big.Ns,
           "occupations_per_k=",data["occupations_per_k"].tolist())
+    print("C3v residual point group: 6 distinct site maps on 1x1 and 2x2")
 
 
 if __name__=="__main__":
