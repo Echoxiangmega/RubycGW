@@ -191,6 +191,8 @@ def build_supercell_netket_model(
     initial_eta: np.ndarray | None = None,
     point_site_maps: np.ndarray | None = None,
     point_characters: np.ndarray | None = None,
+    time_reversal_even: bool = False,
+    initial_tr_phase: float = 0.0,
 ):
     """Build a translation-exact ring3-supercell Slater-Jastrow-backflow model.
 
@@ -269,6 +271,14 @@ def build_supercell_netket_model(
             else:
                 eta = None
 
+            if time_reversal_even:
+                tr_phase = self.param(
+                    "tr_phase",
+                    lambda key: jnp.asarray(initial_tr_phase, dtype=jnp.float64),
+                )
+            else:
+                tr_phase = None
+
             sc = jnp.asarray(sc_np)
             internal = jnp.asarray(internal_np)
             ks = jnp.asarray(k_np)
@@ -320,6 +330,13 @@ def build_supercell_netket_model(
                 shift = jnp.max(jnp.real(logs))
                 amps = jnp.exp(logs - shift)
                 z = jnp.sum(jnp.conj(chars) * signs * amps)
+                if time_reversal_even:
+                    # Spinless T=K in the occupation basis.  The trainable
+                    # phase spans all TR-even real rays associated with the
+                    # C3-projected state, without restoring translations or
+                    # mirrors.
+                    phase = jnp.exp(1j * tr_phase)
+                    z = phase * z + jnp.conj(phase * z)
                 tiny = jnp.asarray(1e-300 + 0j, dtype=z.dtype)
                 return shift + jnp.log(jnp.where(jnp.abs(z) > 1e-300, z, tiny))
 
@@ -346,5 +363,9 @@ def extract_supercell_parameters(parameters, nkpoints: int) -> dict:
         "eta": (
             np.asarray(parameters["eta"], np.complex128)
             if "eta" in parameters else np.empty(0, complex)
+        ),
+        "tr_phase": (
+            float(np.asarray(parameters["tr_phase"]))
+            if "tr_phase" in parameters else None
         ),
     }
