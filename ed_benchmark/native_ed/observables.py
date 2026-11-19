@@ -59,8 +59,19 @@ def apply_ops(ket, ket_states, bra_states, Ns, ops):
 
     idx_active=active[valid]
     targets=new[valid]
-    row=np.searchsorted(bra_states,targets)
-    if np.any(row>=len(bra_states)) or np.any(bra_states[row]!=targets):
+    if len(bra_states)<=1 or bra_states[0]<=bra_states[-1]:
+        row=np.searchsorted(bra_states,targets)
+        ok=(row<len(bra_states))
+        if np.any(ok):
+            ok[ok] &= bra_states[row[ok]]==targets[ok]
+    else:
+        rev=bra_states[::-1]
+        pos=np.searchsorted(rev,targets)
+        ok=(pos<len(rev))
+        if np.any(ok):
+            ok[ok] &= rev[pos[ok]]==targets[ok]
+        row=(len(bra_states)-1-pos)
+    if not np.all(ok):
         raise RuntimeError('Applied operator produced a state outside the bra basis')
     np.add.at(out,row,sign[valid]*ket[idx_active])
     return out
