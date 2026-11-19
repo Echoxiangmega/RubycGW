@@ -363,6 +363,75 @@ def build_c3_group(g, states):
     ]
 
 
+def c3v_site_maps(g):
+    """Ordinary C3v point group only: E, C3, C3^2 and three mirrors.
+
+    No translations are included.  This is the residual point group used by
+    the ring3-supercell ansatz, where supercell translations are exact by
+    construction.
+    """
+    ident = np.arange(g.Ns, dtype=np.int64)
+    point = g.point_maps()
+    c3 = point.get("C3")
+    if c3 is None:
+        raise RuntimeError("ordinary C3 unavailable")
+    mirrors = point.get("mirrors", {})
+    if len(mirrors) != 3:
+        raise RuntimeError(
+            f"ordinary C3v requires exactly three mirrors; found {len(mirrors)}"
+        )
+    c3 = np.asarray(c3, dtype=np.int64)
+    out = [
+        ("E", ident),
+        ("C3", c3),
+        ("C3^2", compose_site_maps(c3, c3)),
+    ]
+    out.extend(
+        (f"M{angle}", np.asarray(p, dtype=np.int64))
+        for angle, p in sorted(mirrors.items(), key=lambda x: float(x[0]))
+    )
+    # Guard against an accidental duplicate map on a very small torus.
+    keys = [tuple(map(int, p)) for _, p in out]
+    if len(set(keys)) != 6:
+        raise RuntimeError("C3v point maps are not six distinct operations")
+    return out
+
+
+def build_c3v_group(g, states):
+    return [
+        second_quantize_site_map(states, g.Ns, p, name=name)
+        for name, p in c3v_site_maps(g)
+    ]
+
+
+def c3v_irrep_characters(irrep: str) -> np.ndarray:
+    """Characters for the one-dimensional ordinary C3v irreps A1/A2.
+
+    Ordering matches c3v_site_maps: E, C3, C3^2, M1, M2, M3.
+    """
+    ir = str(irrep).upper()
+    if ir == "A1":
+        return np.ones(6, dtype=np.complex128)
+    if ir == "A2":
+        return np.asarray([1, 1, 1, -1, -1, -1], np.complex128)
+    raise ValueError("Only one-dimensional C3v irreps A1 and A2 are supported")
+
+
+def c3v_from_characters(characters, tol=1e-6):
+    """Identify A1/A2 from six one-dimensional C3v characters."""
+    ch = np.asarray(characters, complex)
+    if ch.shape != (6,):
+        return {"irrep": None, "label": "unknown"}
+    a1 = c3v_irrep_characters("A1")
+    a2 = c3v_irrep_characters("A2")
+    e1 = float(np.max(np.abs(ch-a1)))
+    e2 = float(np.max(np.abs(ch-a2)))
+    if min(e1, e2) > tol:
+        return {"irrep": None, "label": "unknown", "error": min(e1, e2)}
+    ir = "A1" if e1 <= e2 else "A2"
+    return {"irrep": ir, "label": ir, "error": min(e1, e2)}
+
+
 def _find_group_operation(group, site_map):
     target = np.asarray(site_map, dtype=np.int64)
     for i, op in enumerate(group):
