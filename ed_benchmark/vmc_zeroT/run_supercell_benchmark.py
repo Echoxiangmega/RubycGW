@@ -161,11 +161,17 @@ def _save_history(path,log):
 
 def _warm_blocks(params,seed_data):
     if params is None:
-        return [np.asarray(x,np.complex128) for x in seed_data["blocks"]],None,None
+        return [np.asarray(x,np.complex128) for x in seed_data["blocks"]],None,None,None
     blocks=[np.asarray(x,np.complex128) for x in params["blocks"]]
     v=np.asarray(params.get("v",[]),float)
     eta=np.asarray(params.get("eta",[]),complex)
-    return blocks,(None if v.size==0 else v),(None if eta.size==0 else eta)
+    tr=params.get("tr_phase",None)
+    return (
+        blocks,
+        (None if v.size==0 else v),
+        (None if eta.size==0 else eta),
+        (None if tr is None else float(tr)),
+    )
 
 
 def train_one(
@@ -178,6 +184,7 @@ def train_one(
     rng_seed,chunk_size,
     output_dir,dir_name,method_name,
     point_maps=None,point_chars=None,c3_m=None,
+    time_reversal_even=False,initial_tr_phase_override=None,
     initial_params=None,
     native_H=None,ed_gs=None,ed_row=None,
     diagnostic_projectors=None,
@@ -196,7 +203,11 @@ def train_one(
     seed_data=seed_bloch_blocks(
         g,nf,l1,l2,seed_name,seed_amplitude
     )
-    blocks0,v0,eta0=_warm_blocks(initial_params,seed_data)
+    blocks0,v0,eta0,tr0=_warm_blocks(initial_params,seed_data)
+    if initial_tr_phase_override is not None:
+        tr0=float(initial_tr_phase_override)
+    if tr0 is None:
+        tr0=0.0
 
     if point_maps is not None:
         ktot=np.asarray(seed_data["total_supercell_momentum"],float)
@@ -221,6 +232,8 @@ def train_one(
         initial_eta=eta0,
         point_site_maps=point_maps,
         point_characters=point_chars,
+        time_reversal_even=bool(time_reversal_even),
+        initial_tr_phase=float(tr0),
     )
 
     sampler=nk.sampler.MetropolisFermionHop(
@@ -297,6 +310,8 @@ def train_one(
             "supercell_translation_built_in":True,
             "explicit_projection_images":n_images,
             "c3_m":c3_m,
+            "time_reversal_restored":bool(time_reversal_even),
+            "initial_tr_phase":float(tr0) if time_reversal_even else None,
             "n_parameters":int(vstate.n_parameters),
             "n_one_body_parameter_entries":int(18*nf),
             "n_k_blocks":int(len(seed_data["kpoints"])),
@@ -354,6 +369,10 @@ def train_one(
         "variational_v":params["v"],
         "variational_eta":params["eta"],
     }
+    if params.get("tr_phase",None) is not None:
+        save_items["variational_tr_phase"]=np.asarray(
+            params["tr_phase"],dtype=np.float64
+        )
     for ik,block in enumerate(params["blocks"]):
         save_items[f"variational_M_{ik}"]=block
     if psi is not None:
@@ -371,6 +390,9 @@ def train_one(
         "supercell_translation_built_in":True,
         "explicit_projection_images":n_images,
         "c3_m":c3_m,
+        "time_reversal_restored":bool(time_reversal_even),
+        "initial_tr_phase":float(tr0) if time_reversal_even else None,
+        "optimized_tr_phase":params.get("tr_phase",None),
         "n_parameters":int(vstate.n_parameters),
         "n_one_body_parameter_entries":int(18*nf),
         "n_k_blocks":int(len(seed_data["kpoints"])),
@@ -439,6 +461,12 @@ def parser():
     p.add_argument("--rotation-iter",type=int,default=100)
     p.add_argument("--learning-rate",type=float,default=0.03)
     p.add_argument("--rotation-learning-rate",type=float,default=0.01)
+    p.add_argument(
+        "--restore-time-reversal",action="store_true",
+        help="After C3 VAP, run an additional spinless T=K restored C3+TR VAP stage.",
+    )
+    p.add_argument("--tr-iter",type=int,default=100)
+    p.add_argument("--tr-learning-rate",type=float,default=0.01)
     p.add_argument("--diag-shift",type=float,default=0.05)
     p.add_argument("--chunk-size",type=int,default=512)
     p.add_argument("--rng-seed",type=int,default=2026)
@@ -461,6 +489,8 @@ def main():
     a=parser().parse_args()
     if a.L1<1 or a.L2<1:
         raise ValueError("L1,L2 must be positive")
+    if a.restore_time_reversal and a.skip_c3:
+        raise ValueError("--restore-time-reversal requires the C3 stage; remove --skip-c3")
     out=Path(a.output).resolve()
     out.mkdir(parents=True,exist_ok=True)
 
@@ -597,6 +627,7 @@ def main():
                 output_dir=out,dir_name=raw_dir,
                 method_name=f"Raw-SupercellBloch-{a.correlator}",
                 point_maps=None,point_chars=None,c3_m=None,
+                time_reversal_even=False,
                 initial_params=None,
                 native_H=native_H,ed_gs=ed_gs,ed_row=ed_row,
                 diagnostic_projectors=diagnostic_projectors,
@@ -617,6 +648,10 @@ def main():
                     ],
                     "v":np.asarray(z["variational_v"],float),
                     "eta":np.asarray(z["variational_eta"],complex),
+                    "tr_phase":(
+                        float(np.asarray(z["variational_tr_phase"]))
+                        if "variational_tr_phase" in z.files else None
+                    ),
                 }
             seed_data=None
         raw_cache[seed]=(raw,params)
@@ -649,6 +684,7 @@ def main():
                     output_dir=out,dir_name=dirname,
                     method_name=method,
                     point_maps=point_maps,point_chars=chars,c3_m=m,
+                    time_reversal_even=False,
                     initial_params=params0,
                     native_H=native_H,ed_gs=ed_gs,ed_row=ed_row,
                     diagnostic_projectors=diagnostic_projectors,
@@ -683,6 +719,79 @@ def main():
                             native_states=native_H.states,
                         )
                         atomic_json(d/"summary.json",lsrow)
+
+                if a.restore_time_reversal:
+                    run_id+=1
+                    # Choose the real ray with the largest norm before starting
+                    # TR-VAP.  On 1x1 the exact C3-VAP state is available; for
+                    # larger systems use the current trainable phase (or zero)
+                    # and let SR optimize it.
+                    tr_phase0=(
+                        float(params.get("tr_phase",0.0) or 0.0)
+                    )
+                    if psi is not None:
+                        bilinear=np.dot(psi,psi)
+                        if abs(bilinear)>1e-14:
+                            tr_phase0=float(-0.5*np.angle(bilinear))
+                    print(
+                        f"\n[supercell C3+TR-VAP] seed={seed}, m={m}, "
+                        f"initial phase={tr_phase0:+.6f}",
+                        flush=True,
+                    )
+                    tr_method=f"VAP-C3TR-SupercellBloch-{a.correlator}"
+                    tr_dir=f"supercell_c3tr_{a.correlator}__m{m}__{seed}"
+                    tr_row,tr_params,tr_psi,_=train_one(
+                        g=g,nf=nf,V=a.V,
+                        seed_name=seed,seed_amplitude=a.seed_amplitude,
+                        l1=a.L1,l2=a.L2,
+                        n_shells=a.jastrow_shells,jastrow_mode=a.jastrow_mode,
+                        use_backflow=use_backflow,
+                        n_samples=a.n_samples,n_discard=a.n_discard,
+                        n_chains=a.n_chains,n_iter=a.tr_iter,
+                        learning_rate=a.tr_learning_rate,
+                        diag_shift=a.diag_shift,
+                        rng_seed=a.rng_seed+1009*run_id,
+                        chunk_size=a.chunk_size,
+                        output_dir=out,dir_name=tr_dir,
+                        method_name=tr_method,
+                        point_maps=point_maps,point_chars=chars,c3_m=m,
+                        time_reversal_even=True,
+                        initial_tr_phase_override=tr_phase0,
+                        initial_params=params,
+                        native_H=native_H,ed_gs=ed_gs,ed_row=ed_row,
+                        diagnostic_projectors=diagnostic_projectors,
+                        validate_hamiltonian=False,
+                    )
+                    if exact_available:
+                        tr_row["target_c3"]=f"C3:m{m}"
+                        tr_row["target_sector_ground_dimension"]=target["ground_dimension"]
+                        rows.append(tr_row)
+                        if not a.skip_lanczos:
+                            tr_lspsi,tr_info=one_lanczos_step(tr_psi,native_H)
+                            tr_lsrow=exact_row(
+                                tr_method+"+1LS",seed,tr_lspsi,
+                                native_H,ed_gs,ed_row,
+                                extra={
+                                    "family":"ring3_supercell_bloch",
+                                    "L1":a.L1,"L2":a.L2,
+                                    "supercell_translation_built_in":True,
+                                    "explicit_projection_images":3,
+                                    "c3_m":m,
+                                    "time_reversal_restored":True,
+                                    "target_c3":f"C3:m{m}",
+                                    "target_sector_ground_dimension":target["ground_dimension"],
+                                    **tr_info,
+                                },
+                            )
+                            rows.append(tr_lsrow)
+                            d=out/f"{tr_dir}_1ls"
+                            d.mkdir(parents=True,exist_ok=True)
+                            np.savez_compressed(
+                                d/"final_state.npz",
+                                psi_native=tr_lspsi,
+                                native_states=native_H.states,
+                            )
+                            atomic_json(d/"summary.json",tr_lsrow)
 
     if rows:
         write_csv(out/"comparison_supercell.csv",rows)
