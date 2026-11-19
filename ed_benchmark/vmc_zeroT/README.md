@@ -1130,3 +1130,112 @@ ground-manifold coefficients, selected eigenvalue/shift, and, for
 If the exact ground state is unique (`ground_dim=1`), the order-selecting
 modes do not manufacture symmetry breaking. They return the unique state and
 record `selection_available=false` with the reason in `summary.json`.
+
+
+## Translation-built-in 18-site ring3 supercell ansatz
+
+A separate scalable ansatz path is implemented in
+`supercell_ansatz.py` and `run_supercell_benchmark.py`.  The historical
+Hex18/2x2 benchmark code is unchanged.
+
+The variational unit cell is the 18-site `ring3` cluster. A total
+(L_1\times L_2) torus therefore contains
+
+[
+N_s=18L_1L_2.
+]
+
+The one-body orbitals are represented in the reciprocal lattice of this
+18-site supercell. For each allowed superlattice momentum (k), a trainable
+complex (18\times n_{\rm occ}(k)) matrix is QR-orthonormalized and Bloch
+expanded over the complete system. This makes translation by one ring3
+supercell exact by construction; no explicit translation projector is used.
+
+The one-body parameter count is
+
+[
+18N_f=O(N),
+]
+
+instead of the unrestricted real-space (N_sN_f=O(N^2)). The three complex
+nearest-neighbor backflow amplitudes and bond-aware density Jastrow are retained.
+
+The SD/ISD seed form factor is explicitly tiled with the ring3 periodicity,
+rather than placing only one star in a larger torus.
+
+### 1x1 supercell benchmark against historical Hex18
+
+For (L_1=L_2=1), there is only one superlattice momentum. Therefore the
+new raw one-body parameterization is exactly a full complex (18\times N_f)
+matrix and has the same one-body expressivity as the old unrestricted Hex18
+ansatz. This makes the 1x1 calculation a direct implementation/cost check.
+
+Run, for example, the same V=5.5 backflow benchmark with
+
+```powershell
+python ed_benchmark/vmc_zeroT/run_supercell_benchmark.py `
+  --L1 1 --L2 1 `
+  --nf 6 `
+  --t 1 --t1 0.5 --t2 -0.5 --V 5.5 `
+  --seeds normal sd isd lc_same lc_opposite `
+  --correlator backflow `
+  --jastrow-mode bond_aware `
+  --jastrow-shells 4 `
+  --n-samples 4096 `
+  --n-iter 300 `
+  --rotation-iter 100 `
+  --learning-rate 0.03 `
+  --rotation-learning-rate 0.01 `
+  --output results/supercell_1x1_N6_V5p5
+```
+
+The runner evaluates exact ED on 1x1 and writes
+
+```text
+comparison_supercell.csv
+best_supercell.csv
+settings.json
+geometry.json
+ed/final_state.npz
+supercell_raw_backflow__<seed>/
+supercell_c3_backflow__m<M>__<seed>/
+supercell_c3_backflow__m<M>__<seed>_1ls/
+```
+
+The relevant comparison columns include
+
+```text
+E
+delta_E_vs_ED
+fidelity_ground_subspace
+exact_energy_variance
+CO_qmax
+S_BOW_star
+S_LC_same
+S_LC_opposite
+n_parameters
+explicit_projection_images
+time_per_iteration_s
+```
+
+The new C3-VAP uses exactly three explicit point-group images. In contrast,
+the historical full ring3 spatial projector contains 3 primitive translations
+times 6 C3v point operations = 18 images. The 1x1 benchmark therefore measures
+directly how much speed is gained, and how much accuracy is lost or retained,
+when primitive translation/mirror restoration is replaced by the 18-site
+variational-supercell assumption plus C3 rotation restoration.
+
+No spinless time-reversal restoration is imposed in this new path by default,
+because the intended thermodynamic LC branch must be allowed to carry a
+nonzero one-point current.
+
+Before running the full VMC benchmark, check the geometry/orbital construction:
+
+```bash
+python ed_benchmark/vmc_zeroT/test_supercell_ansatz.py
+```
+
+The test verifies that the 1x1 seed occupied subspaces for normal, SD, ISD,
+LC-same and LC-opposite are identical to the historical Hex18 seeds, and that
+a 2x2 ring3 superlattice (72 sites) is exactly invariant under the two ring3
+supercell translations.
