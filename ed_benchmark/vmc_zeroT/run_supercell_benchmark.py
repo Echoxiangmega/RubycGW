@@ -580,9 +580,12 @@ def parser():
         help="Legacy C3-only sectors, used only with --point-group c3.",
     )
     p.add_argument("--skip-raw",action="store_true")
-    p.add_argument("--skip-c3",action="store_true")
     p.add_argument(
-        "--reuse-c3",action="store_true",
+        "--skip-point-group","--skip-c3",dest="skip_c3",action="store_true",
+        help="Skip the residual point-group VAP stage. --skip-c3 is kept as a legacy alias.",
+    )
+    p.add_argument(
+        "--reuse-point-group","--reuse-c3",dest="reuse_c3",action="store_true",
         help="Reuse an existing point-group stage in --output and continue to TR without rerunning it.",
     )
     p.add_argument("--skip-lanczos",action="store_true")
@@ -599,9 +602,9 @@ def main():
     if a.L1<1 or a.L2<1:
         raise ValueError("L1,L2 must be positive")
     if a.restore_time_reversal and a.skip_c3:
-        raise ValueError("--restore-time-reversal requires the point-group stage; remove --skip-c3")
+        raise ValueError("--restore-time-reversal requires the point-group stage; remove --skip-point-group")
     if a.reuse_c3 and a.skip_c3:
-        raise ValueError("--reuse-c3 and --skip-c3 are mutually exclusive")
+        raise ValueError("--reuse-point-group and --skip-point-group are mutually exclusive")
     out=Path(a.output).resolve()
     out.mkdir(parents=True,exist_ok=True)
 
@@ -703,7 +706,7 @@ def main():
         except RuntimeError as exc:
             raise RuntimeError(
                 f"This torus does not retain ordinary {a.point_group.upper()}. "
-                "Use a compatible shape (normally L1=L2) or pass --skip-c3."
+                "Use a compatible shape (normally L1=L2) or pass --skip-point-group."
             ) from exc
     settings={
         **vars(a),
