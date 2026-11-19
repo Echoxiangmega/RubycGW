@@ -195,6 +195,17 @@ def train_one(
     )
     blocks0,v0,eta0=_warm_blocks(initial_params,seed_data)
 
+    if point_maps is not None:
+        ktot=np.asarray(seed_data["total_supercell_momentum"],float)
+        dist=np.linalg.norm(ktot-np.rint(ktot))
+        if dist>1e-9:
+            raise RuntimeError(
+                "C3-only projection requires a C3-compatible supercell-translation "
+                "sector. The fixed seed occupation pattern has total supercell "
+                f"momentum {ktot.tolist()}, not Gamma. Choose a closed-shell/filling "
+                "or run this branch without C3 projection."
+            )
+
     model=build_supercell_netket_model(
         blocks0,
         seed_data["sc_coords"],
@@ -288,6 +299,9 @@ def train_one(
             "n_k_blocks":int(len(seed_data["kpoints"])),
             "occupations_per_k":";".join(map(str,seed_data["occupations_per_k"].tolist())),
             "seed_shell_gap":seed_data["shell_gap"],
+            "total_supercell_momentum":";".join(
+                f"{x:.12g}" for x in seed_data["total_supercell_momentum"]
+            ),
             "mc_E":float(np.real(stats.mean)),
             "mc_E_error":stats_error(stats),
             "time_setup_s":setup_s,
@@ -321,6 +335,7 @@ def train_one(
         "supercell_coords":seed_data["sc_coords"],
         "internal_sites":seed_data["internal_sites"],
         "star_formfactor":seed_data["star_formfactor"],
+        "total_supercell_momentum":seed_data["total_supercell_momentum"],
         "variational_v":params["v"],
         "variational_eta":params["eta"],
     }
@@ -346,6 +361,9 @@ def train_one(
         "n_k_blocks":int(len(seed_data["kpoints"])),
         "occupations_per_k":seed_data["occupations_per_k"].tolist(),
         "seed_shell_gap":seed_data["shell_gap"],
+        "total_supercell_momentum":[
+            float(x) for x in seed_data["total_supercell_momentum"]
+        ],
         "mc_E":float(np.real(stats.mean)),
         "mc_E_error":stats_error(stats),
         "warmup_mc_E":float(np.real(warm.mean)),
@@ -479,9 +497,17 @@ def main():
             for m in wanted
         ]
 
-    point_maps=np.asarray(
-        [p for _,p in c3_site_maps(g)],np.int32
-    )
+    point_maps=None
+    if not a.skip_c3:
+        try:
+            point_maps=np.asarray(
+                [p for _,p in c3_site_maps(g)],np.int32
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "This total ring3-supercell torus does not retain ordinary C3. "
+                "Use a C3-compatible shape (normally L1=L2) or pass --skip-c3."
+            ) from exc
     settings={
         **vars(a),
         "family":"ring3_supercell_bloch",
