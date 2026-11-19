@@ -294,43 +294,51 @@ def target_support_residual(group, target, psi):
 
 
 def restore_time_reversal_pav(psi, H, tol=1e-13):
-    """Canonical spinless-TR restoration for projection AFTER variation.
+    """Spinless-TR restoration for projection after variation.
 
-    PAV should not introduce a new energy minimization. For T=K, first fix the
-    arbitrary global phase so x^T x is real and nonnegative, then take the
-    normalized T-even representative x + x*. This is the closest T-invariant
-    ray to the spatially projected parent in Hilbert-space norm.
-
-    Full VAP-TR remains different: its TR phase is variational during training.
+    For T=K, a complex spatially projected state x=a+i b generates the full
+    TR-even real subspace span_R{a,b}.  There is no unique linear projector for
+    an antiunitary symmetry, so choose the lowest-energy normalized real vector
+    in that at-most-two-dimensional subspace.  This removes the arbitrary
+    global-phase dependence of the former closest-ray prescription while
+    keeping the parent spatial state fixed.
     """
-    x = np.asarray(psi, complex)
-    x /= np.linalg.norm(x)
-    bilinear = np.dot(x, x)
-    phase_angle = 0.0
-    if abs(bilinear) > tol:
-        phase_angle = -0.5*float(np.angle(bilinear))
-    xg = np.exp(1j*phase_angle)*x
-    y = xg + np.conj(xg)
-    nrm = float(np.linalg.norm(y))
-    if nrm < tol:
-        # This should only occur at pathological numerical cancellation.
-        # The quadrature shifted by pi/2 supplies the equivalent real ray.
-        xg = 1j*xg
-        y = xg + np.conj(xg)
-        nrm = float(np.linalg.norm(y))
-    if nrm < tol:
-        raise RuntimeError("Canonical TR-PAV restoration produced zero norm")
-    y = np.asarray(y/nrm, np.complex128)
-    Ebefore = float(np.vdot(x, H.operator@x).real)
-    Eafter = float(np.vdot(y, H.operator@y).real)
+    x=np.asarray(psi,complex)
+    x/=np.linalg.norm(x)
+
+    real_basis=[]
+    for v in (np.real(x).astype(np.complex128), np.imag(x).astype(np.complex128)):
+        w=v.copy()
+        for q in real_basis:
+            w -= np.vdot(q,w).real*q
+        nrm=float(np.linalg.norm(w))
+        if nrm>tol:
+            real_basis.append(w/nrm)
+    if not real_basis:
+        raise RuntimeError("TR-PAV real subspace has zero dimension")
+
+    Q=np.column_stack(real_basis)
+    HQ=np.column_stack([H.operator@Q[:,j] for j in range(Q.shape[1])])
+    hsmall=np.real(Q.conj().T@HQ)
+    hsmall=0.5*(hsmall+hsmall.T)
+    evals,vecs=np.linalg.eigh(hsmall)
+    coeff=vecs[:,0]
+    y=np.asarray(Q@coeff,np.complex128)
+    y/=np.linalg.norm(y)
+
+    Ebefore=float(np.vdot(x,H.operator@x).real)
+    Eafter=float(np.vdot(y,H.operator@y).real)
     return y, {
         "time_reversal_restored": True,
-        "time_reversal_pav_phase": phase_angle,
+        "time_reversal_pav_phase": None,
+        "time_reversal_pav_real_subspace_dim": int(Q.shape[1]),
         "time_reversal_residual": time_reversal_residual(y),
         "time_reversal_energy_before": Ebefore,
         "time_reversal_energy_after": Eafter,
         "time_reversal_delta_E": Eafter-Ebefore,
-        "time_reversal_pav_definition": "canonical closest-ray x+T x; no energy minimization",
+        "time_reversal_pav_definition": (
+            "minimum-energy TR-even real state in span_R{Re psi, Im psi}"
+        ),
     }
 
 
