@@ -95,6 +95,75 @@ for _name, _ab in {
 }.items():
     _M = _c3_matrix(*_ab)
     SPECS[_name] = (_M, _quotient_reps(_M))
+
+
+RING3_MATRIX = np.array([[1,1],[-1,2]], dtype=int)
+RING3_REPS = [(0,0),(1,0),(1,1)]
+
+
+def ring3_supercell_spec(l1, l2):
+    """L1 x L2 repetition of the 18-site ring3 variational supercell.
+
+    The ring3 columns are the supercell translation vectors in primitive-cell
+    coordinates.  Scaling those columns gives a torus containing
+    3*l1*l2 primitive cells, i.e. 18*l1*l2 Ruby sites.
+    """
+    l1=int(l1); l2=int(l2)
+    if l1<1 or l2<1:
+        raise ValueError("ring3 supercell dimensions must be positive")
+    M=RING3_MATRIX @ np.diag([l1,l2])
+    reps=RING3_REPS if (l1,l2)==(1,1) else _quotient_reps(M)
+    return M.tolist(), list(reps)
+
+
+def make_ring3_supercell(l1, l2, t=1., t1=.5, t2=.5):
+    """Return a RubyPBC torus made from L1 x L2 ring3 supercells."""
+    l1=int(l1); l2=int(l2)
+    name=f"ring3sc_{l1}x{l2}"
+    if name not in SPECS:
+        SPECS[name]=ring3_supercell_spec(l1,l2)
+    return RubyPBC(name,t=t,t1=t1,t2=t2)
+
+
+def ring3_supercell_layout(g, l1, l2):
+    """Map every site to (supercell coordinate, internal ring3 site 0..17).
+
+    Returns
+    -------
+    sc_coords : (Ns,2) integer
+        Coordinates in the L1 x L2 ring3-superlattice.
+    internal_sites : (Ns,) integer
+        18-site index inside one ring3 variational supercell.
+    """
+    l1=int(l1); l2=int(l2)
+    expected=18*l1*l2
+    if g.Ns!=expected:
+        raise ValueError(f"Geometry has Ns={g.Ns}; expected {expected}")
+    sc=np.full((g.Ns,2),-1,dtype=np.int32)
+    internal=np.full(g.Ns,-1,dtype=np.int32)
+    seen=set()
+    for s1 in range(l1):
+        for s2 in range(l2):
+            shift=RING3_MATRIX @ np.array([s1,s2],dtype=int)
+            for rc,r in enumerate(RING3_REPS):
+                cell=np.asarray(r,dtype=int)+shift
+                ci,_=g.reduce(tuple(map(int,cell)))
+                if ci in seen:
+                    raise RuntimeError("ring3 supercell layout assigned a primitive cell twice")
+                seen.add(ci)
+                for orb in range(6):
+                    site=6*ci+orb
+                    sc[site]=(s1,s2)
+                    internal[site]=6*rc+orb
+    if len(seen)!=g.num_cells or np.any(internal<0):
+        raise RuntimeError("Incomplete ring3 supercell layout")
+    return sc,internal
+
+
+def ring3_supercell_momenta(l1, l2):
+    """Allowed momenta in reciprocal units of the ring3 superlattice."""
+    l1=int(l1); l2=int(l2)
+    return [(n1/l1,n2/l2) for n1 in range(l1) for n2 in range(l2)]
 # A physical hexagon center. Its 60-degree rotations exchange t1 and t2.
 POINT_CENTER = np.array([0., -2.-SQ3/2])
 
