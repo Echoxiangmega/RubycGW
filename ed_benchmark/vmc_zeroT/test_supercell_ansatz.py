@@ -24,6 +24,7 @@ from symmetry_projection import (
     internal_translation_site_maps,
     internal_c3v_space_group_site_maps,
     internal_gamma_c3v_characters,
+    ordinary_space_group_site_maps,
 )
 
 
@@ -59,6 +60,13 @@ def main():
     assert len(tint1)==3
     assert len(full1)==18
     assert len({tuple(map(int,p)) for _,p in full1})==18
+    old_full=ordinary_space_group_site_maps(g)
+    assert len(old_full)==18
+    assert {
+        tuple(map(int,p)) for _,p in full1
+    } == {
+        tuple(map(int,p)) for _,p in old_full
+    }
     assert np.allclose(
         internal_gamma_c3v_characters("A2"),
         np.tile(np.asarray([1,1,1,-1,-1,-1],complex),3),
