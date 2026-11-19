@@ -18,7 +18,13 @@ from supercell_ansatz import (
     seed_bloch_blocks,
     assemble_bloch_orbitals_numpy,
 )
-from symmetry_projection import c3v_site_maps, c3v_irrep_characters
+from symmetry_projection import (
+    c3v_site_maps,
+    c3v_irrep_characters,
+    internal_translation_site_maps,
+    internal_c3v_space_group_site_maps,
+    internal_gamma_c3v_characters,
+)
 
 
 def projector(Q):
@@ -48,6 +54,15 @@ def main():
         c3v_irrep_characters("A2"),
         np.asarray([1,1,1,-1,-1,-1],complex),
     )
+    tint1=internal_translation_site_maps(g)
+    full1=internal_c3v_space_group_site_maps(g)
+    assert len(tint1)==3
+    assert len(full1)==18
+    assert len({tuple(map(int,p)) for _,p in full1})==18
+    assert np.allclose(
+        internal_gamma_c3v_characters("A2"),
+        np.tile(np.asarray([1,1,1,-1,-1,-1],complex),3),
+    )
 
     f_old=ruby_star_formfactor(old)
     f_new=ring3_periodic_star_formfactor(g,1,1)
@@ -74,6 +89,11 @@ def main():
     ops2=c3v_site_maps(big)
     assert len(ops2)==6
     assert len({tuple(map(int,p)) for _,p in ops2})==6
+    tint2=internal_translation_site_maps(big)
+    full2=internal_c3v_space_group_site_maps(big)
+    assert len(tint2)==3
+    assert len(full2)==18
+    assert len({tuple(map(int,p)) for _,p in full2})==18
     data=seed_bloch_blocks(big,24,2,2,"sd",0.08)
     assert sum(data["occupations_per_k"])==24
     Q=assemble_bloch_orbitals_numpy(
@@ -96,6 +116,7 @@ def main():
     print("2x2 ring3 superlattice: Ns=",big.Ns,
           "occupations_per_k=",data["occupations_per_k"].tolist())
     print("C3v residual point group: 6 distinct site maps on 1x1 and 2x2")
+    print("Residual Tint: 3 maps; Tint x C3v: 18 maps independent of supercell size")
 
 
 if __name__=="__main__":
