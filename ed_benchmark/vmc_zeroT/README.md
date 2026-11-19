@@ -1277,3 +1277,52 @@ For a unique ED ground state the 1x1 CSV also reports
 does not enforce primitive-cell translations or mirrors. They show whether the
 C3-only optimized state nevertheless returns to the exact ED spatial sector.
 The CSV also reports the gauge-invariant spinless time-reversal residual.
+
+
+### Optional spinless time-reversal restoration for the supercell path
+
+The supercell runner now supports a third optimization stage
+
+```text
+Raw supercell -> C3 VAP -> C3+TR VAP
+```
+
+without restoring primitive-cell translations or mirrors. Enable it with
+
+```powershell
+python ed_benchmark/vmc_zeroT/run_supercell_benchmark.py `
+  --L1 1 --L2 1 --nf 6 `
+  --t 1 --t1 0.5 --t2 -0.5 --V 5.5 `
+  --seeds normal sd isd lc_same lc_opposite `
+  --correlator backflow `
+  --jastrow-mode bond_aware --jastrow-shells 4 `
+  --n-samples 4096 `
+  --n-iter 300 `
+  --rotation-iter 300 `
+  --restore-time-reversal `
+  --tr-iter 100 `
+  --rotation-learning-rate 0.01 `
+  --tr-learning-rate 0.01 `
+  --output results/supercell_1x1_N6_V5p5_tr
+```
+
+For the 1x1 exact benchmark, the initial TR phase is chosen from the preceding
+C3-VAP wavefunction to maximize the norm of its TR-even real ray before SR
+optimization. The TR phase is then trainable. Spinless time reversal is
+(T=K) in the occupation basis, so the projected amplitude is proportional to
+
+[
+e^{i\phi}\Psi_{C_3}(x)+
+\left[e^{i\phi}\Psi_{C_3}(x)\right]^*.
+]
+
+This adds no new spatial images: the explicit spatial image count remains 3.
+The current implementation applies this C3+TR stage to the real C3 (m=0)
+irrep. A complex (m=1/2) irrep must be treated together with its conjugate
+partner and is deliberately rejected rather than silently mixed.
+
+The symmetry diagnostic columns have explicit names:
+`ed_primitive_translation_sector_weight` and
+`ed_full_spatial_sector_weight`. Here "translation" is unrelated to time
+reversal. They are projector weights into the symmetry sector of the unique ED
+ground state, not order parameters and not fidelities.
