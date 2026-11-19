@@ -18,7 +18,7 @@ from supercell_ansatz import (
     seed_bloch_blocks,
     assemble_bloch_orbitals_numpy,
 )
-from symmetry_projection import c3v_site_maps
+from symmetry_projection import c3v_site_maps, c3v_irrep_characters
 
 
 def projector(Q):
@@ -40,6 +40,14 @@ def main():
     ops1=c3v_site_maps(g)
     assert len(ops1)==6
     assert len({tuple(map(int,p)) for _,p in ops1})==6
+    names1=[name for name,_ in ops1]
+    assert names1[:3]==["E","C3","C3^2"]
+    assert all(name.startswith("M") for name in names1[3:])
+    assert np.allclose(c3v_irrep_characters("A1"),np.ones(6))
+    assert np.allclose(
+        c3v_irrep_characters("A2"),
+        np.asarray([1,1,1,-1,-1,-1],complex),
+    )
 
     f_old=ruby_star_formfactor(old)
     f_new=ring3_periodic_star_formfactor(g,1,1)
