@@ -564,9 +564,15 @@ def parser():
     p.add_argument("--n-discard",type=int,default=16)
     p.add_argument("--n-chains",type=int,default=16)
     p.add_argument("--n-iter",type=int,default=300)
-    p.add_argument("--rotation-iter",type=int,default=100)
+    p.add_argument("--rotation-iter",type=int,default=100,
+                   help="Legacy point-group-only stage iterations.")
     p.add_argument("--learning-rate",type=float,default=0.03)
-    p.add_argument("--rotation-learning-rate",type=float,default=0.01)
+    p.add_argument("--rotation-learning-rate",type=float,default=0.01,
+                   help="Legacy point-group-only stage learning rate.")
+    p.add_argument("--internal-translation-iter",type=int,default=100)
+    p.add_argument("--internal-translation-learning-rate",type=float,default=0.01)
+    p.add_argument("--full-spatial-iter",type=int,default=100)
+    p.add_argument("--full-spatial-learning-rate",type=float,default=0.01)
     p.add_argument(
         "--restore-time-reversal",action="store_true",
         help="After point-group VAP, run an additional spinless T=K restored point-group+TR VAP stage.",
@@ -590,14 +596,30 @@ def parser():
     )
     p.add_argument("--skip-raw",action="store_true")
     p.add_argument(
+        "--skip-internal-translation",action="store_true",
+        help="Skip the 3-image residual primitive-translation VAP stage.",
+    )
+    p.add_argument(
+        "--reuse-internal-translation",action="store_true",
+        help="Reuse saved 3-image internal-translation VAP parameters.",
+    )
+    p.add_argument(
         "--skip-point-group","--skip-c3",dest="skip_c3",action="store_true",
         help="Skip the residual point-group VAP stage. --skip-c3 is kept as a legacy alias.",
     )
     p.add_argument(
         "--reuse-point-group","--reuse-c3",dest="reuse_c3",action="store_true",
-        help="Reuse an existing point-group stage in --output and continue to TR without rerunning it.",
+        help="Reuse an existing full residual spatial stage in --output and continue to TR without rerunning it.",
     )
     p.add_argument("--skip-lanczos",action="store_true")
+    p.add_argument(
+        "--plot-final-seeds",action=argparse.BooleanOptionalAction,default=True,
+        help="For 1x1 exact benchmarks, make site/bond/current triptychs for each seed after the final available stage.",
+    )
+    p.add_argument(
+        "--plot-pre-tr",action=argparse.BooleanOptionalAction,default=True,
+        help="Also plot the final pre-TR residual-spatial branch so loop currents remain visible.",
+    )
     p.add_argument("--ed-k",type=int,default=12)
     p.add_argument("--ed-degeneracy-tol",type=float,default=1e-8)
     p.add_argument(
@@ -614,6 +636,13 @@ def main():
         raise ValueError("--restore-time-reversal requires the point-group stage; remove --skip-point-group")
     if a.reuse_c3 and a.skip_c3:
         raise ValueError("--reuse-point-group and --skip-point-group are mutually exclusive")
+    if a.reuse_internal_translation and a.skip_internal_translation:
+        raise ValueError("--reuse-internal-translation and --skip-internal-translation are mutually exclusive")
+    if a.point_group!="c3v" and not a.skip_internal_translation:
+        raise ValueError(
+            "The staged internal-translation path currently targets full C3v. "
+            "Use --point-group c3v or --skip-internal-translation for the legacy C3-only path."
+        )
     out=Path(a.output).resolve()
     out.mkdir(parents=True,exist_ok=True)
 
