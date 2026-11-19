@@ -146,7 +146,7 @@ def c3v_targets_from_ed(g,H,ed_gs,tol=1e-8):
     targets=[]
     V=np.asarray(ed_gs,complex)
     V,_=np.linalg.qr(V)
-    for ir in ("A1","A2","E"):
+    for ir in ("A1","A2"):
         chars=c3v_irrep_characters(ir)
         cols=[]
         for j in range(V.shape[1]):
@@ -165,7 +165,10 @@ def c3v_targets_from_ed(g,H,ed_gs,tol=1e-8):
                 "ground_dimension":rank,
             })
     if not targets:
-        raise RuntimeError("Could not identify a C3v irrep in ED ground manifold")
+        raise RuntimeError(
+            "Could not identify an A1/A2 C3v component in the ED ground manifold; "
+            "the two-dimensional E irrep needs a matrix-valued projector."
+        )
     return group,targets
 
 
@@ -420,7 +423,11 @@ def train_one(
             "backflow_enabled":bool(use_backflow),
         }
         if point_maps is not None:
-            group=build_c3_group(g,native_H.states)
+            group=(
+                build_c3v_group(g,native_H.states)
+                if str(point_group_name).upper()=="C3V"
+                else build_c3_group(g,native_H.states)
+            )
             sector_weight=float(project_to_characters(
                 group,np.asarray(point_chars,complex),psi
             )[1])
@@ -565,7 +572,7 @@ def parser():
         help="Residual point group projected explicitly after ring3-supercell translation is built in.",
     )
     p.add_argument(
-        "--c3v-irrep",choices=["A1","A2","E"],default=None,
+        "--c3v-irrep",choices=["A1","A2"],default=None,
         help="C3v irrep for runs without exact 1x1 ED. Unique 1x1 ED selects its exact irrep automatically.",
     )
     p.add_argument(
