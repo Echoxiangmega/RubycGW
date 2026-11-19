@@ -1326,3 +1326,24 @@ The symmetry diagnostic columns have explicit names:
 `ed_full_spatial_sector_weight`. Here "translation" is unrelated to time
 reversal. They are projector weights into the symmetry sector of the unique ED
 ground state, not order parameters and not fidelities.
+
+
+If the Raw and C3 stages were already completed in the same output directory,
+the TR refinement can be continued without rerunning them:
+
+```powershell
+python ed_benchmark/vmc_zeroT/run_supercell_benchmark.py `
+  --L1 1 --L2 1 --nf 6 `
+  --t 1 --t1 0.5 --t2 -0.5 --V 5.5 `
+  --seeds normal sd isd lc_same lc_opposite `
+  --correlator backflow `
+  --jastrow-mode bond_aware --jastrow-shells 4 `
+  --n-samples 4096 `
+  --skip-raw --reuse-c3 `
+  --restore-time-reversal `
+  --tr-iter 100 --tr-learning-rate 0.01 `
+  --output results/supercell_1x1_N6_V5p5
+```
+
+`--reuse-c3` loads the saved C3 parameters and, on the 1x1 benchmark, the
+saved exact C3 wavefunction to choose a non-cancelling initial TR phase.
