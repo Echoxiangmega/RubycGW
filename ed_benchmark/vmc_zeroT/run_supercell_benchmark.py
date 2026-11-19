@@ -886,51 +886,57 @@ def main():
                 rows.append(raw)
         raw_cache[seed]=(raw,params)
 
+    final_stage_dirs={}
+    pretr_stage_dirs={}
+
     if not a.skip_c3:
-        for target in targets:
-            label=str(target["label"])
-            chars=np.asarray(target["characters"],complex)
-            m=(int(target["m"]) if "m" in target else None)
-            pg_tag=("c3v" if a.point_group=="c3v" else "c3")
-            method=(
-                f"VAP-C3v-SupercellBloch-{a.correlator}"
-                if a.point_group=="c3v"
-                else f"VAP-C3-SupercellBloch-{a.correlator}"
-            )
+        if a.point_group=="c3v" and not a.skip_internal_translation:
+            # Stage 1: restore only the three primitive-translation cosets that
+            # remain after ring3-supercell translations are built into ansatz.
+            tint_cache={}
             for seed in a.seeds:
                 run_id+=1
                 raw,params0=raw_cache[seed]
-                dirname=f"supercell_{pg_tag}_{a.correlator}__{label}__{seed}"
-                if a.reuse_c3:
+                tint_dir=(
+                    f"supercell_tint_{a.correlator}__"
+                    f"{internal_translation_label}__{seed}"
+                )
+                tint_method=f"VAP-Tint-SupercellBloch-{a.correlator}"
+                if a.reuse_internal_translation:
                     print(
-                        f"\n[supercell {a.point_group.upper()}-VAP reuse] "
-                        f"seed={seed}, irrep={label}",
+                        f"\n[supercell Tint-VAP reuse] seed={seed}, "
+                        f"sector={internal_translation_label}",
                         flush=True,
                     )
-                    row,params,psi=_load_saved_supercell_state(out/dirname)
+                    tint_row,tint_params,tint_psi=_load_saved_supercell_state(
+                        out/tint_dir
+                    )
                 else:
                     print(
-                        f"\n[supercell {a.point_group.upper()}-VAP] "
-                        f"seed={seed}, irrep={label}",
+                        f"\n[supercell Tint-VAP] seed={seed}, "
+                        f"sector={internal_translation_label}",
                         flush=True,
                     )
-                    row,params,psi,_=train_one(
+                    tint_row,tint_params,tint_psi,_=train_one(
                         g=g,nf=nf,V=a.V,
                         seed_name=seed,seed_amplitude=a.seed_amplitude,
                         l1=a.L1,l2=a.L2,
-                        n_shells=a.jastrow_shells,jastrow_mode=a.jastrow_mode,
+                        n_shells=a.jastrow_shells,
+                        jastrow_mode=a.jastrow_mode,
                         use_backflow=use_backflow,
                         n_samples=a.n_samples,n_discard=a.n_discard,
-                        n_chains=a.n_chains,n_iter=a.rotation_iter,
-                        learning_rate=a.rotation_learning_rate,
+                        n_chains=a.n_chains,
+                        n_iter=a.internal_translation_iter,
+                        learning_rate=a.internal_translation_learning_rate,
                         diag_shift=a.diag_shift,
                         rng_seed=a.rng_seed+1009*run_id,
                         chunk_size=a.chunk_size,
-                        output_dir=out,dir_name=dirname,
-                        method_name=method,
-                        point_maps=point_maps,point_chars=chars,
-                        point_group_name=a.point_group.upper(),
-                        point_label=label,c3_m=m,
+                        output_dir=out,dir_name=tint_dir,
+                        method_name=tint_method,
+                        point_maps=tint_maps,
+                        point_chars=np.asarray(internal_translation_chars,complex),
+                        point_group_name="TINT",
+                        point_label=internal_translation_label,
                         time_reversal_even=False,
                         initial_params=params0,
                         native_H=native_H,ed_gs=ed_gs,ed_row=ed_row,
@@ -938,116 +944,250 @@ def main():
                         validate_hamiltonian=False,
                     )
                 if exact_available:
-                    row["target_point_group"]=a.point_group.upper()
-                    row["target_point_irrep"]=label
-                    row["target_sector_ground_dimension"]=target["ground_dimension"]
-                    rows.append(row)
+                    tint_row["target_point_group"]="TINT"
+                    tint_row["target_point_irrep"]=internal_translation_label
+                    rows.append(tint_row)
+                tint_cache[seed]=(tint_row,tint_params,tint_psi,tint_dir)
 
-                    if not a.skip_lanczos:
-                        lspsi,info=one_lanczos_step(psi,native_H)
-                        lsrow=exact_row(
-                            method+"+1LS",seed,lspsi,native_H,ed_gs,ed_row,
-                            extra={
-                                "family":"ring3_supercell_bloch",
-                                "L1":a.L1,"L2":a.L2,
-                                "supercell_translation_built_in":True,
-                                "explicit_projection_images":point_image_count,
-                                "point_group":a.point_group.upper(),
-                                "point_irrep":label,
-                                "c3_m":m,
-                                "target_point_group":a.point_group.upper(),
-                                "target_point_irrep":label,
-                                "target_sector_ground_dimension":target["ground_dimension"],
-                                **info,
-                            },
-                        )
-                        rows.append(lsrow)
-                        d=out/f"{dirname}_1ls"
-                        d.mkdir(parents=True,exist_ok=True)
-                        np.savez_compressed(
-                            d/"final_state.npz",
-                            psi_native=lspsi,
-                            native_states=native_H.states,
-                        )
-                        atomic_json(d/"summary.json",lsrow)
-
-                if a.restore_time_reversal:
+            # Stage 2: keep Tint and add the complete ordinary C3v point group.
+            # This is the fixed 18-image residual spatial projector.
+            for target in targets:
+                label=str(target["label"])
+                residual_chars=np.asarray(
+                    residual_spatial_chars_by_label[label],complex
+                )
+                full_method=f"VAP-TintC3v-SupercellBloch-{a.correlator}"
+                for seed in a.seeds:
                     run_id+=1
-                    tr_phase0=float(params.get("tr_phase",0.0) or 0.0)
-                    if psi is not None:
-                        bilinear=np.dot(psi,psi)
-                        if abs(bilinear)>1e-14:
-                            tr_phase0=float(-0.5*np.angle(bilinear))
-                    print(
-                        f"\n[supercell {a.point_group.upper()}+TR-VAP] "
-                        f"seed={seed}, irrep={label}, "
-                        f"initial phase={tr_phase0:+.6f}",
-                        flush=True,
-                    )
-                    tr_method=(
-                        f"VAP-C3vTR-SupercellBloch-{a.correlator}"
-                        if a.point_group=="c3v"
-                        else f"VAP-C3TR-SupercellBloch-{a.correlator}"
-                    )
-                    tr_dir=f"supercell_{pg_tag}tr_{a.correlator}__{label}__{seed}"
-                    tr_row,tr_params,tr_psi,_=train_one(
-                        g=g,nf=nf,V=a.V,
-                        seed_name=seed,seed_amplitude=a.seed_amplitude,
-                        l1=a.L1,l2=a.L2,
-                        n_shells=a.jastrow_shells,jastrow_mode=a.jastrow_mode,
-                        use_backflow=use_backflow,
-                        n_samples=a.n_samples,n_discard=a.n_discard,
-                        n_chains=a.n_chains,n_iter=a.tr_iter,
-                        learning_rate=a.tr_learning_rate,
-                        diag_shift=a.diag_shift,
-                        rng_seed=a.rng_seed+1009*run_id,
-                        chunk_size=a.chunk_size,
-                        output_dir=out,dir_name=tr_dir,
-                        method_name=tr_method,
-                        point_maps=point_maps,point_chars=chars,
-                        point_group_name=a.point_group.upper(),
-                        point_label=label,c3_m=m,
-                        time_reversal_even=True,
-                        initial_tr_phase_override=tr_phase0,
-                        initial_params=params,
-                        native_H=native_H,ed_gs=ed_gs,ed_row=ed_row,
-                        diagnostic_projectors=diagnostic_projectors,
-                        validate_hamiltonian=False,
-                    )
+                    _,tint_params,_,_=tint_cache[seed]
+                    full_dir=f"supercell_tint_c3v_{a.correlator}__{label}__{seed}"
+                    if a.reuse_c3:
+                        print(
+                            f"\n[supercell Tint+C3V-VAP reuse] "
+                            f"seed={seed}, irrep={label}",
+                            flush=True,
+                        )
+                        full_row,full_params,full_psi=_load_saved_supercell_state(
+                            out/full_dir
+                        )
+                    else:
+                        print(
+                            f"\n[supercell Tint+C3V-VAP] "
+                            f"seed={seed}, irrep={label}",
+                            flush=True,
+                        )
+                        full_row,full_params,full_psi,_=train_one(
+                            g=g,nf=nf,V=a.V,
+                            seed_name=seed,seed_amplitude=a.seed_amplitude,
+                            l1=a.L1,l2=a.L2,
+                            n_shells=a.jastrow_shells,
+                            jastrow_mode=a.jastrow_mode,
+                            use_backflow=use_backflow,
+                            n_samples=a.n_samples,n_discard=a.n_discard,
+                            n_chains=a.n_chains,
+                            n_iter=a.full_spatial_iter,
+                            learning_rate=a.full_spatial_learning_rate,
+                            diag_shift=a.diag_shift,
+                            rng_seed=a.rng_seed+1009*run_id,
+                            chunk_size=a.chunk_size,
+                            output_dir=out,dir_name=full_dir,
+                            method_name=full_method,
+                            point_maps=residual_spatial_maps,
+                            point_chars=residual_chars,
+                            point_group_name="TINTXC3V",
+                            point_label=label,
+                            time_reversal_even=False,
+                            initial_params=tint_params,
+                            native_H=native_H,ed_gs=ed_gs,ed_row=ed_row,
+                            diagnostic_projectors=diagnostic_projectors,
+                            validate_hamiltonian=False,
+                        )
                     if exact_available:
-                        tr_row["target_point_group"]=a.point_group.upper()
-                        tr_row["target_point_irrep"]=label
-                        tr_row["target_sector_ground_dimension"]=target["ground_dimension"]
-                        rows.append(tr_row)
+                        full_row["target_point_group"]="TINTXC3V"
+                        full_row["target_point_irrep"]=label
+                        full_row["target_sector_ground_dimension"]=target[
+                            "ground_dimension"
+                        ]
+                        rows.append(full_row)
+
                         if not a.skip_lanczos:
-                            tr_lspsi,tr_info=one_lanczos_step(tr_psi,native_H)
-                            tr_lsrow=exact_row(
-                                tr_method+"+1LS",seed,tr_lspsi,
+                            lspsi,info=one_lanczos_step(full_psi,native_H)
+                            lsrow=exact_row(
+                                full_method+"+1LS",seed,lspsi,
                                 native_H,ed_gs,ed_row,
                                 extra={
                                     "family":"ring3_supercell_bloch",
                                     "L1":a.L1,"L2":a.L2,
                                     "supercell_translation_built_in":True,
-                                    "explicit_projection_images":point_image_count,
-                                    "point_group":a.point_group.upper(),
+                                    "explicit_projection_images":18,
+                                    "point_group":"TINTXC3V",
                                     "point_irrep":label,
-                                    "c3_m":m,
-                                    "time_reversal_restored":True,
-                                    "target_point_group":a.point_group.upper(),
-                                    "target_point_irrep":label,
-                                    "target_sector_ground_dimension":target["ground_dimension"],
-                                    **tr_info,
+                                    "target_sector_ground_dimension":target[
+                                        "ground_dimension"
+                                    ],
+                                    **info,
                                 },
                             )
-                            rows.append(tr_lsrow)
-                            d=out/f"{tr_dir}_1ls"
+                            rows.append(lsrow)
+                            d=out/f"{full_dir}_1ls"
                             d.mkdir(parents=True,exist_ok=True)
                             np.savez_compressed(
                                 d/"final_state.npz",
-                                psi_native=tr_lspsi,
+                                psi_native=lspsi,
                                 native_states=native_H.states,
                             )
-                            atomic_json(d/"summary.json",tr_lsrow)
+                            atomic_json(d/"summary.json",lsrow)
+
+                    pretr_stage_dirs[seed]=out/full_dir
+                    final_stage_dirs[seed]=out/full_dir
+
+                    # Stage 3: optional spinless time-reversal restoration.
+                    if a.restore_time_reversal:
+                        run_id+=1
+                        tr_phase0=float(
+                            full_params.get("tr_phase",0.0) or 0.0
+                        )
+                        if full_psi is not None:
+                            bilinear=np.dot(full_psi,full_psi)
+                            if abs(bilinear)>1e-14:
+                                tr_phase0=float(-0.5*np.angle(bilinear))
+                        print(
+                            f"\n[supercell Tint+C3V+TR-VAP] "
+                            f"seed={seed}, irrep={label}, "
+                            f"initial phase={tr_phase0:+.6f}",
+                            flush=True,
+                        )
+                        tr_method=(
+                            f"VAP-TintC3vTR-SupercellBloch-{a.correlator}"
+                        )
+                        tr_dir=(
+                            f"supercell_tint_c3vtr_{a.correlator}__"
+                            f"{label}__{seed}"
+                        )
+                        tr_row,tr_params,tr_psi,_=train_one(
+                            g=g,nf=nf,V=a.V,
+                            seed_name=seed,seed_amplitude=a.seed_amplitude,
+                            l1=a.L1,l2=a.L2,
+                            n_shells=a.jastrow_shells,
+                            jastrow_mode=a.jastrow_mode,
+                            use_backflow=use_backflow,
+                            n_samples=a.n_samples,n_discard=a.n_discard,
+                            n_chains=a.n_chains,
+                            n_iter=a.tr_iter,
+                            learning_rate=a.tr_learning_rate,
+                            diag_shift=a.diag_shift,
+                            rng_seed=a.rng_seed+1009*run_id,
+                            chunk_size=a.chunk_size,
+                            output_dir=out,dir_name=tr_dir,
+                            method_name=tr_method,
+                            point_maps=residual_spatial_maps,
+                            point_chars=residual_chars,
+                            point_group_name="TINTXC3V",
+                            point_label=label,
+                            time_reversal_even=True,
+                            initial_tr_phase_override=tr_phase0,
+                            initial_params=full_params,
+                            native_H=native_H,ed_gs=ed_gs,ed_row=ed_row,
+                            diagnostic_projectors=diagnostic_projectors,
+                            validate_hamiltonian=False,
+                        )
+                        if exact_available:
+                            tr_row["target_point_group"]="TINTXC3V"
+                            tr_row["target_point_irrep"]=label
+                            tr_row["target_sector_ground_dimension"]=target[
+                                "ground_dimension"
+                            ]
+                            rows.append(tr_row)
+                            if not a.skip_lanczos:
+                                tr_lspsi,tr_info=one_lanczos_step(
+                                    tr_psi,native_H
+                                )
+                                tr_lsrow=exact_row(
+                                    tr_method+"+1LS",seed,tr_lspsi,
+                                    native_H,ed_gs,ed_row,
+                                    extra={
+                                        "family":"ring3_supercell_bloch",
+                                        "L1":a.L1,"L2":a.L2,
+                                        "supercell_translation_built_in":True,
+                                        "explicit_projection_images":18,
+                                        "point_group":"TINTXC3V",
+                                        "point_irrep":label,
+                                        "time_reversal_restored":True,
+                                        "target_sector_ground_dimension":target[
+                                            "ground_dimension"
+                                        ],
+                                        **tr_info,
+                                    },
+                                )
+                                rows.append(tr_lsrow)
+                                d=out/f"{tr_dir}_1ls"
+                                d.mkdir(parents=True,exist_ok=True)
+                                np.savez_compressed(
+                                    d/"final_state.npz",
+                                    psi_native=tr_lspsi,
+                                    native_states=native_H.states,
+                                )
+                                atomic_json(d/"summary.json",tr_lsrow)
+                        final_stage_dirs[seed]=out/tr_dir
+
+        else:
+            # Legacy point-group-only path, kept for comparison with already
+            # completed C3/C3v runs.
+            for target in targets:
+                label=str(target["label"])
+                chars=np.asarray(target["characters"],complex)
+                m=(int(target["m"]) if "m" in target else None)
+                pg_tag=("c3v" if a.point_group=="c3v" else "c3")
+                method=(
+                    f"VAP-C3v-SupercellBloch-{a.correlator}"
+                    if a.point_group=="c3v"
+                    else f"VAP-C3-SupercellBloch-{a.correlator}"
+                )
+                for seed in a.seeds:
+                    run_id+=1
+                    _,params0=raw_cache[seed]
+                    dirname=(
+                        f"supercell_{pg_tag}_{a.correlator}__"
+                        f"{label}__{seed}"
+                    )
+                    if a.reuse_c3:
+                        row,params,psi=_load_saved_supercell_state(
+                            out/dirname
+                        )
+                    else:
+                        row,params,psi,_=train_one(
+                            g=g,nf=nf,V=a.V,
+                            seed_name=seed,
+                            seed_amplitude=a.seed_amplitude,
+                            l1=a.L1,l2=a.L2,
+                            n_shells=a.jastrow_shells,
+                            jastrow_mode=a.jastrow_mode,
+                            use_backflow=use_backflow,
+                            n_samples=a.n_samples,
+                            n_discard=a.n_discard,
+                            n_chains=a.n_chains,
+                            n_iter=a.rotation_iter,
+                            learning_rate=a.rotation_learning_rate,
+                            diag_shift=a.diag_shift,
+                            rng_seed=a.rng_seed+1009*run_id,
+                            chunk_size=a.chunk_size,
+                            output_dir=out,dir_name=dirname,
+                            method_name=method,
+                            point_maps=point_maps,
+                            point_chars=chars,
+                            point_group_name=a.point_group.upper(),
+                            point_label=label,c3_m=m,
+                            time_reversal_even=False,
+                            initial_params=params0,
+                            native_H=native_H,ed_gs=ed_gs,
+                            ed_row=ed_row,
+                            diagnostic_projectors=diagnostic_projectors,
+                            validate_hamiltonian=False,
+                        )
+                    if exact_available:
+                        rows.append(row)
+                    pretr_stage_dirs[seed]=out/dirname
+                    final_stage_dirs[seed]=out/dirname
 
     if rows:
         write_csv(out/"comparison_supercell.csv",rows)
