@@ -1722,3 +1722,34 @@ production runner passes `mode="complex"` only. Recent NetKet versions reject
 specifying both `mode` and `holomorphic` in the same constructor. Complex
 mode is the general Jacobian representation for complex-valued wave functions
 with mixed real/complex parameters.
+
+
+### Anisotropic L1 x L2 supercells and C3v
+
+For the rectangular ring3-supercell family used by `run_supercell_large.py`,
+ordinary C3 (and therefore C3v) is retained only by C3-compatible shapes such
+as `L1=L2`.  An anisotropic example such as `L1=2, L2=1` breaks ordinary C3
+at the finite-torus level, even though the microscopic Hamiltonian on the
+infinite Ruby lattice is C3 symmetric.
+
+The large runner therefore defaults to
+
+```text
+--spatial-symmetry auto
+```
+
+which performs the fixed three-image internal-translation projection on every
+compatible ring3 supercell, then applies the 18-image Tint x C3v projection only
+when the finite torus supports it.  On a 2x1 torus the workflow is therefore
+
+```text
+Raw -> Tint
+```
+
+and the A1/A2 option is ignored.  Use `--spatial-symmetry c3v` to require C3v
+and fail explicitly if the shape is incompatible, or `--spatial-symmetry none`
+to skip point-group projection intentionally.
+
+For symmetry-controlled finite-size scaling, prefer the C3-compatible sequence
+1x1, 2x2, 3x3, ... of ring3 supercells.  Rectangular 2x1, 3x1, 3x2, ... shapes
+are still useful as cheaper performance/profiling and anisotropy cross-checks.
