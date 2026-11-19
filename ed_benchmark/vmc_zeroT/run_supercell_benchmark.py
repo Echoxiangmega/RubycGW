@@ -61,10 +61,15 @@ from run_projection_comparison import one_lanczos_step
 from symmetry_projection import (
     build_c3_group,
     build_c3v_group,
+    build_internal_translation_group,
+    build_internal_c3v_space_group,
     build_translation_group,
     build_ordinary_space_group,
     c3_site_maps,
     c3v_site_maps,
+    internal_translation_site_maps,
+    internal_c3v_space_group_site_maps,
+    internal_gamma_c3v_characters,
     c3v_irrep_characters,
     c3v_from_characters,
     characterize_unique_state,
@@ -423,11 +428,15 @@ def train_one(
             "backflow_enabled":bool(use_backflow),
         }
         if point_maps is not None:
-            group=(
-                build_c3v_group(g,native_H.states)
-                if str(point_group_name).upper()=="C3V"
-                else build_c3_group(g,native_H.states)
-            )
+            pg=str(point_group_name).upper()
+            if pg=="TINT":
+                group=build_internal_translation_group(g,native_H.states)
+            elif pg in ("TINTXC3V","RESIDUALSPATIAL"):
+                group=build_internal_c3v_space_group(g,native_H.states)
+            elif pg=="C3V":
+                group=build_c3v_group(g,native_H.states)
+            else:
+                group=build_c3_group(g,native_H.states)
             sector_weight=float(project_to_characters(
                 group,np.asarray(point_chars,complex),psi
             )[1])
