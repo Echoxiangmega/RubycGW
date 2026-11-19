@@ -698,6 +698,8 @@ def main():
                     ),
                 }
             seed_data=None
+            if exact_available:
+                rows.append(raw)
         raw_cache[seed]=(raw,params)
 
     if not a.skip_c3:
