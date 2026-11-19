@@ -93,12 +93,13 @@ def add_ed_differences(row, ed):
     return row
 
 
-def build_ed_sectors(g, H, ed_gs, tol):
+def build_ed_sectors(g, H, ed_gs, tol, *, validate_commutator=True):
     if ed_gs.shape[1] == 1:
         group = build_ordinary_space_group(g, H.states)
-        err, name = commutator_error(group, H.operator, n_tests=2)
-        if err > 1e-9:
-            raise RuntimeError(f"full symmetry/H mismatch: {name} {err:.3e}")
+        if validate_commutator:
+            err, name = commutator_error(group, H.operator, n_tests=2)
+            if err > 1e-9:
+                raise RuntimeError(f"full symmetry/H mismatch: {name} {err:.3e}")
         chars = characterize_unique_state(group, ed_gs[:, 0], tol=1e-8)
         sectors = [{
             "characters": chars,
@@ -109,9 +110,10 @@ def build_ed_sectors(g, H, ed_gs, tol):
         group_name = "ordinary translations x C3v"
     else:
         group = build_translation_c3_group(g, H.states)
-        err, name = commutator_error(group, H.operator, n_tests=2)
-        if err > 1e-9:
-            raise RuntimeError(f"T x C3/H mismatch: {name} {err:.3e}")
+        if validate_commutator:
+            err, name = commutator_error(group, H.operator, n_tests=2)
+            if err > 1e-9:
+                raise RuntimeError(f"T x C3/H mismatch: {name} {err:.3e}")
         sectors = decompose_ground_manifold_abelian(
             group, ed_gs, tol=max(1e-8, 10*tol)
         )
@@ -493,6 +495,10 @@ def parser():
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
+    p.add_argument(
+        "--cluster", choices=["ring3", "2x2"], default="ring3",
+        help="Finite Ruby torus. Use --cluster 2x2 --nf 8 for the 24-site 1/3-filled benchmark."
+    )
     p.add_argument("--nf", type=int, default=6)
     p.add_argument("--t", type=float, default=1.0)
     p.add_argument("--t1", type=float, default=0.5)
@@ -550,6 +556,10 @@ def parser():
     p.add_argument("--chunk-size", type=int, default=512)
     p.add_argument("--rng-seed", type=int, default=2026)
     p.add_argument("--ed-k", type=int, default=12)
+    p.add_argument(
+        "--ed-backend", choices=["auto", "full", "symmetry"], default="auto",
+        help="auto uses full sparse ED on Hex18 and the existing symmetry-blocked QuSpin ED on 2x2."
+    )
     p.add_argument("--ed-degeneracy-tol", type=float, default=1e-8)
     p.add_argument("--resume", action="store_true")
     p.add_argument("--skip-vap", action="store_true")
@@ -579,24 +589,40 @@ def main():
         vap_prefix = vap_r_prefix
         vap_ls_prefix = f"{vap_r_prefix}_1ls"
 
-    g = native_geometry.RubyPBC("ring3", t=a.t, t1=a.t1, t2=a.t2)
+    g = native_geometry.RubyPBC(a.cluster, t=a.t, t1=a.t1, t2=a.t2)
+    if a.cluster == "2x2" and a.nf != 8:
+        print(
+            f"[warning] 2x2 has Ns=24; --nf {a.nf} is not the 1/3-filled analogue "
+            "of Hex18 Nf=6. Use --nf 8 for the direct comparison.",
+            flush=True,
+        )
     H, evals, ed_gs, ed_row = solve_ed(
-        g, a.nf, a.V, k=a.ed_k, degeneracy_tol=a.ed_degeneracy_tol
+        g, a.nf, a.V, k=a.ed_k, degeneracy_tol=a.ed_degeneracy_tol,
+        backend=a.ed_backend,
     )
     if ed_row.get("ground_manifold_truncated"):
         raise RuntimeError("ED ground manifold truncated; increase --ed-k")
 
+    # The 24-site symmetry ED already validates a complete, non-overlapping
+    # decomposition into exact Hamiltonian blocks.  Repeating [H,U] tests on
+    # the 735471-dimensional matrix-free full basis would be very expensive.
+    large_symmetry_ed = (
+        ed_row.get("ed_backend") == "quspin_symmetry_blocks"
+        and len(H.states) > 200000
+    )
     group, group_name, sectors = build_ed_sectors(
-        g, H, ed_gs, a.ed_degeneracy_tol
+        g, H, ed_gs, a.ed_degeneracy_tol,
+        validate_commutator=not large_symmetry_ed,
     )
     tr_targets = (
         build_tr_targets(sectors)
         if a.restore_time_reversal else build_spatial_targets(sectors)
     )
     translation_group = build_translation_group(g, H.states)
-    terr, tname = commutator_error(translation_group, H.operator, n_tests=2)
-    if terr > 1e-9:
-        raise RuntimeError(f"translation/H mismatch: {tname} {terr:.3e}")
+    if not large_symmetry_ed:
+        terr, tname = commutator_error(translation_group, H.operator, n_tests=2)
+        if terr > 1e-9:
+            raise RuntimeError(f"translation/H mismatch: {tname} {terr:.3e}")
 
     jlabels, jdist, _, jcounts = jastrow_channels(
         g, mode=a.jastrow_mode, n_shells=a.jastrow_shells
@@ -604,7 +630,7 @@ def main():
     bf_labels, _, bf_counts = bond_backflow_channels(g)
     atomic_json(out/"settings.json", {
         **vars(a),
-        "cluster": "ring3",
+        "cluster": a.cluster,
         "Ns": g.Ns,
         "spatial_projection_group": group_name,
         "spatial_sector_count": len(sectors),
