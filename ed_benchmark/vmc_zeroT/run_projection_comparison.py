@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hex18 benchmark: ED, raw SJ, spatial+TR PAV/VAP, and one Lanczos step.
+"""Finite-cluster benchmark: ED, raw SJ, spatial+TR PAV/VAP, and one Lanczos step.
 
 The variational base is always the unrestricted full complex Slater matrix
 times a real density Jastrow. The raw state is intentionally unprojected.
