@@ -482,6 +482,8 @@ def _stage(
     n_iter,learning_rate,
     args,
     rng_seed,
+    learning_rate_after=None,
+    learning_rate_switch_iter=None,
     train_samples=None,
     train_sweep_size=None,
     eval_samples_override=None,
@@ -575,7 +577,37 @@ def _stage(
                 "solver; no dense P x P QGT is formed.",
                 flush=True,
             )
-        optimizer=nk.optimizer.Sgd(learning_rate=learning_rate)
+        lr0=float(learning_rate)
+        lr1=(
+            None if learning_rate_after is None
+            else float(learning_rate_after)
+        )
+        lr_switch=(
+            None if learning_rate_switch_iter is None
+            else int(learning_rate_switch_iter)
+        )
+        use_lr_schedule=(
+            lr1 is not None
+            and lr_switch is not None
+            and 0<lr_switch<int(n_iter)
+            and not np.isclose(lr1,lr0)
+        )
+        if use_lr_schedule:
+            import optax
+            if lr0==0.0:
+                raise ValueError("Initial learning rate must be nonzero for a two-stage schedule")
+            schedule=optax.piecewise_constant_schedule(
+                init_value=lr0,
+                boundaries_and_scales={lr_switch:lr1/lr0},
+            )
+            optimizer=optax.sgd(learning_rate=schedule)
+            lr_description=(
+                f"{lr0:g} for steps 1-{lr_switch}, "
+                f"then {lr1:g} for steps {lr_switch+1}-{int(n_iter)}"
+            )
+        else:
+            optimizer=nk.optimizer.Sgd(learning_rate=lr0)
+            lr_description=f"constant {lr0:g}"
         try:
             sr=nk.optimizer.SR(
                 qgt=qgt_ctor,
@@ -600,7 +632,8 @@ def _stage(
             f"[large {stage_name}] Ns={g.Ns} Nf={nf} "
             f"params={vstate.n_parameters} images={n_images} "
             f"samples={stage_samples} sweep={sweep_size} "
-            f"qgt={args.qgt}->{effective_qgt}/{args.sr_solver}",
+            f"qgt={args.qgt}->{effective_qgt}/{args.sr_solver} "
+            f"lr={lr_description}",
             flush=True,
         )
         topt=time.perf_counter()
@@ -742,6 +775,17 @@ def _stage(
         "time_order_observables_s":float(observable_eval_s),
         "n_iter":int(n_iter),
         "learning_rate":float(learning_rate),
+        "learning_rate_after":(
+            float(learning_rate_after)
+            if learning_rate_after is not None else None
+        ),
+        "learning_rate_switch_iter":(
+            int(learning_rate_switch_iter)
+            if learning_rate_switch_iter is not None else None
+        ),
+        "learning_rate_schedule":(
+            lr_description if int(n_iter)>0 else "not_used_pav_only"
+        ),
         "seed_shell_gap":seed_data["shell_gap"],
         "total_supercell_momentum":[
             float(x) for x in seed_data["total_supercell_momentum"]
