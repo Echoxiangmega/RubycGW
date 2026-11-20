@@ -1050,6 +1050,146 @@ def _validate_shared_sr(
     return report
 
 
+def _profile_shared_sr_components(
+    *,
+    vstate,
+    H,
+    nk,
+    jax,
+    solver,
+    diag_shift,
+    chunk_size,
+    repeats,
+):
+    """Profile the single-Jacobian SR path on one fixed MC sample pool."""
+    import jax.numpy as jnp
+
+    repeats=max(0,int(repeats))
+    if repeats<=0:
+        return {}
+
+    vstate.sample()
+    np.asarray(vstate.samples)
+
+    samples=vstate.samples
+    if samples.ndim>=3:
+        samples=jax.lax.collapse(samples,0,samples.ndim-1)
+    n_samples=int(samples.shape[0])
+    params=vstate.parameters
+    inv_sqrt_n=1.0/jnp.sqrt(jnp.asarray(float(n_samples)))
+    linear_solve=_make_shared_sr_linear_solve(jax,solver)
+
+    def get_local():
+        le=vstate.local_estimators(H)
+        np.asarray(le.data)
+        return le
+
+    def get_jac():
+        jac=nk.jax.jacobian(
+            vstate._apply_fun,
+            params,
+            samples,
+            vstate.model_state,
+            mode="complex",
+            dense=True,
+            center=True,
+            chunk_size=chunk_size,
+        )
+        np.asarray(jac)
+        return jac
+
+    def prepare_and_solve(jac,local_e,x0=None):
+        O=jac*inv_sqrt_n
+        O=jax.lax.collapse(O,0,2)
+        de=local_e-jnp.mean(local_e)
+        dv=2.0*de*inv_sqrt_n
+        dv=jnp.stack((jnp.real(dv),jnp.imag(dv)),axis=-1)
+        dv=jax.lax.collapse(dv,0,2)
+        sol,info=linear_solve(
+            O,dv,jnp.asarray(diag_shift),x0
+        )
+        del info
+        np.asarray(sol)
+        return sol
+
+    # Warmup.
+    le=get_local()
+    jac=get_jac()
+    prepare_and_solve(
+        jac,jnp.asarray(le.data).reshape(-1),None
+    )
+    st,dp,_,_=_shared_sr_update(
+        vstate=vstate,H=H,nk=nk,jax=jax,
+        diag_shift=diag_shift,
+        linear_solve=linear_solve,
+        chunk_size=chunk_size,
+        x0=None,
+    )
+    try:
+        np.asarray(st.mean)
+    except Exception:
+        pass
+    _sync_tree(jax,dp)
+
+    local_times=[]
+    jac_times=[]
+    solve_times=[]
+    total_times=[]
+    for _ in range(repeats):
+        t=time.perf_counter()
+        le=get_local()
+        local_times.append(time.perf_counter()-t)
+
+        t=time.perf_counter()
+        jac=get_jac()
+        jac_times.append(time.perf_counter()-t)
+
+        local_e=jnp.asarray(le.data).reshape(-1)
+        t=time.perf_counter()
+        prepare_and_solve(jac,local_e,None)
+        solve_times.append(time.perf_counter()-t)
+
+        t=time.perf_counter()
+        st,dp,_,_=_shared_sr_update(
+            vstate=vstate,H=H,nk=nk,jax=jax,
+            diag_shift=diag_shift,
+            linear_solve=linear_solve,
+            chunk_size=chunk_size,
+            x0=None,
+        )
+        try:
+            np.asarray(st.mean)
+        except Exception:
+            pass
+        _sync_tree(jax,dp)
+        total_times.append(time.perf_counter()-t)
+
+    def med(xs):
+        return float(np.median(np.asarray(xs,float)))
+
+    out={
+        "repeats":int(repeats),
+        "local_energy_median_s":med(local_times),
+        "jacobian_median_s":med(jac_times),
+        "prepare_solve_median_s":med(solve_times),
+        "total_median_s":med(total_times),
+    }
+    out["accounted_median_s"]=float(
+        out["local_energy_median_s"]
+        +out["jacobian_median_s"]
+        +out["prepare_solve_median_s"]
+    )
+    print(
+        "[shared SR profile] "
+        f"local={out['local_energy_median_s']:.3f}s "
+        f"jac={out['jacobian_median_s']:.3f}s "
+        f"solve={out['prepare_solve_median_s']:.3f}s "
+        f"total={out['total_median_s']:.3f}s",
+        flush=True,
+    )
+    return out
+
+
 def _profile_vmc_components(
     *,
     vstate,H_fast,jax,nk,
@@ -1739,6 +1879,7 @@ def _stage(
     fast_local_check={}
     train_segment_timings=[]
     shared_sr_check={}
+    shared_sr_profile={}
 
     fast_local_requested=bool(getattr(args,"fast_local_energy",False))
     fast_local_eligible=(
@@ -2135,6 +2276,24 @@ def _stage(
                 H_reference=(H_fast if fast_local_effective else None),
             )
 
+        if (
+            profile_repeats>0
+            and str(args._active_seed)==profile_seed
+            and trainer_effective=="shared_sr"
+        ):
+            profile_diag=(
+                float(normalized_train_schedule[0]["diag_shift"])
+                if normalized_train_schedule is not None
+                else float(args.diag_shift)
+            )
+            shared_sr_profile=_profile_shared_sr_components(
+                vstate=vstate,H=H_stage,nk=nk,jax=jax,
+                solver=solver,
+                diag_shift=profile_diag,
+                chunk_size=args.qgt_chunk_size,
+                repeats=profile_repeats,
+            )
+
         gauge_fix_callback=(
             _make_orbital_gauge_fix_callback(
                 nk,
@@ -2385,6 +2544,7 @@ def _stage(
         "fast_local_gradient_check":fast_local_gradient_check,
         "vmc_component_profile":vmc_profile,
         "shared_sr_check":shared_sr_check,
+        "shared_sr_profile":shared_sr_profile,
         "fast_local_check":fast_local_check,
         "train_segment_timings":train_segment_timings,
         "trainer_requested":str(getattr(args,"trainer","legacy")),
