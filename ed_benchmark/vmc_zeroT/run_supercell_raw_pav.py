@@ -495,7 +495,7 @@ def parser():
     )
     p.add_argument("--jastrow-shells",type=int,default=4)
 
-    p.add_argument("--raw-iter",type=int,default=150)
+    p.add_argument("--raw-iter",type=int,default=230)
     p.add_argument(
         "--tint-vap-iter",type=int,default=0,
         help="Optional 3-image Tint VAP iterations. 0 disables Tint VAP.",
@@ -514,20 +514,36 @@ def parser():
     )
     p.add_argument(
         "--train-samples-late",type=int,default=None,
-        help="Training samples per Raw step after the switch. Default=--n-samples.",
+        help="Middle-stage Raw samples. Default=--n-samples.",
     )
     p.add_argument(
-        "--train-samples-switch-iter",type=int,default=100,
-        help="Switch Raw training samples from early to late value after this many steps.",
+        "--train-samples-refine",type=int,default=4096,
+        help="Final refinement-stage Raw samples.",
+    )
+    p.add_argument(
+        "--train-samples-switch-iter",type=int,default=80,
+        help="Switch Raw training samples from early to middle after this many steps.",
+    )
+    p.add_argument(
+        "--train-samples-refine-switch-iter",type=int,default=180,
+        help="Switch Raw training samples from middle to final refinement after this many steps.",
     )
     p.add_argument("--raw-learning-rate",type=float,default=0.03)
     p.add_argument(
-        "--raw-learning-rate-final",type=float,default=0.01,
-        help="Raw-stage learning rate after --raw-lr-switch-iter.",
+        "--raw-learning-rate-final",type=float,default=0.015,
+        help="Middle-stage Raw learning rate after --raw-lr-switch-iter (name kept for backward compatibility).",
     )
     p.add_argument(
-        "--raw-lr-switch-iter",type=int,default=100,
-        help="Use --raw-learning-rate for the first N Raw steps, then switch to --raw-learning-rate-final.",
+        "--raw-learning-rate-refine",type=float,default=0.005,
+        help="Final refinement-stage Raw learning rate.",
+    )
+    p.add_argument(
+        "--raw-lr-switch-iter",type=int,default=80,
+        help="Switch Raw learning rate from early to middle after this many steps.",
+    )
+    p.add_argument(
+        "--raw-refine-switch-iter",type=int,default=180,
+        help="Switch Raw learning rate/diag-shift from middle to final refinement after this many steps.",
     )
     p.add_argument("--tint-learning-rate",type=float,default=0.01)
 
@@ -611,6 +627,14 @@ def parser():
     p.add_argument("--cg-tol",type=float,default=1e-5)
     p.add_argument("--cg-maxiter",type=int,default=100)
     p.add_argument("--diag-shift",type=float,default=0.05)
+    p.add_argument(
+        "--diag-shift-mid",type=float,default=0.05,
+        help="Middle-stage SR diagonal shift.",
+    )
+    p.add_argument(
+        "--diag-shift-refine",type=float,default=0.02,
+        help="Final refinement-stage SR diagonal shift.",
+    )
 
     p.add_argument(
         "--reuse-raw",action="store_true",
@@ -664,8 +688,17 @@ def main():
     _,_,shell_mats,_=jastrow_channels(
         g,mode=a.jastrow_mode,n_shells=a.jastrow_shells
     )
-    _,bf_mats,_=bond_backflow_channels(g)
+    bf_labels,bf_mats,bf_counts=bond_backflow_channels(g)
     use_backflow=(a.correlator=="backflow")
+    if use_backflow:
+        print(
+            "[backflow] channels="
+            + ", ".join(
+                f"{label}:{int(count)}"
+                for label,count in zip(bf_labels,bf_counts)
+            ),
+            flush=True,
+        )
 
     tint_maps=None
     tint_chars=None
@@ -720,8 +753,65 @@ def main():
         if a.train_samples_late is not None
         else int(a.n_samples)
     )
-    if train_samples_early<1 or train_samples_late<1:
+    train_samples_refine=int(a.train_samples_refine)
+    if (
+        train_samples_early<1
+        or train_samples_late<1
+        or train_samples_refine<1
+    ):
         raise ValueError("training sample counts must be positive")
+    if not (
+        0 < int(a.train_samples_switch_iter)
+        < int(a.train_samples_refine_switch_iter)
+    ):
+        raise ValueError(
+            "sample switches must satisfy 0 < first < refinement"
+        )
+    if not (
+        0 < int(a.raw_lr_switch_iter)
+        < int(a.raw_refine_switch_iter)
+    ):
+        raise ValueError(
+            "learning-rate switches must satisfy 0 < first < refinement"
+        )
+
+    # Merge the LR/diag-shift and sample boundaries so the driver remains
+    # continuous even if a user chooses different switch iterations.
+    cuts=sorted({
+        int(a.train_samples_switch_iter),
+        int(a.train_samples_refine_switch_iter),
+        int(a.raw_lr_switch_iter),
+        int(a.raw_refine_switch_iter),
+    })
+    cuts=[x for x in cuts if 0 < x < int(a.raw_iter)]
+    cuts.append(int(a.raw_iter))
+    raw_train_schedule=[]
+    prev=0
+    for end_iter in cuts:
+        if prev < int(a.raw_lr_switch_iter):
+            lr=float(a.raw_learning_rate)
+            dshift=float(a.diag_shift)
+        elif prev < int(a.raw_refine_switch_iter):
+            lr=float(a.raw_learning_rate_final)
+            dshift=float(a.diag_shift_mid)
+        else:
+            lr=float(a.raw_learning_rate_refine)
+            dshift=float(a.diag_shift_refine)
+
+        if prev < int(a.train_samples_switch_iter):
+            nsamp=train_samples_early
+        elif prev < int(a.train_samples_refine_switch_iter):
+            nsamp=train_samples_late
+        else:
+            nsamp=train_samples_refine
+
+        raw_train_schedule.append({
+            "end_iter":int(end_iter),
+            "learning_rate":lr,
+            "n_samples":int(nsamp),
+            "diag_shift":dshift,
+        })
+        prev=int(end_iter)
     pav_sweep=(
         int(a.pav_sweep_size)
         if a.pav_sweep_size is not None
@@ -761,7 +851,12 @@ def main():
         "eval_samples_effective":eval_samples,
         "train_samples_early_effective":train_samples_early,
         "train_samples_late_effective":train_samples_late,
+        "train_samples_refine_effective":train_samples_refine,
         "train_samples_switch_iter_effective":int(a.train_samples_switch_iter),
+        "train_samples_refine_switch_iter_effective":int(a.train_samples_refine_switch_iter),
+        "raw_train_schedule":raw_train_schedule,
+        "backflow_channels":list(bf_labels),
+        "backflow_channel_counts":[int(x) for x in bf_counts],
         "pav_sweep_size_effective":pav_sweep,
         "pav_eval_samples_requested":pav_eval_samples,
         "lanczos_samples_effective":lanczos_samples,
@@ -774,8 +869,9 @@ def main():
             "Tint VAP is optional and disabled by default.",
             "Only optimized branches (Raw and optional Tint-VAP) are classified and mapped.",
             "The random seed keeps the normal seed's n_occ(k) pattern but replaces each occupied k-block by a reproducible random complex orthonormal subspace controlled by --rng-seed.",
-            "Raw optimization uses a two-stage learning-rate schedule: --raw-learning-rate for the first --raw-lr-switch-iter steps, then --raw-learning-rate-final.",
-            "Raw optimization also uses staged Monte Carlo sampling: --train-samples-early before --train-samples-switch-iter, then --train-samples-late (defaulting to --n-samples).",
+            "Raw optimization uses three refinement levels by default: early, middle, and final refinement; LR, samples, and SR diag_shift are all scheduled without rebuilding the driver.",
+            "Default Raw schedule for 230 steps is 1-80: lr=0.03/samples=1024/diag_shift=0.05; 81-180: lr=0.015/samples=2048/diag_shift=0.05; 181-230: lr=0.005/samples=4096/diag_shift=0.02.",
+            "Backflow resolves intra-triangle t bonds into independent A/B channels while t1/t2 remain shared.",
             "The default trainer is auto: prefer VMC_SR with standard parameter-space SR, cholesky_with_fallback, and SPRING momentum; use --trainer legacy to recover the previous QGT+iterative-SR path.",
             "PAV branches are energy-only symmetry diagnostics and report Delta E relative to their source branch.",
             "Unless --skip-lanczos is set, each final A1/A2 C3v PAV is followed by a stochastic one-step Lanczos/Ritz correction in span{|PAV>,H|PAV>}; the intermediate Tint-PAV is not Lanczos-corrected.",
@@ -789,6 +885,20 @@ def main():
 
     # _stage reads these fields from args.
     a.eval_samples=eval_samples
+    print(
+        "[raw schedule] "
+        + " | ".join(
+            f"1-{x['end_iter']}" if i==0
+            else f"{raw_train_schedule[i-1]['end_iter']+1}-{x['end_iter']}"
+            for i,x in enumerate(raw_train_schedule)
+        )
+        + " :: "
+        + " | ".join(
+            f"lr={x['learning_rate']:g},N={x['n_samples']},diag={x['diag_shift']:g}"
+            for x in raw_train_schedule
+        ),
+        flush=True,
+    )
     if a.skip_pav:
         print(
             f"[sampling] PAV disabled; Raw eval pool={eval_samples}; "
@@ -854,11 +964,7 @@ def main():
                 time_reversal_even=False,
                 n_iter=a.raw_iter,learning_rate=a.raw_learning_rate,
                 args=a,rng_seed=base_seed+1,
-                learning_rate_after=a.raw_learning_rate_final,
-                learning_rate_switch_iter=a.raw_lr_switch_iter,
-                train_samples=train_samples_early,
-                train_samples_after=train_samples_late,
-                train_samples_switch_iter=a.train_samples_switch_iter,
+                train_schedule=raw_train_schedule,
                 make_maps=True,map_edge_chunk=a.map_edge_chunk,
                 return_vstate=True,
             )
