@@ -899,6 +899,23 @@ def _make_shared_sr_driver(
     chunk_size,
 ):
     class SharedJacobianVMC(nk.driver.VMC):
+        # NetKet drivers are struct.Pytree subclasses.  Every attribute added
+        # by a subclass must therefore be declared in the class body before
+        # __init__.  Static Python callables/settings are excluded from the
+        # traced PyTree; the previous CG solution is dynamic state.
+        _shared_diag_shift: object = nk.utils.struct.field(
+            pytree_node=False,serialize=False,default=None
+        )
+        _shared_linear_solve: object = nk.utils.struct.field(
+            pytree_node=False,serialize=False,default=None
+        )
+        _shared_chunk_size: object = nk.utils.struct.field(
+            pytree_node=False,serialize=False,default=None
+        )
+        _shared_x0: object = nk.utils.struct.field(
+            pytree_node=True,default=None
+        )
+
         def __init__(self):
             super().__init__(
                 H,optimizer,
@@ -906,7 +923,6 @@ def _make_shared_sr_driver(
                 preconditioner=None,
             )
             self._shared_diag_shift=diag_shift
-            self._shared_solver=solver
             self._shared_linear_solve=_make_shared_sr_linear_solve(
                 jax,solver
             )
