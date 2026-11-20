@@ -573,6 +573,30 @@ def make_fast_raw_local_energy_kernel(
     edge_j_j=jnp.asarray(ej_np)
     edge_t_j=jnp.asarray(et_np)
     edge_v_j=jnp.asarray(ev_np)
+
+    bf_ch_np,bf_dst_np,bf_src_np,bf_val_np=_sparse_backflow_channels(bf_np)
+    j_ch_np,j_i_np,j_j_np,j_val_np=_sparse_jastrow_channels(shells_np)
+    bf_ch=jnp.asarray(bf_ch_np)
+    bf_dst=jnp.asarray(bf_dst_np)
+    bf_src=jnp.asarray(bf_src_np)
+    bf_val=jnp.asarray(bf_val_np)
+    j_ch=jnp.asarray(j_ch_np)
+    j_i=jnp.asarray(j_i_np)
+    j_j=jnp.asarray(j_j_np)
+    j_val=jnp.asarray(j_val_np)
+
+    # Only these Jastrow matrix entries are required by a nearest-neighbour
+    # hop.  Precompute channel features instead of materialising C(v) as a
+    # dense Ns x Ns matrix for every parameter update.
+    edge_shell=jnp.asarray(
+        shells_np[:,ei_np,ej_np].T,
+        dtype=jnp.float64,
+    )
+    diag_shell=jnp.asarray(
+        np.diagonal(shells_np,axis1=1,axis2=2).T,
+        dtype=jnp.float64,
+    )
+
     filling=float(nf/ns)
     interaction_V=float(interaction_V)
 
@@ -599,14 +623,28 @@ def make_fast_raw_local_energy_kernel(
         Q=assemble_Q(parameters)
         eta=parameters["eta"]
         v=parameters["v"]
+
+        # W is kept dense only for the O(Nf*Nedge) Woodbury element lookups
+        # below.  The expensive configuration-dependent Q_BF construction is
+        # sparse and scales with the number of physical directed bonds.
         W=jnp.einsum("k,kij->ij",eta,bf)
-        C=jnp.einsum("k,kij->ij",v,shells)
         eye3=jnp.eye(3,dtype=Q.dtype)
+        edge_C=edge_shell@v
+        diag_C=diag_shell@v
+        j_coeff=v[j_ch]*j_val
 
         def one(x):
             occupied=jnp.nonzero(x,size=nf)[0]
             dn=x-filling
-            Qx=Q+jnp.einsum("ij,j,ja->ia",W,dn,Q)
+
+            bf_contrib=(
+                eta[bf_ch,None]
+                *bf_val[:,None]
+                *dn[bf_src,None]
+                *Q[bf_src,:]
+            )
+            dQ=jnp.zeros_like(Q).at[bf_dst,:].add(bf_contrib)
+            Qx=Q+dQ
             A=Qx[occupied]
 
             xi=x[edge_i_j]
@@ -649,12 +687,18 @@ def make_fast_raw_local_energy_kernel(
             det_ratio=jnp.linalg.det(small)
 
             # Exact Jastrow ratio for delta n = -e_src + e_dst.
-            h=C@dn
+            # For J=1/2 dn^T C dn, h=C dn.  The sparse upper-triangle
+            # representation contributes to both endpoints; diagonal entries
+            # are stored with the built-in 1/2 factor and therefore the two
+            # scatter-adds correctly reconstruct C_ii dn_i.
+            h=jnp.zeros((ns,),dtype=dn.dtype)
+            h=h.at[j_i].add(j_coeff*dn[j_j])
+            h=h.at[j_j].add(j_coeff*dn[j_i])
             delta_J=(
                 -h[src]+h[dst]
                 +0.5*(
-                    C[src,src]+C[dst,dst]
-                    -C[src,dst]-C[dst,src]
+                    diag_C[src]+diag_C[dst]
+                    -2.0*edge_C
                 )
             )
             replacement_ratio=det_ratio*jnp.exp(delta_J)
