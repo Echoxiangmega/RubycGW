@@ -771,7 +771,11 @@ def parser():
 
     p.add_argument(
         "--reuse-raw",action="store_true",
-        help="Reuse large_raw_<correlator>__<seed>/final_params.npz.",
+        help="Reuse large_raw_<correlator>__<seed>/final_params.npz without re-optimizing.",
+    )
+    p.add_argument(
+        "--raw-warmstart-dir",default=None,
+        help="Optional previous Raw stage directory whose final_params.npz initializes a new Raw optimization. May contain {seed}, which is replaced by the active seed name.",
     )
     p.add_argument(
         "--reuse-tint-vap",action="store_true",
@@ -1001,7 +1005,7 @@ def main():
             "Full residual A1/A2 PAV is applied directly to optimized Raw parameters.",
             "Tint VAP is optional and disabled by default.",
             "Only optimized branches (Raw and optional Tint-VAP) are classified and mapped.",
-            "The random seed keeps the normal seed's n_occ(k) pattern but replaces each occupied k-block by a reproducible random complex orthonormal subspace controlled by --rng-seed.",
+            "The random seed keeps the normal seed's n_occ(k) pattern and applies a small reproducible occupied-unoccupied rotation around the normal low-energy subspace; --seed-amplitude controls its mixing strength and --rng-seed controls its direction.",
             "Raw optimization uses three refinement levels by default: early, middle, and final refinement; LR, samples, and SR diag_shift are all scheduled without rebuilding the driver.",
             "Default Raw schedule for 230 steps is 1-80: lr=0.03/samples=1024/diag_shift=0.05; 81-180: lr=0.015/samples=2048/diag_shift=0.05; 181-230: lr=0.005/samples=4096/diag_shift=0.02.",
             "Backflow resolves intra-triangle t bonds into independent A/B channels while t1/t2 remain shared.",
@@ -1014,7 +1018,7 @@ def main():
             "--fast-sampler enables the persistent inverse-cache Woodbury Raw Metropolis sampler; --fast-sampler-check independently validates the same cached dynamics against full logpsi using identical proposals.",
             "Before the first fast Raw stage, expect_and_grad is compared against the standard NetKet Hamiltonian on identical samples; the fast backend is used only if the energy and full parameter-gradient PyTrees agree within --fast-local-gradient-tolerance.",
             "--fast-local-check remains available as a stricter post-training per-hop ratio/local-energy diagnostic.",
-            "The default trainer is legacy QGT+iterative SR because the current mixed real/complex parameter tree is not accepted by VMC_SR; --trainer auto remains available for compatibility testing.",
+            "The default trainer is shared_sr: one mixed-real Jacobian is reused for the energy force and matrix-free SR solve. Native VMC_SR still rejects the mixed parameter tree; legacy remains available as a fallback.",
             "PAV branches are energy-only symmetry diagnostics and report Delta E relative to their source branch.",
             "Unless --skip-lanczos is set, each final A1/A2 C3v PAV is followed by a stochastic one-step Lanczos/Ritz correction in span{|PAV>,H|PAV>}; the intermediate Tint-PAV is not Lanczos-corrected.",
             "Large-supercell 1LS uses MC spectral moments m1..m4 and never enumerates the full Hilbert space.",
@@ -1067,7 +1071,38 @@ def main():
 
         # ---- 1. Raw optimization (or reuse) ----
         raw_dir=out/f"large_raw_{a.correlator}__{seed}"
+        raw_warmstart_params=None
+        raw_warmstart_source=None
+        if a.raw_warmstart_dir is not None:
+            warm_text=str(a.raw_warmstart_dir).format(seed=seed)
+            warm_dir=Path(warm_text).expanduser().resolve()
+            _,raw_warmstart_params=_load_params(warm_dir)
+            raw_warmstart_source=str(warm_dir)
+            expected_counts=np.asarray(
+                seed_data["occupations_per_k"],int
+            )
+            if len(raw_warmstart_params["blocks"])!=len(expected_counts):
+                raise ValueError(
+                    f"Warm-start k-block count mismatch for seed={seed}: "
+                    f"{len(raw_warmstart_params['blocks'])} vs "
+                    f"{len(expected_counts)}"
+                )
+            for ik,(block,nocc) in enumerate(zip(
+                raw_warmstart_params["blocks"],expected_counts
+            )):
+                if np.asarray(block).shape!=(18,int(nocc)):
+                    raise ValueError(
+                        f"Warm-start block {ik} shape "
+                        f"{np.asarray(block).shape} != {(18,int(nocc))}. "
+                        "Warm starts must keep the same supercell/filling and "
+                        "momentum-sector occupations."
+                    )
+
         if a.reuse_raw:
+            if raw_warmstart_params is not None:
+                raise ValueError(
+                    "--reuse-raw and --raw-warmstart-dir are mutually exclusive"
+                )
             _,raw_params=_load_params(raw_dir)
             # Re-evaluate the reused state so this workflow gets a fresh,
             # same-statistics summary and map.
@@ -1101,7 +1136,7 @@ def main():
                 seed_data=seed_data,
                 shell_mats=shell_mats,bf_mats=bf_mats,
                 use_backflow=use_backflow,
-                initial_params=None,
+                initial_params=raw_warmstart_params,
                 maps=None,chars=None,point_label=None,
                 time_reversal_even=False,
                 n_iter=a.raw_iter,learning_rate=a.raw_learning_rate,
@@ -1111,6 +1146,7 @@ def main():
                 return_vstate=True,
             )
         raw_row["branch_source"]="Raw"
+        raw_row["warmstart_source"]=raw_warmstart_source
         raw_row.update(_classify_branch(
             raw_row,bstar_ref,
             co_thr=a.classify_co_threshold,
