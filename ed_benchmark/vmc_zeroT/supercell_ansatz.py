@@ -270,12 +270,20 @@ def build_supercell_netket_model(
     initial_tr_phase: float = 0.0,
     sparse_correlators: bool = False,
     packed_orbitals: bool = False,
+    orthonormalize_orbitals: bool = True,
 ):
     """Build a translation-exact ring3-supercell Slater-Jastrow-backflow model.
 
     If point_site_maps/characters are supplied, only that fixed-size point
     group is explicitly projected. Supercell translations are never summed
     over: they are exact in the Bloch orbital construction.
+
+    If orthonormalize_orbitals=False, the trainable occupied blocks are used
+    directly instead of QR-orthonormalising them on every model evaluation.
+    This is an exact gauge choice for unprojected Slater-Jastrow-linear-
+    backflow states: right-multiplying an occupied block by any invertible
+    matrix changes the many-body amplitude only by a configuration-independent
+    determinant factor.
     """
     import jax
     import jax.numpy as jnp
@@ -414,7 +422,10 @@ def build_supercell_netket_model(
             for ik, M in enumerate(params):
                 if M is None:
                     continue
-                U, _ = jnp.linalg.qr(M, mode="reduced")
+                if orthonormalize_orbitals:
+                    U, _ = jnp.linalg.qr(M, mode="reduced")
+                else:
+                    U = M
                 phase = jnp.exp(
                     2j * jnp.pi * jnp.sum(sc * ks[ik][None, :], axis=1)
                 ) / jnp.sqrt(jnp.asarray(float(nsc)))
@@ -504,6 +515,7 @@ def make_fast_raw_local_energy_kernel(
     edge_has_interaction,
     interaction_V,
     return_diagnostics=True,
+    orthonormalize_orbitals=True,
 ):
     """Build a JAX Woodbury local-energy kernel for the unprojected Raw ansatz.
 
@@ -573,7 +585,10 @@ def make_fast_raw_local_energy_kernel(
                 continue
             lo=int(offsets[ik]); hi=int(offsets[ik+1])
             M=packed[:,lo:hi]
-            U,_=jnp.linalg.qr(M,mode="reduced")
+            if orthonormalize_orbitals:
+                U,_=jnp.linalg.qr(M,mode="reduced")
+            else:
+                U=M
             phase=jnp.exp(
                 2j*jnp.pi*jnp.sum(sc*ks[ik][None,:],axis=1)
             )/jnp.sqrt(jnp.asarray(float(nsc)))
