@@ -329,6 +329,30 @@ def _save_mc_maps(directory,vstate,g,title,edge_chunk=12):
     density,rho,bond,current=_mc_site_bond_current(
         vstate,g,edge_chunk=edge_chunk
     )
+
+    # Validate the batched fermionic hop/sign convention against NetKet on
+    # one representative edge using the exact same cached samples.
+    try:
+        from netket.operator.fermion import create as cdag, destroy as c
+        e0=g.edges[0]
+        ref=vstate.expect(cdag(vstate.hilbert,e0.i)@c(vstate.hilbert,e0.j))
+        ref_mean=complex(np.asarray(ref.mean))
+        err=abs(rho[0]-ref_mean)
+        scale=max(1.0,abs(ref_mean))
+        if err>5e-7*scale:
+            raise RuntimeError(
+                "MC map fermion-hop estimator disagrees with NetKet on the "
+                f"validation edge: rho_fast={rho[0]}, rho_netket={ref_mean}, "
+                f"|diff|={err:.3e}"
+            )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        print(
+            f"[map warning] one-edge NetKet rho validation skipped: {exc}",
+            flush=True,
+        )
+
     xy,cells=site_positions(g)
     starts,ends,crossed=edge_segments(g,xy,cells)
     export_site_csv(directory/"site_density.csv",g,xy,density)
