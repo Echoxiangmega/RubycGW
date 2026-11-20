@@ -800,6 +800,26 @@ def _validate_analytic_logderiv(
     return report
 
 
+def _make_shared_sr_linear_solve(jax,solver):
+    """JIT the matrix-free O^T O solve once, with O passed dynamically."""
+    import jax.numpy as jnp
+
+    @jax.jit
+    def solve(O,dv,diag_shift,x0):
+        force=O.T@dv
+        shift=jnp.asarray(diag_shift,dtype=force.dtype)
+
+        def matvec(vec):
+            return O.T@(O@vec)+shift*vec
+
+        out=solver(matvec,force,x0=x0)
+        if isinstance(out,tuple):
+            return out
+        return out,None
+
+    return solve
+
+
 def _shared_sr_update(
     *,
     vstate,
@@ -807,7 +827,7 @@ def _shared_sr_update(
     nk,
     jax,
     diag_shift,
-    solver,
+    linear_solve,
     chunk_size,
     x0=None,
 ):
@@ -856,18 +876,9 @@ def _shared_sr_update(
     dv=jnp.stack((jnp.real(dv),jnp.imag(dv)),axis=-1)
     dv=jax.lax.collapse(dv,0,2)
 
-    force_real=O.T@dv
-    shift=jnp.asarray(diag_shift,dtype=force_real.dtype)
-
-    def matvec(vec):
-        return O.T@(O@vec)+shift*vec
-
-    solved=solver(matvec,force_real,x0=x0)
-    if isinstance(solved,tuple):
-        update_real,info=solved
-    else:
-        update_real=solved
-        info=None
+    update_real,info=linear_solve(
+        O,dv,jnp.asarray(diag_shift),x0
+    )
 
     update_tree_real=unravel_real(update_real)
     update_tree=reassemble(update_tree_real)
@@ -896,6 +907,9 @@ def _make_shared_sr_driver(
             )
             self._shared_diag_shift=diag_shift
             self._shared_solver=solver
+            self._shared_linear_solve=_make_shared_sr_linear_solve(
+                jax,solver
+            )
             self._shared_chunk_size=chunk_size
             self._shared_x0=None
             self.info=None
@@ -911,7 +925,7 @@ def _make_shared_sr_driver(
                 nk=nk,
                 jax=jax,
                 diag_shift=shift,
-                solver=self._shared_solver,
+                linear_solve=self._shared_linear_solve,
                 chunk_size=self._shared_chunk_size,
                 x0=self._shared_x0,
             )
@@ -954,6 +968,8 @@ def _validate_shared_sr(
             diag_shift=diag_shift,
         )
 
+    shared_linear_solve=_make_shared_sr_linear_solve(jax,solver)
+
     # Warmup both paths on the identical cached sample pool.
     st_ref,grad_ref=vstate.expect_and_grad(H)
     _sync_tree(jax,grad_ref)
@@ -962,7 +978,7 @@ def _validate_shared_sr(
 
     st_shared,dp_shared,_,_=_shared_sr_update(
         vstate=vstate,H=H,nk=nk,jax=jax,
-        diag_shift=diag_shift,solver=solver,
+        diag_shift=diag_shift,linear_solve=shared_linear_solve,
         chunk_size=chunk_size,x0=None,
     )
     _sync_tree(jax,dp_shared)
