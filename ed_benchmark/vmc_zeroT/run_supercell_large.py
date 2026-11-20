@@ -93,14 +93,24 @@ def _fast_raw_operator_class(nk):
         def local_kernel(
             logpsi, pars, sigma, extra_args, *, chunk_size=None
         ):
-            del logpsi, extra_args, chunk_size
-            # NetKet's chunked expect path injects chunk_size as a keyword.
-            # The Woodbury kernel already evaluates a batch of root samples
-            # directly; for now accept that hint for API compatibility.
-            # Internal Woodbury sample-axis chunking is added separately
-            # after the production path is validated.
+            del logpsi, extra_args
+            # NetKet's lean interface passes vstate.variables.  The
+            # specialised kernel consumes only the trainable parameter
+            # collection.
             model_pars=pars["params"] if "params" in pars else pars
-            return op.kernel(model_pars,sigma)
+            if chunk_size is None:
+                return op.kernel(model_pars,sigma)
+
+            # Mirror NetKet's own chunked operator kernels: split only the
+            # sample axis while broadcasting the parameter PyTree.  This
+            # keeps the Woodbury intermediates (Nf x Nedge x 3 per root)
+            # bounded for large systems and avoids materialising all roots
+            # in one XLA program.
+            return nk.jax.apply_chunked(
+                lambda p,x: op.kernel(p,x),
+                in_axes=(None,0),
+                chunk_size=int(chunk_size),
+            )(model_pars,sigma)
         return local_kernel
 
     # NetKet 3.22+ dispatches get_local_kernel(vstate, op, chunk_size) when
