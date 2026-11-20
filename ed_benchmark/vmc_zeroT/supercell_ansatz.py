@@ -883,6 +883,224 @@ def make_fast_raw_local_energy_kernel(
     return jax.jit(kernel)
 
 
+def make_fast_raw_sampler_sweep_kernel(
+    *,
+    sc_coords,
+    internal_sites,
+    kpoints,
+    occupations_per_k,
+    shell_matrices,
+    backflow_matrices,
+    clusters,
+    sweep_size,
+    machine_pow=2.0,
+    orthonormalize_orbitals=False,
+):
+    """Build a cached rank-3 Woodbury Metropolis sweep kernel.
+
+    The kernel starts from a batch of valid fixed-number configurations. For
+    each chain it constructs the Slater matrix/inverse once, then performs
+    sweep_size nearest-neighbour fermion-hop proposals. Accepted moves update
+    the inverse by the Woodbury identity instead of recomputing a full
+    determinant.
+
+    Occupied rows are kept in persistent particle slots rather than canonical
+    sorted order. This can change the determinant by a fermionic permutation
+    sign, but sampling depends only on the amplitude modulus, so the
+    Metropolis ratio is exactly unchanged.
+
+    Proposal selection is uniform over currently hoppable undirected clusters.
+    proposal_uniforms and accept_uniforms are supplied explicitly so a
+    full-logpsi reference sweep can use identical random choices.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    sc_np=np.asarray(sc_coords,np.int32)
+    internal_np=np.asarray(internal_sites,np.int32)
+    k_np=np.asarray(kpoints,float)
+    counts_np=np.asarray(occupations_per_k,np.int32)
+    shells_np=np.asarray(shell_matrices,np.float64)
+    bf_np=np.asarray(backflow_matrices,np.float64)
+    clusters_np=np.asarray(clusters,np.int32)
+
+    ns=int(len(internal_np))
+    nf=int(np.sum(counts_np))
+    nsc=int(len(np.unique(sc_np,axis=0)))
+    offsets=np.concatenate(([0],np.cumsum(counts_np))).astype(np.int32)
+
+    sc=jnp.asarray(sc_np)
+    internal=jnp.asarray(internal_np)
+    ks=jnp.asarray(k_np)
+    shells=jnp.asarray(shells_np)
+    bf=jnp.asarray(bf_np)
+    clusters_j=jnp.asarray(clusters_np)
+    eye_nf=jnp.eye(nf,dtype=jnp.complex128)
+    eye3=jnp.eye(3,dtype=jnp.complex128)
+    filling=float(nf/ns)
+    machine_pow=float(machine_pow)
+    sweep_size=int(sweep_size)
+
+    bf_ch_np,bf_dst_np,bf_src_np,bf_val_np=_sparse_backflow_channels(bf_np)
+    bf_ch=jnp.asarray(bf_ch_np)
+    bf_dst=jnp.asarray(bf_dst_np)
+    bf_src=jnp.asarray(bf_src_np)
+    bf_val=jnp.asarray(bf_val_np)
+
+    def assemble_Q(parameters):
+        packed=parameters["M_packed"]
+        qparts=[]
+        for ik in range(len(counts_np)):
+            nki=int(counts_np[ik])
+            if nki==0:
+                continue
+            lo=int(offsets[ik]); hi=int(offsets[ik+1])
+            M=packed[:,lo:hi]
+            if orthonormalize_orbitals:
+                U,_=jnp.linalg.qr(M,mode="reduced")
+            else:
+                U=M
+            phase=jnp.exp(
+                2j*jnp.pi*jnp.sum(sc*ks[ik][None,:],axis=1)
+            )/jnp.sqrt(jnp.asarray(float(nsc)))
+            qparts.append(phase[:,None]*U[internal,:])
+        return jnp.concatenate(qparts,axis=1)
+
+    def choose_hoppable(x,u):
+        a=clusters_j[:,0]
+        b=clusters_j[:,1]
+        mask=x[a]!=x[b]
+        n_active=jnp.sum(mask,dtype=jnp.int32)
+        rank=jnp.minimum(
+            jnp.asarray(jnp.floor(u*n_active),jnp.int32),
+            n_active-1,
+        )
+        cumulative=jnp.cumsum(mask.astype(jnp.int32))
+        edge=jnp.argmax(cumulative>rank)
+        return edge,n_active
+
+    def kernel(parameters,configurations,proposal_uniforms,accept_uniforms):
+        Q=assemble_Q(parameters)
+        eta=parameters["eta"]
+        v=parameters["v"]
+        W=jnp.einsum("k,kij->ij",eta,bf)
+        C=jnp.einsum("k,kij->ij",v,shells)
+
+        def one(x,u_prop,u_acc):
+            x=x.astype(jnp.int8)
+            sites=jnp.nonzero(x,size=nf)[0]
+            dn=x.astype(Q.real.dtype)-filling
+
+            contrib=(
+                eta[bf_ch,None]
+                *bf_val[:,None]
+                *dn[bf_src,None]
+                *Q[bf_src,:]
+            )
+            dQ=jnp.zeros_like(Q).at[bf_dst,:].add(contrib)
+            Qx=Q+dQ
+            A=Qx[sites]
+            Ainv=jnp.linalg.solve(A,eye_nf)
+            h=C@dn
+            logp_delta=jnp.asarray(0.0,dtype=Q.real.dtype)
+            naccepted=jnp.asarray(0,jnp.int32)
+
+            def step(carry,inputs):
+                x,sites,Qx,Ainv,h,logp_delta,naccepted=carry
+                up,ua=inputs
+                edge,n_active=choose_hoppable(x,up)
+                i=clusters_j[edge,0]
+                j=clusters_j[edge,1]
+                xi=x[i]
+                src=jnp.where(xi>0,i,j)
+                dst=jnp.where(xi>0,j,i)
+
+                slot=jnp.argmax(sites==src)
+                u1=-W[sites,src]
+                u2= W[sites,dst]
+                u3=(jnp.arange(nf)==slot).astype(Q.dtype)
+                U=jnp.stack((u1,u2,u3),axis=1)
+
+                deltaQ=(
+                    -W[:,src,None]*Q[src,:]
+                    +W[:,dst,None]*Q[dst,:]
+                )
+                Qx_prop=Qx+deltaQ
+                replacement=Qx_prop[dst,:]-Qx_prop[src,:]
+                V=jnp.stack(
+                    (Q[src,:],Q[dst,:],replacement),
+                    axis=1,
+                )
+
+                X=Ainv@U
+                small=eye3+V.T@X
+                det_ratio=jnp.linalg.det(small)
+
+                delta_J=(
+                    -h[src]+h[dst]
+                    +0.5*(
+                        C[src,src]+C[dst,dst]
+                        -C[src,dst]-C[dst,src]
+                    )
+                )
+                log_wave_ratio=machine_pow*(
+                    jnp.log(jnp.maximum(jnp.abs(det_ratio),1e-300))
+                    +jnp.real(delta_J)
+                )
+
+                x_prop=x.at[src].set(0).at[dst].set(1)
+                _,n_active_prop=choose_hoppable(
+                    x_prop,jnp.asarray(0.0,dtype=up.dtype)
+                )
+                log_corr=(
+                    jnp.log(n_active.astype(Q.real.dtype))
+                    -jnp.log(n_active_prop.astype(Q.real.dtype))
+                )
+                log_accept=log_wave_ratio+log_corr
+                accept=jnp.log(
+                    jnp.maximum(ua,jnp.asarray(1e-300,dtype=ua.dtype))
+                )<log_accept
+
+                Y=V.T@Ainv
+                Ainv_prop=Ainv-X@jnp.linalg.solve(small,Y)
+                sites_prop=sites.at[slot].set(dst)
+                h_prop=h-C[:,src]+C[:,dst]
+
+                x_new=jnp.where(accept,x_prop,x)
+                sites_new=jnp.where(accept,sites_prop,sites)
+                Qx_new=jnp.where(accept,Qx_prop,Qx)
+                Ainv_new=jnp.where(accept,Ainv_prop,Ainv)
+                h_new=jnp.where(accept,h_prop,h)
+                lp_new=logp_delta+jnp.where(
+                    accept,log_wave_ratio,jnp.asarray(0.0,log_wave_ratio.dtype)
+                )
+                na_new=naccepted+accept.astype(jnp.int32)
+
+                diagnostics=(
+                    edge,accept,log_wave_ratio,log_corr,det_ratio
+                )
+                return (
+                    x_new,sites_new,Qx_new,Ainv_new,h_new,lp_new,na_new
+                ),diagnostics
+
+            carry,diag=jax.lax.scan(
+                step,
+                (x,sites,Qx,Ainv,h,logp_delta,naccepted),
+                (u_prop[:sweep_size],u_acc[:sweep_size]),
+            )
+            x,sites,Qx,Ainv,h,logp_delta,naccepted=carry
+
+            A_final=Qx[sites]
+            inv_res=jnp.max(jnp.abs(A_final@Ainv-eye_nf))
+            return x,logp_delta,naccepted,inv_res,diag
+
+        return jax.vmap(one)(
+            configurations,proposal_uniforms,accept_uniforms
+        )
+
+    return jax.jit(kernel)
+
+
 def extract_supercell_parameters(
     parameters, nkpoints: int, occupations_per_k=None
 ) -> dict:
