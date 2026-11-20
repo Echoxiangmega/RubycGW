@@ -501,12 +501,32 @@ def parser():
         help="Optional 3-image Tint VAP iterations. 0 disables Tint VAP.",
     )
     p.add_argument(
-        "--trainer",choices=["auto","vmc_sr","legacy"],default="legacy",
-        help="Raw/Tint-VAP optimizer backend. legacy is the safe default for the current mixed real/complex ansatz; auto still probes VMC_SR first.",
+        "--trainer",choices=["auto","vmc_sr","shared_sr","legacy"],default="legacy",
+        help="Raw/Tint-VAP optimizer backend. shared_sr uses one explicit mixed-real Jacobian for both force and SR; legacy keeps separate expect_and_grad and QGT passes; auto probes native VMC_SR, then shared_sr, then legacy.",
     )
     p.add_argument(
         "--sr-momentum",type=float,default=0.8,
-        help="SPRING momentum used by VMC_SR. Set 0 to disable.",
+        help="SPRING momentum used by native VMC_SR. Set 0 to disable; shared_sr currently uses ordinary SR without momentum.",
+    )
+    p.add_argument(
+        "--shared-sr-check",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Before first use of shared_sr for an occupation pattern, compare its full SR update against legacy expect_and_grad+SR on identical samples.",
+    )
+    p.add_argument(
+        "--shared-sr-strict",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Raise instead of falling back to legacy if shared_sr validation or setup fails.",
+    )
+    p.add_argument(
+        "--shared-sr-tolerance",type=float,default=1e-8,
+        help="Maximum energy, max-update and relative-L2 discrepancy accepted by --shared-sr-check.",
+    )
+    p.add_argument(
+        "--shared-sr-min-speedup",type=float,default=1.02,
+        help="Require at least this same-sample speedup over legacy expect_and_grad+SR before enabling shared_sr.",
     )
     p.add_argument(
         "--train-samples-early",type=int,default=1024,
@@ -957,6 +977,7 @@ def main():
             "The rank-3 Woodbury Raw local-energy backend is enabled by default for unprojected backflow stages; it falls back to the standard NetKet Hamiltonian unless --fast-local-strict is set.",
             "--orbital-parameterization free is an exact Raw-state gauge reparameterization that removes per-evaluation orbital QR; periodic QR gauge fixing controls numerical conditioning without changing the normalized Slater-Jastrow-linear-backflow state.",
             "--analytic-logderiv optionally replaces generic autodiff through QR-free Raw logdet/backflow/Jastrow by an exact custom VJP and validates it against the original autodiff model before use.",
+            "--trainer shared_sr removes duplicate log-derivative work by using one mixed-real Jacobian for both the energy force and SR solve; it validates the final update against legacy SR before use.",
             "Before the first fast Raw stage, expect_and_grad is compared against the standard NetKet Hamiltonian on identical samples; the fast backend is used only if the energy and full parameter-gradient PyTrees agree within --fast-local-gradient-tolerance.",
             "--fast-local-check remains available as a stricter post-training per-hop ratio/local-energy diagnostic.",
             "The default trainer is legacy QGT+iterative SR because the current mixed real/complex parameter tree is not accepted by VMC_SR; --trainer auto remains available for compatibility testing.",
