@@ -271,6 +271,7 @@ def build_supercell_netket_model(
     sparse_correlators: bool = False,
     packed_orbitals: bool = False,
     orthonormalize_orbitals: bool = True,
+    analytic_logderiv: bool = False,
 ):
     """Build a translation-exact ring3-supercell Slater-Jastrow-backflow model.
 
@@ -284,6 +285,13 @@ def build_supercell_netket_model(
     backflow states: right-multiplying an occupied block by any invertible
     matrix changes the many-body amplitude only by a configuration-independent
     determinant factor.
+
+    If analytic_logderiv=True together with orthonormalize_orbitals=False,
+    the Raw log-wavefunction uses an exact custom JVP.  The tangent of the
+    Slater determinant is evaluated as Tr(A^{-1} dA), with the linear
+    backflow and Jastrow tangents handled analytically.  This keeps the
+    primal wavefunction unchanged while giving NetKet force/QGT routines a
+    substantially smaller differentiation graph.
     """
     import jax
     import jax.numpy as jnp
@@ -336,6 +344,134 @@ def build_supercell_netket_model(
             raise ValueError("point_site_maps must be (|G|,Ns)")
         if chars_np is None or chars_np.shape != (maps_np.shape[0],):
             raise ValueError("point characters do not match point maps")
+
+    # Constants used by the optional exact QR-free log-derivative.
+    if sparse_correlators:
+        _j_ch=jnp.asarray(j_ch_np)
+        _j_i=jnp.asarray(j_i_np)
+        _j_j=jnp.asarray(j_j_np)
+        _j_v=jnp.asarray(j_v_np)
+        if bf_np is not None:
+            _bf_ch=jnp.asarray(bf_ch_np)
+            _bf_dst=jnp.asarray(bf_dst_np)
+            _bf_src=jnp.asarray(bf_src_np)
+            _bf_v=jnp.asarray(bf_v_np)
+        else:
+            _bf_ch=_bf_dst=_bf_src=_bf_v=None
+    else:
+        _j_ch=_j_i=_j_j=_j_v=None
+        _bf_ch=_bf_dst=_bf_src=_bf_v=None
+
+    def _free_logpsi_primal(Q,eta,v,x):
+        occupied=jnp.nonzero(x,size=nf)[0]
+        dn=x-(nf/ns)
+        if bf_np is not None:
+            if sparse_correlators:
+                contrib=(
+                    eta[_bf_ch,None]
+                    *_bf_v[:,None]
+                    *dn[_bf_src,None]
+                    *Q[_bf_src,:]
+                )
+                dQ=jnp.zeros_like(Q).at[_bf_dst,:].add(contrib)
+            else:
+                dQ=jnp.einsum(
+                    "k,kij,j,ja->ia",
+                    eta,jnp.asarray(bf_np),dn,Q,
+                )
+            Qx=Q+dQ
+        else:
+            Qx=Q
+        A=Qx[occupied]
+        out=nk.jax.logdet_cmplx(A)
+        if use_jastrow and shells_np.shape[0]>0:
+            if sparse_correlators:
+                vals=_j_v*dn[_j_i]*dn[_j_j]
+                features=jnp.zeros(
+                    (shells_np.shape[0],),dtype=dn.dtype
+                ).at[_j_ch].add(vals)
+            else:
+                features=0.5*jnp.einsum(
+                    "i,sij,j->s",
+                    dn,jnp.asarray(shells_np),dn,
+                )
+            out=out+jnp.dot(v,features)
+        return out
+
+    @jax.custom_jvp
+    def _free_logpsi_analytic(Q,eta,v,x):
+        return _free_logpsi_primal(Q,eta,v,x)
+
+    @_free_logpsi_analytic.defjvp
+    def _free_logpsi_analytic_jvp(primals,tangents):
+        Q,eta,v,x=primals
+        dQ,deta,dv,dx=tangents
+        del dx
+
+        occupied=jnp.nonzero(x,size=nf)[0]
+        dn=x-(nf/ns)
+
+        if bf_np is not None:
+            if sparse_correlators:
+                coeff=eta[_bf_ch]*_bf_v*dn[_bf_src]
+                primal_contrib=coeff[:,None]*Q[_bf_src,:]
+                bf_delta=jnp.zeros_like(Q).at[_bf_dst,:].add(
+                    primal_contrib
+                )
+                Qx=Q+bf_delta
+
+                tangent_contrib=(
+                    deta[_bf_ch,None]
+                    *_bf_v[:,None]
+                    *dn[_bf_src,None]
+                    *Q[_bf_src,:]
+                    +coeff[:,None]*dQ[_bf_src,:]
+                )
+                dQbf=jnp.zeros_like(Q).at[_bf_dst,:].add(
+                    tangent_contrib
+                )
+                dQx=dQ+dQbf
+            else:
+                backflow=jnp.asarray(bf_np)
+                bf_delta=jnp.einsum(
+                    "k,kij,j,ja->ia",eta,backflow,dn,Q
+                )
+                Qx=Q+bf_delta
+                dQx=(
+                    dQ
+                    +jnp.einsum(
+                        "k,kij,j,ja->ia",
+                        deta,backflow,dn,Q,
+                    )
+                    +jnp.einsum(
+                        "k,kij,j,ja->ia",
+                        eta,backflow,dn,dQ,
+                    )
+                )
+        else:
+            Qx=Q
+            dQx=dQ
+
+        A=Qx[occupied]
+        dA=dQx[occupied]
+        primal=nk.jax.logdet_cmplx(A)
+        tangent=jnp.trace(jnp.linalg.solve(A,dA))
+
+        if use_jastrow and shells_np.shape[0]>0:
+            if sparse_correlators:
+                vals=_j_v*dn[_j_i]*dn[_j_j]
+                features=jnp.zeros(
+                    (shells_np.shape[0],),dtype=dn.dtype
+                ).at[_j_ch].add(vals)
+            else:
+                features=0.5*jnp.einsum(
+                    "i,sij,j->s",
+                    dn,jnp.asarray(shells_np),dn,
+                )
+            primal=primal+jnp.dot(v,features)
+            tangent=tangent+jnp.dot(dv,features)
+
+        return primal,tangent
 
     class SupercellBlochSlaterJastrow(nn.Module):
         @nn.compact
@@ -433,6 +569,9 @@ def build_supercell_netket_model(
             Q = jnp.concatenate(qparts, axis=1)
 
             def base_logpsi(x):
+                if analytic_logderiv and not orthonormalize_orbitals:
+                    return _free_logpsi_analytic(Q,eta,v,x)
+
                 occupied = jnp.nonzero(x, size=nf)[0]
                 dn = x - filling
                 if bf_np is not None:
