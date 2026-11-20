@@ -709,7 +709,7 @@ def main():
         **vars(a),
         "Ns":int(g.Ns),
         "Nf":int(nf),
-        "workflow":"Raw optimization -> PAV -> PAV+1LS diagnostics; optional Tint VAP",
+        "workflow":"Raw optimization -> Tint/A1/A2 PAV diagnostics; final A1/A2 PAV -> PAV+1LS; optional Tint VAP",
         "c3v_available":bool(spatial_effective),
         "c3v_irreps":requested,
         "eval_samples_effective":eval_samples,
@@ -721,7 +721,7 @@ def main():
             "Tint VAP is optional and disabled by default.",
             "Only optimized branches (Raw and optional Tint-VAP) are classified and mapped.",
             "PAV branches are energy-only symmetry diagnostics and report Delta E relative to their source branch.",
-            "Unless --skip-lanczos is set, every PAV is followed by a stochastic one-step Lanczos/Ritz correction in span{|PAV>,H|PAV>}.",
+            "Unless --skip-lanczos is set, each final A1/A2 C3v PAV is followed by a stochastic one-step Lanczos/Ritz correction in span{|PAV>,H|PAV>}; the intermediate Tint-PAV is not Lanczos-corrected.",
             "Large-supercell 1LS uses MC spectral moments m1..m4 and never enumerates the full Hilbert space.",
             "1LS rows are energy/variance diagnostics only and do not define or relabel the Raw phase.",
         ],
@@ -816,19 +816,6 @@ def main():
         tint_pav_row["branch_source"]="Raw"
         _annotate_pav_energy(tint_pav_row,raw_row)
         rows.append(tint_pav_row)
-
-        if not a.skip_lanczos:
-            tint_l1=_pav_lanczos_row(
-                tint_pav_row,
-                hi=hi,H_fast=H_fast,graph=graph,
-                seed_data=seed_data,params=raw_params,
-                shell_mats=shell_mats,bf_mats=bf_mats,
-                use_backflow=use_backflow,
-                maps=tint_maps,chars=tint_chars,args=a,
-                rng_seed=base_seed+102,sweep_size=pav_sweep,
-                directory=out/f"raw_tint_pav_1ls_{a.correlator}__{seed}",
-            )
-            rows.append(tint_l1)
 
         # ---- 3. Full residual C3v PAV directly from Raw ----
         for ii,ir in enumerate(requested):
