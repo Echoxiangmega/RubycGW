@@ -63,6 +63,7 @@ from symmetry_projection import (
 _FAST_RAW_OPERATOR_CLASS=None
 _FAST_LOCAL_GRADIENT_VALIDATED=False
 _ANALYTIC_LOGDERIV_VALIDATED_KEYS=set()
+_SHARED_SR_VALIDATED_KEYS=set()
 
 
 def _fast_raw_operator_class(nk):
@@ -698,6 +699,8 @@ def _make_orbital_gauge_fix_callback(nk, occupations_per_k, interval):
     class OrbitalGaugeFix(nk.callbacks.AbstractCallback):
         @staticmethod
         def _reset_solver_restart(driver):
+            if hasattr(driver,"_shared_x0"):
+                driver._shared_x0=None
             pre=getattr(driver,"preconditioner",None)
             if pre is not None and hasattr(pre,"x0"):
                 pre.x0=None
@@ -1692,8 +1695,9 @@ def _stage(
                     f"{exc}; using original autodiff model.",
                     flush=True,
                 )
-                ref_vstate._samples=vstate.samples
+                _fallback_samples=vstate.samples
                 ref_vstate.parameters=vstate.parameters
+                ref_vstate._samples=_fallback_samples
                 vstate=ref_vstate
                 model=ref_model
                 analytic_logderiv_effective=False
@@ -1702,6 +1706,7 @@ def _stage(
     vmc_profile={}
     fast_local_check={}
     train_segment_timings=[]
+    shared_sr_check={}
 
     fast_local_requested=bool(getattr(args,"fast_local_energy",False))
     fast_local_eligible=(
@@ -1923,7 +1928,7 @@ def _stage(
             diag_description=f"constant {float(args.diag_shift):g}"
 
         trainer_requested=str(getattr(args,"trainer","legacy")).lower()
-        if trainer_requested not in ("auto","vmc_sr","legacy"):
+        if trainer_requested not in ("auto","vmc_sr","shared_sr","legacy"):
             raise ValueError(f"Unknown trainer={trainer_requested}")
         trainer_effective=trainer_requested
         sr_momentum=float(getattr(args,"sr_momentum",0.8))
@@ -1932,6 +1937,8 @@ def _stage(
 
         driver=None
         vmc_sr_error=None
+        shared_sr_error=None
+
         if trainer_requested in ("auto","vmc_sr"):
             try:
                 linear_solver=getattr(
@@ -1956,6 +1963,92 @@ def _stage(
                 if trainer_requested=="vmc_sr":
                     raise
                 driver=None
+
+        if driver is None and trainer_requested in ("auto","shared_sr"):
+            try:
+                key=(
+                    int(g.Ns),int(nf),
+                    tuple(
+                        int(x) for x in np.asarray(
+                            seed_data["occupations_per_k"],int
+                        )
+                    ),
+                )
+                initial_diag=(
+                    float(normalized_train_schedule[0]["diag_shift"])
+                    if normalized_train_schedule is not None
+                    else float(args.diag_shift)
+                )
+                need_shared_check=(
+                    bool(getattr(args,"shared_sr_check",True))
+                    and key not in _SHARED_SR_VALIDATED_KEYS
+                )
+                if need_shared_check:
+                    shared_sr_check=_validate_shared_sr(
+                        vstate=vstate,
+                        H=H_stage,
+                        nk=nk,
+                        jax=jax,
+                        qgt_ctor=qgt_ctor,
+                        solver=solver,
+                        diag_shift=initial_diag,
+                        chunk_size=args.qgt_chunk_size,
+                        repeats=max(
+                            1,int(getattr(args,"profile_vmc_repeats",3))
+                        ),
+                    )
+                    tol=float(getattr(args,"shared_sr_tolerance",1e-8))
+                    passed=(
+                        shared_sr_check["energy_abs_error"]<=tol
+                        and shared_sr_check["max_abs_error"]<=tol
+                        and shared_sr_check["relative_l2_error"]<=tol
+                    )
+                    shared_sr_check["tolerance"]=tol
+                    shared_sr_check["passed"]=bool(passed)
+                    min_speedup=float(
+                        getattr(args,"shared_sr_min_speedup",1.02)
+                    )
+                    perf_ok=shared_sr_check.get("speedup",1.0)>=min_speedup
+                    shared_sr_check["min_speedup"]=min_speedup
+                    shared_sr_check["performance_passed"]=bool(perf_ok)
+                    if not passed:
+                        raise RuntimeError(
+                            "shared-SR validation failed: "
+                            f"{shared_sr_check}"
+                        )
+                    if not perf_ok:
+                        raise RuntimeError(
+                            "shared-SR is correct but not faster: "
+                            f"{shared_sr_check.get('speedup',1.0):.3f}x "
+                            f"< {min_speedup:.3f}x"
+                        )
+                    _SHARED_SR_VALIDATED_KEYS.add(key)
+
+                driver=_make_shared_sr_driver(
+                    nk,jax,
+                    H=H_stage,
+                    optimizer=optimizer,
+                    vstate=vstate,
+                    diag_shift=diag_shift_for_driver,
+                    solver=solver,
+                    chunk_size=args.qgt_chunk_size,
+                )
+                trainer_effective="shared_sr"
+                effective_qgt="shared_dense_jacobian_matrix_free_sr"
+                solver_restart_effective=True
+            except Exception as exc:
+                shared_sr_error=exc
+                if trainer_requested=="shared_sr" and bool(
+                    getattr(args,"shared_sr_strict",False)
+                ):
+                    raise
+                driver=None
+                if trainer_requested=="shared_sr":
+                    print(
+                        f"[trainer fallback] shared_sr unavailable/failed: "
+                        f"{exc}; using legacy QGT+iterative SR.",
+                        flush=True,
+                    )
 
         if driver is None:
             trainer_effective="legacy"
@@ -1994,6 +2087,7 @@ def _stage(
         if (
             profile_repeats>0
             and str(args._active_seed)==profile_seed
+            and trainer_effective=="legacy"
         ):
             profile_diag=(
                 float(normalized_train_schedule[0]["diag_shift"])
@@ -2258,6 +2352,7 @@ def _stage(
         "fast_local_energy_error":fast_local_error,
         "fast_local_gradient_check":fast_local_gradient_check,
         "vmc_component_profile":vmc_profile,
+        "shared_sr_check":shared_sr_check,
         "fast_local_check":fast_local_check,
         "train_segment_timings":train_segment_timings,
         "trainer_requested":str(getattr(args,"trainer","legacy")),
