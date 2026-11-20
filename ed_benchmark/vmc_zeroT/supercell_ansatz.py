@@ -287,7 +287,7 @@ def build_supercell_netket_model(
     determinant factor.
 
     If analytic_logderiv=True together with orthonormalize_orbitals=False,
-    the Raw log-wavefunction uses an exact custom JVP.  The tangent of the
+    the Raw log-wavefunction uses an exact custom VJP.  The tangent of the
     Slater determinant is evaluated as Tr(A^{-1} dA), with the linear
     backflow and Jastrow tangents handled analytically.  This keeps the
     primal wavefunction unchanged while giving NetKet force/QGT routines a
@@ -426,7 +426,7 @@ def build_supercell_netket_model(
         # G_A[r,a] = d log(det A) / d A[r,a] = (A^-1)^T[r,a].
         # Compute it once in the custom forward pass so reverse-mode force
         # and jacrev/QGT do not have to transpose a solve graph generated from
-        # a custom JVP.
+        # a custom VJP.
         eye=jnp.eye(nf,dtype=A.dtype)
         G_A=jnp.linalg.solve(A.T,eye)
 
