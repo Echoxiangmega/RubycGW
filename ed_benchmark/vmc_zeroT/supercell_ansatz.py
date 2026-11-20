@@ -883,7 +883,7 @@ def make_fast_raw_local_energy_kernel(
     return jax.jit(kernel)
 
 
-def make_fast_raw_sampler_sweep_kernel(
+def make_fast_raw_sampler_cache_kernels(
     *,
     sc_coords,
     internal_sites,
@@ -892,26 +892,20 @@ def make_fast_raw_sampler_sweep_kernel(
     shell_matrices,
     backflow_matrices,
     clusters,
-    sweep_size,
     machine_pow=2.0,
     orthonormalize_orbitals=False,
 ):
-    """Build a cached rank-3 Woodbury Metropolis sweep kernel.
+    """Build persistent-cache kernels for Raw Metropolis fermion hopping.
 
-    The kernel starts from a batch of valid fixed-number configurations. For
-    each chain it constructs the Slater matrix/inverse once, then performs
-    sweep_size nearest-neighbour fermion-hop proposals. Accepted moves update
-    the inverse by the Woodbury identity instead of recomputing a full
-    determinant.
+    Cache initialisation constructs Q, W and C once for the current parameters,
+    and one slot-ordered Slater inverse per chain.  The advance kernel can then
+    process an arbitrary number of proposed hops without rebuilding those
+    inverses.  Accepted moves update the inverse by an exact rank-3 Woodbury
+    formula.
 
-    Occupied rows are kept in persistent particle slots rather than canonical
-    sorted order. This can change the determinant by a fermionic permutation
-    sign, but sampling depends only on the amplitude modulus, so the
-    Metropolis ratio is exactly unchanged.
-
-    Proposal selection is uniform over currently hoppable undirected clusters.
-    proposal_uniforms and accept_uniforms are supplied explicitly so a
-    full-logpsi reference sweep can use identical random choices.
+    The occupied-site order is a persistent particle-slot order rather than
+    canonical sorted Fock order.  Row permutations only change the determinant
+    sign, so the sampled probability |Psi|**machine_pow is unchanged.
     """
     import jax
     import jax.numpy as jnp
@@ -939,7 +933,6 @@ def make_fast_raw_sampler_sweep_kernel(
     eye3=jnp.eye(3,dtype=jnp.complex128)
     filling=float(nf/ns)
     machine_pow=float(machine_pow)
-    sweep_size=int(sweep_size)
 
     bf_ch_np,bf_dst_np,bf_src_np,bf_val_np=_sparse_backflow_channels(bf_np)
     bf_ch=jnp.asarray(bf_ch_np)
@@ -979,18 +972,17 @@ def make_fast_raw_sampler_sweep_kernel(
         edge=jnp.argmax(cumulative>rank)
         return edge,n_active
 
-    def kernel(parameters,configurations,proposal_uniforms,accept_uniforms):
+    def init_cache(parameters,configurations):
         Q=assemble_Q(parameters)
         eta=parameters["eta"]
         v=parameters["v"]
         W=jnp.einsum("k,kij->ij",eta,bf)
         C=jnp.einsum("k,kij->ij",v,shells)
 
-        def one(x,u_prop,u_acc):
+        def one(x):
             x=x.astype(jnp.int8)
             sites=jnp.nonzero(x,size=nf)[0]
             dn=x.astype(Q.real.dtype)-filling
-
             contrib=(
                 eta[bf_ch,None]
                 *bf_val[:,None]
@@ -1002,103 +994,209 @@ def make_fast_raw_sampler_sweep_kernel(
             A=Qx[sites]
             Ainv=jnp.linalg.solve(A,eye_nf)
             h=C@dn
-            logp_delta=jnp.asarray(0.0,dtype=Q.real.dtype)
-            naccepted=jnp.asarray(0,jnp.int32)
+            return x,sites,Qx,Ainv,h
 
-            def step(carry,inputs):
-                x,sites,Qx,Ainv,h,logp_delta,naccepted=carry
-                up,ua=inputs
-                edge,n_active=choose_hoppable(x,up)
-                i=clusters_j[edge,0]
-                j=clusters_j[edge,1]
-                xi=x[i]
-                src=jnp.where(xi>0,i,j)
-                dst=jnp.where(xi>0,j,i)
+        x,sites,Qx,Ainv,h=jax.vmap(one)(configurations)
+        return {
+            "Q":Q,
+            "W":W,
+            "C":C,
+            "x":x,
+            "sites":sites,
+            "Qx":Qx,
+            "Ainv":Ainv,
+            "h":h,
+        }
 
-                slot=jnp.argmax(sites==src)
-                u1=-W[sites,src]
-                u2= W[sites,dst]
-                u3=(jnp.arange(nf)==slot).astype(Q.dtype)
-                U=jnp.stack((u1,u2,u3),axis=1)
+    def advance_core(cache,proposal_uniforms,accept_uniforms):
+        Q=cache["Q"]
+        W=cache["W"]
+        C=cache["C"]
+        x=cache["x"]
+        sites=cache["sites"]
+        Qx=cache["Qx"]
+        Ainv=cache["Ainv"]
+        h=cache["h"]
 
-                deltaQ=(
-                    -W[:,src,None]*Q[src,:]
-                    +W[:,dst,None]*Q[dst,:]
-                )
-                Qx_prop=Qx+deltaQ
-                replacement=Qx_prop[dst,:]-Qx_prop[src,:]
-                V=jnp.stack(
-                    (Q[src,:],Q[dst,:],replacement),
-                    axis=1,
-                )
+        n_chains=x.shape[0]
+        logp_delta=jnp.zeros((n_chains,),dtype=Q.real.dtype)
+        naccepted=jnp.zeros((n_chains,),dtype=jnp.int32)
 
-                X=Ainv@U
-                small=eye3+V.T@X
-                det_ratio=jnp.linalg.det(small)
+        def one_chain(x,sites,Qx,Ainv,h,up,ua):
+            edge,n_active=choose_hoppable(x,up)
+            i=clusters_j[edge,0]
+            j=clusters_j[edge,1]
+            src=jnp.where(x[i]>0,i,j)
+            dst=jnp.where(x[i]>0,j,i)
 
-                delta_J=(
-                    -h[src]+h[dst]
-                    +0.5*(
-                        C[src,src]+C[dst,dst]
-                        -C[src,dst]-C[dst,src]
-                    )
-                )
-                log_wave_ratio=machine_pow*(
-                    jnp.log(jnp.maximum(jnp.abs(det_ratio),1e-300))
-                    +jnp.real(delta_J)
-                )
+            slot=jnp.argmax(sites==src)
+            u1=-W[sites,src]
+            u2= W[sites,dst]
+            u3=(jnp.arange(nf)==slot).astype(Q.dtype)
+            U=jnp.stack((u1,u2,u3),axis=1)
 
-                x_prop=x.at[src].set(0).at[dst].set(1)
-                _,n_active_prop=choose_hoppable(
-                    x_prop,jnp.asarray(0.0,dtype=up.dtype)
-                )
-                log_corr=(
-                    jnp.log(n_active.astype(Q.real.dtype))
-                    -jnp.log(n_active_prop.astype(Q.real.dtype))
-                )
-                log_accept=log_wave_ratio+log_corr
-                accept=jnp.log(
-                    jnp.maximum(ua,jnp.asarray(1e-300,dtype=ua.dtype))
-                )<log_accept
-
-                Y=V.T@Ainv
-                Ainv_prop=Ainv-X@jnp.linalg.solve(small,Y)
-                sites_prop=sites.at[slot].set(dst)
-                h_prop=h-C[:,src]+C[:,dst]
-
-                x_new=jnp.where(accept,x_prop,x)
-                sites_new=jnp.where(accept,sites_prop,sites)
-                Qx_new=jnp.where(accept,Qx_prop,Qx)
-                Ainv_new=jnp.where(accept,Ainv_prop,Ainv)
-                h_new=jnp.where(accept,h_prop,h)
-                lp_new=logp_delta+jnp.where(
-                    accept,log_wave_ratio,jnp.asarray(0.0,log_wave_ratio.dtype)
-                )
-                na_new=naccepted+accept.astype(jnp.int32)
-
-                diagnostics=(
-                    edge,accept,log_wave_ratio,log_corr,det_ratio
-                )
-                return (
-                    x_new,sites_new,Qx_new,Ainv_new,h_new,lp_new,na_new
-                ),diagnostics
-
-            carry,diag=jax.lax.scan(
-                step,
-                (x,sites,Qx,Ainv,h,logp_delta,naccepted),
-                (u_prop[:sweep_size],u_acc[:sweep_size]),
+            deltaQ=(
+                -W[:,src,None]*Q[src,:]
+                +W[:,dst,None]*Q[dst,:]
             )
+            Qx_prop=Qx+deltaQ
+            replacement=Qx_prop[dst,:]-Qx_prop[src,:]
+            V=jnp.stack(
+                (Q[src,:],Q[dst,:],replacement),
+                axis=1,
+            )
+
+            X=Ainv@U
+            small=eye3+V.T@X
+            det_ratio=jnp.linalg.det(small)
+
+            delta_J=(
+                -h[src]+h[dst]
+                +0.5*(
+                    C[src,src]+C[dst,dst]
+                    -C[src,dst]-C[dst,src]
+                )
+            )
+            log_wave_ratio=machine_pow*(
+                jnp.log(jnp.maximum(jnp.abs(det_ratio),1e-300))
+                +jnp.real(delta_J)
+            )
+
+            x_prop=x.at[src].set(0).at[dst].set(1)
+            _,n_active_prop=choose_hoppable(
+                x_prop,jnp.asarray(0.0,dtype=up.dtype)
+            )
+            log_corr=(
+                jnp.log(n_active.astype(Q.real.dtype))
+                -jnp.log(n_active_prop.astype(Q.real.dtype))
+            )
+            accept=jnp.log(
+                jnp.maximum(ua,jnp.asarray(1e-300,dtype=ua.dtype))
+            )<(log_wave_ratio+log_corr)
+
+            Y=V.T@Ainv
+            Ainv_prop=Ainv-X@jnp.linalg.solve(small,Y)
+            sites_prop=sites.at[slot].set(dst)
+            h_prop=h-C[:,src]+C[:,dst]
+
+            return (
+                jnp.where(accept,x_prop,x),
+                jnp.where(accept,sites_prop,sites),
+                jnp.where(accept,Qx_prop,Qx),
+                jnp.where(accept,Ainv_prop,Ainv),
+                jnp.where(accept,h_prop,h),
+                accept,
+                log_wave_ratio,
+                log_corr,
+                det_ratio,
+                edge,
+            )
+
+        def step(carry,inputs):
             x,sites,Qx,Ainv,h,logp_delta,naccepted=carry
+            up,ua=inputs
+            (
+                x_new,sites_new,Qx_new,Ainv_new,h_new,
+                accept,log_wave_ratio,log_corr,det_ratio,edge,
+            )=jax.vmap(one_chain)(
+                x,sites,Qx,Ainv,h,up,ua
+            )
+            logp_delta=logp_delta+jnp.where(
+                accept,log_wave_ratio,
+                jnp.zeros_like(log_wave_ratio),
+            )
+            naccepted=naccepted+accept.astype(jnp.int32)
+            diagnostics=(
+                edge,accept,log_wave_ratio,log_corr,det_ratio
+            )
+            return (
+                x_new,sites_new,Qx_new,Ainv_new,h_new,
+                logp_delta,naccepted,
+            ),diagnostics
 
-            A_final=Qx[sites]
-            inv_res=jnp.max(jnp.abs(A_final@Ainv-eye_nf))
-            return x,logp_delta,naccepted,inv_res,diag
-
-        return jax.vmap(one)(
-            configurations,proposal_uniforms,accept_uniforms
+        # scan wants time first; public inputs are (chain, proposal).
+        up_t=jnp.swapaxes(proposal_uniforms,0,1)
+        ua_t=jnp.swapaxes(accept_uniforms,0,1)
+        carry,diag=jax.lax.scan(
+            step,
+            (x,sites,Qx,Ainv,h,logp_delta,naccepted),
+            (up_t,ua_t),
         )
+        x,sites,Qx,Ainv,h,logp_delta,naccepted=carry
+        cache_new={
+            "Q":Q,
+            "W":W,
+            "C":C,
+            "x":x,
+            "sites":sites,
+            "Qx":Qx,
+            "Ainv":Ainv,
+            "h":h,
+        }
+        # Return diagnostics with chain as leading axis for comparison with
+        # direct full-logpsi references.
+        diag=tuple(jnp.swapaxes(d,0,1) for d in diag)
+        return cache_new,logp_delta,naccepted,diag
+
+    def inverse_residual(cache):
+        Qx=cache["Qx"]
+        sites=cache["sites"]
+        Ainv=cache["Ainv"]
+
+        def one(Qx_i,sites_i,Ainv_i):
+            A=Qx_i[sites_i]
+            return jnp.max(jnp.abs(A@Ainv_i-eye_nf))
+
+        return jax.vmap(one)(Qx,sites,Ainv)
+
+    return (
+        jax.jit(init_cache),
+        jax.jit(advance_core),
+        jax.jit(inverse_residual),
+    )
+
+
+def make_fast_raw_sampler_sweep_kernel(
+    *,
+    sc_coords,
+    internal_sites,
+    kpoints,
+    occupations_per_k,
+    shell_matrices,
+    backflow_matrices,
+    clusters,
+    sweep_size,
+    machine_pow=2.0,
+    orthonormalize_orbitals=False,
+):
+    """Compatibility wrapper validating one sweep with one cache initialisation."""
+    import jax
+
+    init_cache,advance,inverse_residual=make_fast_raw_sampler_cache_kernels(
+        sc_coords=sc_coords,
+        internal_sites=internal_sites,
+        kpoints=kpoints,
+        occupations_per_k=occupations_per_k,
+        shell_matrices=shell_matrices,
+        backflow_matrices=backflow_matrices,
+        clusters=clusters,
+        machine_pow=machine_pow,
+        orthonormalize_orbitals=orthonormalize_orbitals,
+    )
+    sweep_size=int(sweep_size)
+
+    def kernel(parameters,configurations,proposal_uniforms,accept_uniforms):
+        cache=init_cache(parameters,configurations)
+        cache,logp_delta,naccepted,diag=advance(
+            cache,
+            proposal_uniforms[:,:sweep_size],
+            accept_uniforms[:,:sweep_size],
+        )
+        inv_res=inverse_residual(cache)
+        return cache["x"],logp_delta,naccepted,inv_res,diag
 
     return jax.jit(kernel)
+
 
 
 def extract_supercell_parameters(
