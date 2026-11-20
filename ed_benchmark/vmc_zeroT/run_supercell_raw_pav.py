@@ -501,8 +501,8 @@ def parser():
         help="Optional 3-image Tint VAP iterations. 0 disables Tint VAP.",
     )
     p.add_argument(
-        "--trainer",choices=["auto","vmc_sr","legacy"],default="auto",
-        help="Raw/Tint-VAP optimizer backend. auto prefers VMC_SR and falls back to the legacy QGT+iterative-SR path.",
+        "--trainer",choices=["auto","vmc_sr","legacy"],default="legacy",
+        help="Raw/Tint-VAP optimizer backend. legacy is the safe default for the current mixed real/complex ansatz; auto still probes VMC_SR first.",
     )
     p.add_argument(
         "--sr-momentum",type=float,default=0.8,
@@ -872,7 +872,7 @@ def main():
             "Raw optimization uses three refinement levels by default: early, middle, and final refinement; LR, samples, and SR diag_shift are all scheduled without rebuilding the driver.",
             "Default Raw schedule for 230 steps is 1-80: lr=0.03/samples=1024/diag_shift=0.05; 81-180: lr=0.015/samples=2048/diag_shift=0.05; 181-230: lr=0.005/samples=4096/diag_shift=0.02.",
             "Backflow resolves intra-triangle t bonds into independent A/B channels while t1/t2 remain shared.",
-            "The default trainer is auto: prefer VMC_SR with standard parameter-space SR, cholesky_with_fallback, and SPRING momentum; use --trainer legacy to recover the previous QGT+iterative-SR path.",
+            "The default trainer is legacy QGT+iterative SR because the current mixed real/complex parameter tree is not accepted by VMC_SR; --trainer auto remains available for compatibility testing.",
             "PAV branches are energy-only symmetry diagnostics and report Delta E relative to their source branch.",
             "Unless --skip-lanczos is set, each final A1/A2 C3v PAV is followed by a stochastic one-step Lanczos/Ritz correction in span{|PAV>,H|PAV>}; the intermediate Tint-PAV is not Lanczos-corrected.",
             "Large-supercell 1LS uses MC spectral moments m1..m4 and never enumerates the full Hilbert space.",
