@@ -364,10 +364,30 @@ def _save_mc_maps(directory,vstate,g,title,edge_chunk=12):
         g,xy,starts,ends,crossed,density,bond,current,directory,title,
         threshold_fraction=0.02,
     )
+    from benchmark_observables import ruby_star_formfactor
+    fstar=np.asarray(ruby_star_formfactor(g),float)
+    bstar=float(np.dot(fstar,bond)/len(g.edges))
+
+    nc=int(g.num_cells)
+    filling=float(np.mean(density))
+    dcell=density.reshape((nc,6))-filling
+    reps=np.asarray(g.reps,float)
+    qs=np.asarray(g.permitted_momenta(),float)
+    phase=np.exp(-2j*np.pi*np.einsum("qd,cd->qc",qs,reps))/np.sqrt(float(nc))
+    nq=np.einsum("qc,ca->qa",phase,dcell,optimize=True)
+    # RMS density modulation per site in the strongest primitive momentum.
+    co1_sq=np.sum(np.abs(nq)**2,axis=1)/(6.0*nc)
+    ico=int(np.argmax(co1_sq))
+
     meta={
         "mean_density":float(np.mean(density)),
         "density_min":float(np.min(density)),
         "density_max":float(np.max(density)),
+        "density_rms_modulation":float(np.std(density)),
+        "CO_onepoint_rms":float(np.sqrt(max(0.0,co1_sq[ico]))),
+        "CO_onepoint_q1":float(qs[ico,0]),
+        "CO_onepoint_q2":float(qs[ico,1]),
+        "B_star_mean":bstar,
         "max_abs_bond_order":float(np.max(np.abs(bond))),
         "max_abs_current":float(np.max(np.abs(current))),
         "n_samples":int(np.asarray(vstate.samples).reshape((-1,g.Ns)).shape[0]),
@@ -466,6 +486,7 @@ def _stage(
     train_sweep_size=None,
     make_maps=False,
     map_edge_chunk=12,
+    measure_orders=True,
 ):
     import jax
     jax.config.update("jax_enable_x64",True)
@@ -604,9 +625,12 @@ def _stage(
     final_eval_s=time.perf_counter()-te
 
     tobs=time.perf_counter()
-    order_obs=_mc_order_observables(
-        vstate,g,nf,hi,current_ops
-    )
+    if measure_orders:
+        order_obs=_mc_order_observables(
+            vstate,g,nf,hi,current_ops
+        )
+    else:
+        order_obs={}
     observable_eval_s=time.perf_counter()-tobs
 
     params=extract_supercell_parameters(
@@ -704,9 +728,25 @@ def _stage(
             int(x) for x in seed_data["occupations_per_k"]
         ],
         **order_obs,
+        "orders_measured":bool(measure_orders),
         "maps_saved":bool(make_maps),
         "map_max_abs_current":(
             None if map_meta is None else map_meta["max_abs_current"]
+        ),
+        "CO_onepoint_rms":(
+            None if map_meta is None else map_meta["CO_onepoint_rms"]
+        ),
+        "CO_onepoint_q1":(
+            None if map_meta is None else map_meta["CO_onepoint_q1"]
+        ),
+        "CO_onepoint_q2":(
+            None if map_meta is None else map_meta["CO_onepoint_q2"]
+        ),
+        "density_rms_modulation":(
+            None if map_meta is None else map_meta["density_rms_modulation"]
+        ),
+        "B_star_mean":(
+            None if map_meta is None else map_meta["B_star_mean"]
         ),
         **_memory_estimates(vstate.n_parameters,args.n_samples),
     }
