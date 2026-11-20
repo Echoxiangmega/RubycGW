@@ -689,10 +689,22 @@ def parser():
         help="Repeated timed calls of the JIT-compiled Woodbury prototype during --fast-local-check.",
     )
     p.add_argument(
+        "--fast-sampler",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use the persistent-cache rank-3 Woodbury Metropolis sampler for eligible unprojected Raw backflow stages. The cache is rebuilt once after each parameter update and reused through discard and retained samples.",
+    )
+    p.add_argument(
+        "--fast-sampler-strict",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Raise instead of falling back to NetKet MetropolisFermionHop if the persistent Woodbury sampler cannot be constructed.",
+    )
+    p.add_argument(
         "--fast-sampler-check",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Post-training diagnostic: run a full cached Woodbury Metropolis sweep and compare every acceptance decision against full log-wavefunction recomputation. Does not yet replace the production sampler.",
+        help="Post-training diagnostic: compare persistent-cache Woodbury Metropolis dynamics against full log-wavefunction recomputation using identical proposals.",
     )
     p.add_argument(
         "--fast-sampler-check-roots",type=int,default=8,
@@ -996,7 +1008,7 @@ def main():
             "--orbital-parameterization free is an exact Raw-state gauge reparameterization that removes per-evaluation orbital QR; periodic QR gauge fixing controls numerical conditioning without changing the normalized Slater-Jastrow-linear-backflow state.",
             "--analytic-logderiv optionally replaces generic autodiff through QR-free Raw logdet/backflow/Jastrow by an exact custom VJP and validates it against the original autodiff model before use.",
             "--trainer shared_sr removes duplicate log-derivative work by using one mixed-real Jacobian for both the energy force and SR solve; it validates the final update against legacy SR before use.",
-            "--fast-sampler-check validates a multi-hop inverse-cache Woodbury sampler against full logpsi using identical proposals before that sampler is allowed into production.",
+            "--fast-sampler enables the persistent inverse-cache Woodbury Raw Metropolis sampler; --fast-sampler-check independently validates the same cached dynamics against full logpsi using identical proposals.",
             "Before the first fast Raw stage, expect_and_grad is compared against the standard NetKet Hamiltonian on identical samples; the fast backend is used only if the energy and full parameter-gradient PyTrees agree within --fast-local-gradient-tolerance.",
             "--fast-local-check remains available as a stricter post-training per-hop ratio/local-energy diagnostic.",
             "The default trainer is legacy QGT+iterative SR because the current mixed real/complex parameter tree is not accepted by VMC_SR; --trainer auto remains available for compatibility testing.",
