@@ -106,6 +106,32 @@ def main():
     assert len({tuple(map(int,p)) for _,p in full2})==18
     data=seed_bloch_blocks(big,24,2,2,"sd",0.08)
     assert sum(data["occupations_per_k"])==24
+
+    # Random seed: preserve the normal n_occ(k) pattern, but randomize the
+    # occupied subspace reproducibly within each k block.
+    normal_data=seed_bloch_blocks(big,24,2,2,"normal",0.08)
+    r1=seed_bloch_blocks(big,24,2,2,"random",0.08,random_seed=12345)
+    r2=seed_bloch_blocks(big,24,2,2,"random",0.08,random_seed=12345)
+    r3=seed_bloch_blocks(big,24,2,2,"random",0.08,random_seed=12346)
+    assert np.array_equal(
+        r1["occupations_per_k"],normal_data["occupations_per_k"]
+    )
+    assert r1["seed_mode"]=="random_complex_orthonormal"
+    assert r1["occupation_reference_seed"]=="normal"
+    assert r1["random_seed"]==12345
+    assert all(
+        np.allclose(a,b) for a,b in zip(r1["blocks"],r2["blocks"])
+    )
+    assert any(
+        not np.allclose(a,b) for a,b in zip(r1["blocks"],r3["blocks"])
+        if a.size
+    )
+    for block,nocc in zip(r1["blocks"],r1["occupations_per_k"]):
+        assert block.shape==(18,int(nocc))
+        if nocc:
+            assert np.linalg.norm(
+                block.conj().T@block-np.eye(int(nocc))
+            )<1e-10
     Q=assemble_bloch_orbitals_numpy(
         data["blocks"],data["sc_coords"],data["internal_sites"],data["kpoints"]
     )
@@ -157,6 +183,7 @@ def main():
     print("1x1: exact Hex18 one-body variational space")
     print("2x2 ring3 superlattice: Ns=",big.Ns,
           "occupations_per_k=",data["occupations_per_k"].tolist())
+    print("random seed: reproducible complex orthonormal k-blocks with normal n_occ(k)")
     print("C3v residual point group: 6 distinct site maps on 1x1 and 2x2")
     print("Residual Tint: 3 maps; Tint x C3v: 18 maps independent of supercell size")
 
