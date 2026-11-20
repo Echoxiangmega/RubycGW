@@ -38,7 +38,10 @@ import geometry as native_geometry
 
 from run_benchmark import atomic_json, make_netket_hamiltonian
 from vmc_ansatz import jastrow_channels, bond_backflow_channels
-from supercell_ansatz import seed_bloch_blocks
+from supercell_ansatz import (
+    seed_bloch_blocks,
+    build_supercell_netket_model,
+)
 from symmetry_projection import (
     internal_translation_site_maps,
     internal_c3v_space_group_site_maps,
@@ -159,6 +162,354 @@ def _annotate_pav_energy(row, source_row):
     return row
 
 
+
+def _local_h1_values(vstate,H,configs,*,config_chunk=256):
+    """Local energy E_L(x)=(H psi)(x)/psi(x) for arbitrary configurations."""
+    x=np.asarray(configs,float)
+    if x.ndim!=2:
+        x=x.reshape((-1,x.shape[-1]))
+    out=np.empty(len(x),np.complex128)
+    step=max(1,int(config_chunk))
+    for lo in range(0,len(x),step):
+        xx=x[lo:lo+step]
+        xp,mels=H.get_conn_padded(xx)
+        xp=np.asarray(xp,float)
+        mels=np.asarray(mels,np.complex128)
+        if xp.ndim!=3 or mels.ndim!=2:
+            raise RuntimeError(
+                "Unexpected get_conn_padded shapes: "
+                f"x'={xp.shape}, mels={mels.shape}"
+            )
+        b,k=mels.shape
+        logx=np.asarray(vstate.log_value(xx),np.complex128).reshape(-1)
+        valid=np.abs(mels)>0
+        vals=np.zeros((b,k),np.complex128)
+        if np.any(valid):
+            flat=xp.reshape((b*k,xp.shape[-1]))
+            ids=np.flatnonzero(valid.reshape(-1))
+            logp=np.asarray(
+                vstate.log_value(flat[ids]),np.complex128
+            ).reshape(-1)
+            parent=np.repeat(logx,k)[ids]
+            vals.reshape(-1)[ids]=(
+                mels.reshape(-1)[ids]*np.exp(logp-parent)
+            )
+        out[lo:lo+b]=np.sum(vals,axis=1)
+    return out
+
+
+def _local_h1_h2_values(
+    vstate,H,configs,*,root_chunk=16,config_chunk=256
+):
+    """Return H psi / psi and H^2 psi / psi on sampled root configurations.
+
+    H^2 is evaluated as
+        (H^2 psi)(x)/psi(x)
+        = sum_y H_xy psi(y)/psi(x) * E_L(y).
+    Only connected y with nonzero matrix elements are evaluated.  Unique
+    first-shell configurations are reused within each root chunk.
+    """
+    x=np.asarray(configs,float)
+    if x.ndim!=2:
+        x=x.reshape((-1,x.shape[-1]))
+    e1=np.empty(len(x),np.complex128)
+    e2=np.empty(len(x),np.complex128)
+    step=max(1,int(root_chunk))
+    for lo in range(0,len(x),step):
+        xx=x[lo:lo+step]
+        xp,mels=H.get_conn_padded(xx)
+        xp=np.asarray(xp,float)
+        mels=np.asarray(mels,np.complex128)
+        if xp.ndim!=3 or mels.ndim!=2:
+            raise RuntimeError(
+                "Unexpected get_conn_padded shapes: "
+                f"x'={xp.shape}, mels={mels.shape}"
+            )
+        b,k=mels.shape
+        logx=np.asarray(vstate.log_value(xx),np.complex128).reshape(-1)
+        valid=np.abs(mels)>0
+        ib,ik=np.nonzero(valid)
+        if len(ib)==0:
+            e1[lo:lo+b]=0.0
+            e2[lo:lo+b]=0.0
+            continue
+
+        y=xp[ib,ik]
+        logy=np.asarray(vstate.log_value(y),np.complex128).reshape(-1)
+        ratio=mels[ib,ik]*np.exp(logy-logx[ib])
+
+        # Many roots share connected configurations.  Reusing them is
+        # especially helpful for the projected multi-image PAV model.
+        yu,inv=np.unique(y,axis=0,return_inverse=True)
+        e1u=_local_h1_values(
+            vstate,H,yu,config_chunk=config_chunk
+        )
+        e1y=e1u[inv]
+
+        a=np.zeros(b,np.complex128)
+        b2=np.zeros(b,np.complex128)
+        np.add.at(a,ib,ratio)
+        np.add.at(b2,ib,ratio*e1y)
+        e1[lo:lo+b]=a
+        e2[lo:lo+b]=b2
+    return e1,e2
+
+
+def _lanczos_from_moments(m1,m2,m3,m4,*,tol=1e-12):
+    """One Lanczos/Ritz step from spectral moments <H^n>, n=1..4."""
+    m1=float(np.real(m1))
+    m2=float(np.real(m2))
+    m3=float(np.real(m3))
+    m4=float(np.real(m4))
+    var0=m2-m1*m1
+    scale=max(1.0,abs(m2),m1*m1)
+    if var0<0 and abs(var0)<=tol*scale:
+        var0=0.0
+    if var0<0:
+        raise RuntimeError(
+            f"Negative PAV energy variance from MC moments: {var0:.6e}"
+        )
+    if var0<=tol*scale:
+        return {
+            "lanczos_improved":False,
+            "lanczos_krylov_dim":1,
+            "lanczos_energy_before":m1,
+            "lanczos_energy_after":m1,
+            "lanczos_delta_E":0.0,
+            "lanczos_alpha_H":0.0,
+            "lanczos_residual_norm_before":float(np.sqrt(max(var0,0.0))),
+            "lanczos_variance_before":var0,
+            "lanczos_variance_after":var0,
+            "lanczos_variance_after_raw":var0,
+            "lanczos_krylov_h00":m1,
+            "lanczos_krylov_h01":0.0,
+            "lanczos_krylov_h11":None,
+        }
+
+    sigma=float(np.sqrt(var0))
+    a1=(m3-2.0*m1*m2+m1**3)/var0
+    K=np.asarray([[m1,sigma],[sigma,a1]],float)
+    evals,vecs=np.linalg.eigh(K)
+    c=np.asarray(vecs[:,0],float)
+    e1=float(evals[0])
+
+    # <H^2> in the orthonormal Krylov basis
+    h2_01=(m3-m1*m2)/sigma
+    h2_11=(m4-2.0*m1*m3+m1*m1*m2)/var0
+    K2=np.asarray([[m2,h2_01],[h2_01,h2_11]],float)
+    second=float(c@K2@c)
+    var1_raw=float(second-e1*e1)
+    var1=max(0.0,var1_raw)
+
+    denom=c[0]-c[1]*m1/sigma
+    alpha=(
+        None if abs(denom)<=1e-14
+        else float((c[1]/sigma)/denom)
+    )
+    return {
+        "lanczos_improved":True,
+        "lanczos_krylov_dim":2,
+        "lanczos_energy_before":m1,
+        "lanczos_energy_after":e1,
+        "lanczos_delta_E":e1-m1,
+        "lanczos_alpha_H":alpha,
+        "lanczos_residual_norm_before":sigma,
+        "lanczos_variance_before":var0,
+        "lanczos_variance_after":var1,
+        "lanczos_variance_after_raw":var1_raw,
+        "lanczos_krylov_h00":m1,
+        "lanczos_krylov_h01":sigma,
+        "lanczos_krylov_h11":float(a1),
+    }
+
+
+def _chain_blocks(values,sample_shape):
+    """Reduce sample estimators to approximately independent chain/block means."""
+    values=np.asarray(values)
+    lead=tuple(int(x) for x in sample_shape[:-1])
+    if int(np.prod(lead))!=len(values):
+        raise RuntimeError(
+            f"sample shape {sample_shape} is incompatible with {len(values)} values"
+        )
+    arr=values.reshape(lead)
+    if len(lead)>=2 and lead[0]>=2:
+        return arr.reshape((lead[0],-1)).mean(axis=1)
+    flat=values.reshape(-1)
+    nblock=min(32,max(2,len(flat)//32))
+    if len(flat)<2*nblock:
+        return flat
+    nuse=(len(flat)//nblock)*nblock
+    return flat[:nuse].reshape((nblock,-1)).mean(axis=1)
+
+
+def _jackknife_lanczos(e1,e2,sample_shape):
+    """Chain/block jackknife for the derived one-step Lanczos energy."""
+    z1=np.asarray(e1,np.complex128)
+    z2=np.asarray(e2,np.complex128)
+    estimators=[
+        z1,
+        np.abs(z1)**2,
+        np.conjugate(z1)*z2,
+        np.abs(z2)**2,
+    ]
+    blocks=[_chain_blocks(v,sample_shape) for v in estimators]
+    nb=min(len(x) for x in blocks)
+    if nb<2:
+        return {}
+    blocks=[x[:nb] for x in blocks]
+
+    leave=[]
+    for ib in range(nb):
+        mm=[]
+        for x in blocks:
+            mm.append((np.sum(x)-x[ib])/(nb-1))
+        try:
+            info=_lanczos_from_moments(*mm)
+        except RuntimeError:
+            continue
+        leave.append([
+            info["lanczos_energy_after"],
+            info["lanczos_delta_E"],
+            info["lanczos_variance_before"],
+            info["lanczos_variance_after_raw"],
+        ])
+    if len(leave)<2:
+        return {}
+    q=np.asarray(leave,float)
+    mean=np.mean(q,axis=0)
+    err=np.sqrt((len(q)-1)/len(q)*np.sum((q-mean)**2,axis=0))
+    return {
+        "lanczos_jackknife_blocks":int(len(q)),
+        "lanczos_energy_after_error":float(err[0]),
+        "lanczos_delta_E_error":float(err[1]),
+        "lanczos_variance_before_error":float(err[2]),
+        "lanczos_variance_after_error":float(err[3]),
+    }
+
+
+def _make_pav_eval_state(
+    *,
+    hi,graph,seed_data,params,shell_mats,bf_mats,use_backflow,
+    maps,chars,n_samples,n_discard,n_chains,sweep_size,
+    sampler_chunk_size,chunk_size,rng_seed,
+):
+    """Rebuild the fixed PAV wavefunction as an MCState for Lanczos moments."""
+    import netket as nk
+    model=build_supercell_netket_model(
+        params["blocks"],
+        seed_data["sc_coords"],
+        seed_data["internal_sites"],
+        seed_data["kpoints"],
+        shell_mats,
+        use_jastrow=True,
+        backflow_matrices=(bf_mats if use_backflow else None),
+        initial_v=params.get("v",None),
+        initial_eta=params.get("eta",None),
+        point_site_maps=maps,
+        point_characters=chars,
+        time_reversal_even=False,
+        sparse_correlators=True,
+        packed_orbitals=True,
+    )
+    sampler_kwargs={
+        "graph":graph,
+        "n_chains":int(n_chains),
+        "sweep_size":int(sweep_size),
+    }
+    if sampler_chunk_size is not None:
+        sampler_kwargs["chunk_size"]=int(sampler_chunk_size)
+    sampler=nk.sampler.MetropolisFermionHop(hi,**sampler_kwargs)
+    state=nk.vqs.MCState(
+        sampler,model,
+        n_samples=int(n_samples),
+        n_discard_per_chain=int(n_discard),
+        chunk_size=chunk_size,
+        seed=int(rng_seed),
+        sampler_seed=int(rng_seed)+104729,
+    )
+    state.sample()
+    return state
+
+
+def _pav_lanczos_row(
+    parent_row, *,
+    hi,H_fast,graph,seed_data,params,shell_mats,bf_mats,use_backflow,
+    maps,chars,args,rng_seed,sweep_size,directory,
+):
+    """Stochastic one-Lanczos-step energy/variance diagnostic after PAV."""
+    nsamp=(
+        int(args.lanczos_samples)
+        if args.lanczos_samples is not None
+        else int(args.eval_samples)
+    )
+    vstate=_make_pav_eval_state(
+        hi=hi,graph=graph,seed_data=seed_data,params=params,
+        shell_mats=shell_mats,bf_mats=bf_mats,use_backflow=use_backflow,
+        maps=maps,chars=chars,n_samples=nsamp,
+        n_discard=args.n_discard,n_chains=args.n_chains,
+        sweep_size=sweep_size,
+        sampler_chunk_size=args.sampler_chunk_size,
+        chunk_size=args.chunk_size,rng_seed=rng_seed,
+    )
+    samples=np.asarray(vstate.samples)
+    flat=samples.reshape((-1,samples.shape[-1]))
+    e1,e2=_local_h1_h2_values(
+        vstate,H_fast,flat,
+        root_chunk=args.lanczos_root_chunk,
+        config_chunk=args.lanczos_config_chunk,
+    )
+
+    m1=np.mean(e1)
+    m2=np.mean(np.abs(e1)**2)
+    m2_alt=np.mean(e2)
+    m3=np.mean(np.conjugate(e1)*e2)
+    m4=np.mean(np.abs(e2)**2)
+    info=_lanczos_from_moments(m1,m2,m3,m4)
+    info.update(_jackknife_lanczos(e1,e2,samples.shape))
+
+    de_err=info.get("lanczos_delta_E_error")
+    info["lanczos_delta_E_sigma"]=(
+        info["lanczos_delta_E"]/de_err
+        if de_err is not None and de_err>0 else None
+    )
+    info.update({
+        "lanczos_samples":int(len(flat)),
+        "lanczos_m1":float(np.real(m1)),
+        "lanczos_m1_imag":float(np.imag(m1)),
+        "lanczos_m2":float(np.real(m2)),
+        "lanczos_m2_from_H2_local":float(np.real(m2_alt)),
+        "lanczos_m2_from_H2_local_imag":float(np.imag(m2_alt)),
+        "lanczos_m2_consistency":float(np.real(m2_alt)-np.real(m2)),
+        "lanczos_m3":float(np.real(m3)),
+        "lanczos_m3_imag":float(np.imag(m3)),
+        "lanczos_m4":float(np.real(m4)),
+        "lanczos_parent_reported_E":float(parent_row["mc_E"]),
+        "lanczos_parent_recheck_delta_E":(
+            float(np.real(m1))-float(parent_row["mc_E"])
+        ),
+        "lanczos_estimator":"MC spectral moments m1..m4; 2D Krylov Rayleigh-Ritz",
+        "lanczos_state_materialized":False,
+    })
+
+    row=dict(parent_row)
+    row.update(info)
+    row["stage"]=str(parent_row["stage"])+"+1LS"
+    row["lanczos_parent_stage"]=parent_row["stage"]
+    row["mc_E"]=float(info["lanczos_energy_after"])
+    row["mc_E_error"]=info.get("lanczos_energy_after_error")
+    row["mc_energy_variance"]=float(info["lanczos_variance_after"])
+    row["mc_energy_variance_per_site"]=(
+        float(info["lanczos_variance_after"])/float(row["Ns"])
+    )
+    row["orders_measured"]=False
+    row["maps_saved"]=False
+
+    directory=Path(directory)
+    directory.mkdir(parents=True,exist_ok=True)
+    atomic_json(directory/"summary.json",row)
+    return row
+
+
 def parser():
     p=argparse.ArgumentParser(
         description=__doc__,
@@ -228,6 +579,22 @@ def parser():
     p.add_argument("--sampler-chunk-size",type=int,default=None)
     p.add_argument("--chunk-size",type=int,default=256)
     p.add_argument("--map-edge-chunk",type=int,default=12)
+    p.add_argument(
+        "--lanczos-samples",type=int,default=None,
+        help="PAV samples for stochastic 1-step Lanczos moments. Default=--eval-samples.",
+    )
+    p.add_argument(
+        "--lanczos-root-chunk",type=int,default=16,
+        help="Root-sample chunk for H^2 local estimator.",
+    )
+    p.add_argument(
+        "--lanczos-config-chunk",type=int,default=256,
+        help="Connected-configuration chunk for local-energy evaluation.",
+    )
+    p.add_argument(
+        "--skip-lanczos",action="store_true",
+        help="Disable the PAV -> one-Lanczos-step energy/variance diagnostic.",
+    )
     p.add_argument(
         "--classify-co-threshold",type=float,default=0.03,
         help="Raw one-point CO RMS threshold used only for automatic branch labels.",
@@ -342,7 +709,7 @@ def main():
         **vars(a),
         "Ns":int(g.Ns),
         "Nf":int(nf),
-        "workflow":"Raw optimization -> PAV diagnostics; optional Tint VAP",
+        "workflow":"Raw optimization -> PAV -> PAV+1LS diagnostics; optional Tint VAP",
         "c3v_available":bool(spatial_effective),
         "c3v_irreps":requested,
         "eval_samples_effective":eval_samples,
@@ -354,6 +721,9 @@ def main():
             "Tint VAP is optional and disabled by default.",
             "Only optimized branches (Raw and optional Tint-VAP) are classified and mapped.",
             "PAV branches are energy-only symmetry diagnostics and report Delta E relative to their source branch.",
+            "Unless --skip-lanczos is set, every PAV is followed by a stochastic one-step Lanczos/Ritz correction in span{|PAV>,H|PAV>}.",
+            "Large-supercell 1LS uses MC spectral moments m1..m4 and never enumerates the full Hilbert space.",
+            "1LS rows are energy/variance diagnostics only and do not define or relabel the Raw phase.",
         ],
     }
     atomic_json(out/"settings_raw_pav.json",settings)
@@ -447,6 +817,19 @@ def main():
         _annotate_pav_energy(tint_pav_row,raw_row)
         rows.append(tint_pav_row)
 
+        if not a.skip_lanczos:
+            tint_l1=_pav_lanczos_row(
+                tint_pav_row,
+                hi=hi,H_fast=H_fast,graph=graph,
+                seed_data=seed_data,params=raw_params,
+                shell_mats=shell_mats,bf_mats=bf_mats,
+                use_backflow=use_backflow,
+                maps=tint_maps,chars=tint_chars,args=a,
+                rng_seed=base_seed+102,sweep_size=pav_sweep,
+                directory=out/f"raw_tint_pav_1ls_{a.correlator}__{seed}",
+            )
+            rows.append(tint_l1)
+
         # ---- 3. Full residual C3v PAV directly from Raw ----
         for ii,ir in enumerate(requested):
             pav_dir=out/f"raw_c3v_pav_{a.correlator}__{ir}__{seed}"
@@ -471,6 +854,19 @@ def main():
             row["branch_source"]="Raw"
             _annotate_pav_energy(row,raw_row)
             rows.append(row)
+
+            if not a.skip_lanczos:
+                l1row=_pav_lanczos_row(
+                    row,
+                    hi=hi,H_fast=H_fast,graph=graph,
+                    seed_data=seed_data,params=raw_params,
+                    shell_mats=shell_mats,bf_mats=bf_mats,
+                    use_backflow=use_backflow,
+                    maps=spatial_maps,chars=spatial_chars[ir],args=a,
+                    rng_seed=base_seed+120+ii,sweep_size=pav_sweep,
+                    directory=out/f"raw_c3v_pav_1ls_{a.correlator}__{ir}__{seed}",
+                )
+                rows.append(l1row)
 
         # ---- 4. Optional Tint VAP, then PAV the Tint-refined branch ----
         if int(a.tint_vap_iter)>0:
@@ -548,6 +944,19 @@ def main():
                 _annotate_pav_energy(row,tint_row)
                 rows.append(row)
 
+                if not a.skip_lanczos:
+                    l1row=_pav_lanczos_row(
+                        row,
+                        hi=hi,H_fast=H_fast,graph=graph,
+                        seed_data=seed_data,params=tint_params,
+                        shell_mats=shell_mats,bf_mats=bf_mats,
+                        use_backflow=use_backflow,
+                        maps=spatial_maps,chars=spatial_chars[ir],args=a,
+                        rng_seed=base_seed+150+ii,sweep_size=pav_sweep,
+                        directory=out/f"tintvap_c3v_pav_1ls_{a.correlator}__{ir}__{seed}",
+                    )
+                    rows.append(l1row)
+
         _write_csv(out/"raw_pav_summary.csv",rows)
         _write_csv(out/"optimized_branch_summary.csv",optimized_rows)
 
@@ -565,7 +974,7 @@ def main():
 
     print("\n[PAV energy shifts]")
     for r in rows:
-        if "PAV_delta_E" not in r:
+        if "PAV_delta_E" not in r or "lanczos_delta_E" in r:
             continue
         print(
             f" seed={r['seed']:11s} stage={r['stage']:22s} "
@@ -573,6 +982,23 @@ def main():
             f"dE={r['PAV_delta_E']:+.6f} "
             f"({r.get('PAV_delta_E_sigma',float('nan')):+.2f} sigma)"
         )
+
+    if not a.skip_lanczos:
+        print("\n[PAV -> one-Lanczos-step energy shifts]")
+        for r in rows:
+            if "lanczos_delta_E" not in r:
+                continue
+            ds=r.get("lanczos_delta_E_sigma")
+            dss="nan" if ds is None else f"{ds:+.2f}"
+            print(
+                f" seed={r['seed']:11s} stage={r['stage']:26s} "
+                f"irrep={str(r.get('point_label','-')):5s} "
+                f"E={r['mc_E']:+.8f} "
+                f"dE_L1={r['lanczos_delta_E']:+.6f} "
+                f"({dss} sigma) "
+                f"var={r['lanczos_variance_before']:.4g}"
+                f"->{r['lanczos_variance_after']:.4g}"
+            )
     print(f"Saved: {out}")
 
 
