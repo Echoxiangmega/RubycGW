@@ -665,6 +665,7 @@ def _profile_vmc_components(
     vstate,H_fast,jax,nk,
     qgt_ctor,solver,diag_shift,
     repeats,
+    H_reference=None,
 ):
     """Microprofile the expensive VMC components without updating parameters.
 
@@ -711,6 +712,12 @@ def _profile_vmc_components(
     st,grad=vstate.expect_and_grad(H_fast)
     _sync_stats(st)
     _sync_tree(jax,grad)
+    if H_reference is not None:
+        st_ref=vstate.expect(H_reference)
+        _sync_stats(st_ref)
+        st_ref,grad_ref=vstate.expect_and_grad(H_reference)
+        _sync_stats(st_ref)
+        _sync_tree(jax,grad_ref)
     if profile_sr is not None:
         pgrad=profile_sr(vstate,grad,step=0)
         _sync_tree(jax,pgrad)
@@ -718,12 +725,26 @@ def _profile_vmc_components(
     sample_times=[]
     expect_times=[]
     grad_times=[]
+    ref_expect_times=[]
+    ref_grad_times=[]
     sr_times=[]
     for _ in range(repeats):
         t=time.perf_counter()
         vstate.sample()
         np.asarray(vstate.samples)
         sample_times.append(time.perf_counter()-t)
+
+        if H_reference is not None:
+            t=time.perf_counter()
+            st_ref=vstate.expect(H_reference)
+            _sync_stats(st_ref)
+            ref_expect_times.append(time.perf_counter()-t)
+
+            t=time.perf_counter()
+            st_ref,grad_ref=vstate.expect_and_grad(H_reference)
+            _sync_stats(st_ref)
+            _sync_tree(jax,grad_ref)
+            ref_grad_times.append(time.perf_counter()-t)
 
         t=time.perf_counter()
         st=vstate.expect(H_fast)
@@ -757,8 +778,26 @@ def _profile_vmc_components(
         "sample":_stats(sample_times),
         "expect":_stats(expect_times),
         "expect_and_grad":_stats(grad_times),
+        "reference_expect":_stats(ref_expect_times),
+        "reference_expect_and_grad":_stats(ref_grad_times),
         "sr":_stats(sr_times),
     }
+    if (
+        out["reference_expect"] is not None
+        and out["expect"] is not None
+    ):
+        out["expect_speedup_vs_reference"]=float(
+            out["reference_expect"]["median_s"]
+            / max(1e-15,out["expect"]["median_s"])
+        )
+    if (
+        out["reference_expect_and_grad"] is not None
+        and out["expect_and_grad"] is not None
+    ):
+        out["expect_and_grad_speedup_vs_reference"]=float(
+            out["reference_expect_and_grad"]["median_s"]
+            / max(1e-15,out["expect_and_grad"]["median_s"])
+        )
     if out["expect"] is not None and out["expect_and_grad"] is not None:
         out["gradient_overhead_median_s"]=float(
             max(
@@ -767,7 +806,7 @@ def _profile_vmc_components(
                 - out["expect"]["median_s"],
             )
         )
-    print(
+    msg=(
         "[profile] "
         f"sample={out['sample']['median_s']:.3f}s "
         f"expect={out['expect']['median_s']:.3f}s "
@@ -775,9 +814,17 @@ def _profile_vmc_components(
         + (
             f"SR={out['sr']['median_s']:.3f}s"
             if out["sr"] is not None else "SR=n/a"
-        ),
-        flush=True,
+        )
     )
+    if out["reference_expect"] is not None:
+        msg+=(
+            " | reference "
+            f"expect={out['reference_expect']['median_s']:.3f}s "
+            f"expect+grad={out['reference_expect_and_grad']['median_s']:.3f}s "
+            f"| speedup={out['expect_speedup_vs_reference']:.2f}x/"
+            f"{out['expect_and_grad_speedup_vs_reference']:.2f}x"
+        )
+    print(msg,flush=True)
     return out
 
 
@@ -1438,6 +1485,7 @@ def _stage(
                 solver=(solver if trainer_effective=="legacy" else None),
                 diag_shift=profile_diag,
                 repeats=profile_repeats,
+                H_reference=(H_fast if fast_local_effective else None),
             )
 
         n_images=1 if maps is None else int(len(maps))
