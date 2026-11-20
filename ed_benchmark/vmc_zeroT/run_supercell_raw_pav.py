@@ -483,7 +483,7 @@ def parser():
     p.add_argument("--V",type=float,default=5.5)
     p.add_argument(
         "--seeds",nargs="+",
-        default=["normal","sd","isd","lc_same","lc_opposite"],
+        default=["normal","sd","isd","lc_same","lc_opposite","random"],
     )
     p.add_argument("--seed-amplitude",type=float,default=0.08)
     p.add_argument(
@@ -773,6 +773,7 @@ def main():
             "Full residual A1/A2 PAV is applied directly to optimized Raw parameters.",
             "Tint VAP is optional and disabled by default.",
             "Only optimized branches (Raw and optional Tint-VAP) are classified and mapped.",
+            "The random seed keeps the normal seed's n_occ(k) pattern but replaces each occupied k-block by a reproducible random complex orthonormal subspace controlled by --rng-seed.",
             "Raw optimization uses a two-stage learning-rate schedule: --raw-learning-rate for the first --raw-lr-switch-iter steps, then --raw-learning-rate-final.",
             "Raw optimization also uses staged Monte Carlo sampling: --train-samples-early before --train-samples-switch-iter, then --train-samples-late (defaulting to --n-samples).",
             "The default trainer is auto: prefer VMC_SR with standard parameter-space SR, cholesky_with_fallback, and SPRING momentum; use --trainer legacy to recover the previous QGT+iterative-SR path.",
@@ -808,7 +809,8 @@ def main():
         a._active_seed=seed
         base_seed=a.rng_seed+10007*iseed
         seed_data=seed_bloch_blocks(
-            g,nf,a.L1,a.L2,seed,a.seed_amplitude
+            g,nf,a.L1,a.L2,seed,a.seed_amplitude,
+            random_seed=base_seed,
         )
 
         # ---- 1. Raw optimization (or reuse) ----
