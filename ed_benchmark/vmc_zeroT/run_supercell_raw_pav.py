@@ -602,6 +602,20 @@ def parser():
         "--profile-seed",default="normal",
         help="Only this seed runs the optional VMC component microprofiler.",
     )
+    p.add_argument(
+        "--fast-local-check",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Post-training validation of the rank-3 Woodbury Raw local-energy prototype against full log-wavefunction recomputation.",
+    )
+    p.add_argument(
+        "--fast-local-check-roots",type=int,default=8,
+        help="Number of cached Raw samples used by --fast-local-check.",
+    )
+    p.add_argument(
+        "--fast-local-check-repeats",type=int,default=3,
+        help="Repeated timed calls of the JIT-compiled Woodbury prototype during --fast-local-check.",
+    )
     p.add_argument("--chunk-size",type=int,default=256)
     p.add_argument("--map-edge-chunk",type=int,default=12)
     p.add_argument(
@@ -888,6 +902,7 @@ def main():
             "Backflow resolves intra-triangle t bonds into independent A/B channels while t1/t2 remain shared.",
             "The experimental NetKet packed local-value kernel is enabled by default when supported; --no-packed-kernel restores the padded kernel for timing/validation.",
             "--profile-vmc-repeats performs an optional pre-training microprofile only for --profile-seed and does not update variational parameters.",
+            "--fast-local-check validates the rank-3 Woodbury Raw local-energy prototype after training; it is diagnostic only and does not yet replace the production NetKet local-energy path.",
             "The default trainer is legacy QGT+iterative SR because the current mixed real/complex parameter tree is not accepted by VMC_SR; --trainer auto remains available for compatibility testing.",
             "PAV branches are energy-only symmetry diagnostics and report Delta E relative to their source branch.",
             "Unless --skip-lanczos is set, each final A1/A2 C3v PAV is followed by a stochastic one-step Lanczos/Ritz correction in span{|PAV>,H|PAV>}; the intermediate Tint-PAV is not Lanczos-corrected.",
