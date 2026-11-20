@@ -60,6 +60,56 @@ from symmetry_projection import (
 )
 
 
+_FAST_RAW_OPERATOR_CLASS=None
+
+
+def _fast_raw_operator_class(nk):
+    """Register and return the NetKet custom operator used by fast Raw VMC.
+
+    Registration is lazy so importing this module does not require NetKet.
+    The lean local-kernel interface lets NetKet keep its standard expect(),
+    expect_and_grad(), statistics and VMC driver while replacing only the
+    expensive local-energy evaluation.
+    """
+    global _FAST_RAW_OPERATOR_CLASS
+    if _FAST_RAW_OPERATOR_CLASS is not None:
+        return _FAST_RAW_OPERATOR_CLASS
+
+    class FastRawHamiltonian(nk.operator.AbstractOperator):
+        def __init__(self, hilbert, kernel):
+            super().__init__(hilbert)
+            self.kernel=kernel
+
+        @property
+        def dtype(self):
+            return np.dtype(np.complex128)
+
+        @property
+        def is_hermitian(self):
+            return True
+
+    @nk.vqs.get_local_kernel.dispatch
+    def _get_fast_raw_kernel(
+        vstate: nk.vqs.MCState,
+        op: FastRawHamiltonian,
+    ):
+        def local_kernel(logpsi, pars, sigma, extra_args):
+            del logpsi, extra_args
+            return op.kernel(pars,sigma)
+        return local_kernel
+
+    @nk.vqs.get_local_kernel_arguments.dispatch
+    def _get_fast_raw_kernel_arguments(
+        vstate: nk.vqs.MCState,
+        op: FastRawHamiltonian,
+    ):
+        del op
+        return vstate.samples, None
+
+    _FAST_RAW_OPERATOR_CLASS=FastRawHamiltonian
+    return FastRawHamiltonian
+
+
 def _history(log):
     out={}
     try:
@@ -989,6 +1039,65 @@ def _stage(
         seed=rng_seed,
         sampler_seed=rng_seed+104729,
     )
+
+    fast_local_requested=bool(getattr(args,"fast_local_energy",False))
+    fast_local_eligible=(
+        fast_local_requested
+        and maps is None
+        and not bool(time_reversal_even)
+        and use_backflow
+    )
+    fast_local_effective=False
+    fast_local_error=None
+    H_stage=H_fast
+    if fast_local_eligible:
+        try:
+            edge_i=np.asarray([int(e.i) for e in g.edges],np.int32)
+            edge_j=np.asarray([int(e.j) for e in g.edges],np.int32)
+            edge_t=np.asarray([float(g.t[e.kind]) for e in g.edges],float)
+            edge_v=np.asarray(
+                [1.0 if e.kind=="t" else 0.0 for e in g.edges],
+                float,
+            )
+            fast_kernel=make_fast_raw_local_energy_kernel(
+                sc_coords=seed_data["sc_coords"],
+                internal_sites=seed_data["internal_sites"],
+                kpoints=seed_data["kpoints"],
+                occupations_per_k=seed_data["occupations_per_k"],
+                shell_matrices=shell_mats,
+                backflow_matrices=bf_mats,
+                edge_i=edge_i,
+                edge_j=edge_j,
+                edge_t=edge_t,
+                edge_has_interaction=edge_v,
+                interaction_V=V,
+                return_diagnostics=False,
+            )
+            FastRawHamiltonian=_fast_raw_operator_class(nk)
+            H_stage=FastRawHamiltonian(hi,fast_kernel)
+            fast_local_effective=True
+        except Exception as exc:
+            fast_local_error=str(exc)
+            H_stage=H_fast
+            if bool(getattr(args,"fast_local_strict",False)):
+                raise
+            print(
+                "[fast local] requested but unavailable: "
+                f"{exc}; falling back to NetKet operator local energy.",
+                flush=True,
+            )
+    elif fast_local_requested and not fast_local_eligible:
+        reason=(
+            "projection/TR stage"
+            if maps is not None or bool(time_reversal_even)
+            else "backflow disabled"
+        )
+        print(
+            f"[fast local] not eligible for {stage_name}: {reason}; "
+            "using NetKet operator local energy.",
+            flush=True,
+        )
+
     setup_s=time.perf_counter()-t0
 
     warm=None
@@ -1001,7 +1110,7 @@ def _stage(
     log=nk.logging.RuntimeLog()
     if int(n_iter)>0:
         tw=time.perf_counter()
-        warm=vstate.expect(H_fast)
+        warm=vstate.expect(H_stage)
         warmup_s=time.perf_counter()-tw
         qgt_ctor,solver,effective_qgt=_qgt_and_solver(nk,jax,args)
         if str(args.qgt).lower()=="onthefly" and effective_qgt!="onthefly":
@@ -1117,7 +1226,7 @@ def _stage(
                     nk.optimizer.solver.cholesky,
                 )
                 driver=nk.driver.VMC_SR(
-                    H_fast,
+                    H_stage,
                     optimizer,
                     variational_state=vstate,
                     diag_shift=diag_shift_for_driver,
@@ -1150,7 +1259,7 @@ def _stage(
                     diag_shift=diag_shift_for_driver,
                 )
             driver=nk.driver.VMC(
-                H_fast,optimizer,
+                H_stage,optimizer,
                 variational_state=vstate,
                 preconditioner=sr,
             )
@@ -1173,7 +1282,7 @@ def _stage(
                 else float(args.diag_shift)
             )
             vmc_profile=_profile_vmc_components(
-                vstate=vstate,H_fast=H_fast,jax=jax,nk=nk,
+                vstate=vstate,H_fast=H_stage,jax=jax,nk=nk,
                 qgt_ctor=(qgt_ctor if trainer_effective=="legacy" else None),
                 solver=(solver if trainer_effective=="legacy" else None),
                 diag_shift=profile_diag,
@@ -1203,6 +1312,7 @@ def _stage(
             f"params={vstate.n_parameters} images={n_images} "
             f"samples={sample_description} sweep={sweep_size} "
             f"packed_kernel={packed_requested}->{packed_effective} "
+            f"fast_local={fast_local_requested}->{fast_local_effective} "
             f"trainer={trainer_requested}->{trainer_effective} "
             f"sr_momentum={(sr_momentum if trainer_effective=='vmc_sr' else 0.0):g} "
             f"lr={lr_description} diag_shift={diag_description}",
@@ -1294,7 +1404,8 @@ def _stage(
             f"Ns={g.Ns} Nf={nf} "
             f"params={vstate.n_parameters} images={n_images} "
             f"eval_samples={requested_eval} sweep={sweep_size} "
-            f"packed_kernel={packed_requested}->{packed_effective}; "
+            f"packed_kernel={packed_requested}->{packed_effective} "
+            f"fast_local={fast_local_requested}->{fast_local_effective}; "
             "no SR/Jacobian and no duplicate warmup energy evaluation",
             flush=True,
         )
@@ -1313,7 +1424,7 @@ def _stage(
         vstate.n_samples=eval_samples
     te=time.perf_counter()
     vstate.sample()
-    final_stats=vstate.expect(H_fast)
+    final_stats=vstate.expect(H_stage)
     final_eval_s=time.perf_counter()-te
 
     if (
@@ -1388,6 +1499,9 @@ def _stage(
         "packed_kernel_requested":bool(packed_requested),
         "packed_kernel_effective":bool(packed_effective),
         "packed_kernel_error":packed_error,
+        "fast_local_energy_requested":bool(fast_local_requested),
+        "fast_local_energy_effective":bool(fast_local_effective),
+        "fast_local_energy_error":fast_local_error,
         "vmc_component_profile":vmc_profile,
         "fast_local_check":fast_local_check,
         "train_segment_timings":train_segment_timings,
