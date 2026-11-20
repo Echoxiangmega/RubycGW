@@ -688,6 +688,20 @@ def parser():
         "--fast-local-check-repeats",type=int,default=3,
         help="Repeated timed calls of the JIT-compiled Woodbury prototype during --fast-local-check.",
     )
+    p.add_argument(
+        "--fast-sampler-check",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Post-training diagnostic: run a full cached Woodbury Metropolis sweep and compare every acceptance decision against full log-wavefunction recomputation. Does not yet replace the production sampler.",
+    )
+    p.add_argument(
+        "--fast-sampler-check-roots",type=int,default=8,
+        help="Number of cached Raw configurations used by --fast-sampler-check.",
+    )
+    p.add_argument(
+        "--fast-sampler-check-repeats",type=int,default=3,
+        help="Repeated timing calls for cached versus direct full-logpsi sweeps in --fast-sampler-check.",
+    )
     p.add_argument("--chunk-size",type=int,default=256)
     p.add_argument("--map-edge-chunk",type=int,default=12)
     p.add_argument(
@@ -978,6 +992,7 @@ def main():
             "--orbital-parameterization free is an exact Raw-state gauge reparameterization that removes per-evaluation orbital QR; periodic QR gauge fixing controls numerical conditioning without changing the normalized Slater-Jastrow-linear-backflow state.",
             "--analytic-logderiv optionally replaces generic autodiff through QR-free Raw logdet/backflow/Jastrow by an exact custom VJP and validates it against the original autodiff model before use.",
             "--trainer shared_sr removes duplicate log-derivative work by using one mixed-real Jacobian for both the energy force and SR solve; it validates the final update against legacy SR before use.",
+            "--fast-sampler-check validates a multi-hop inverse-cache Woodbury sampler against full logpsi using identical proposals before that sampler is allowed into production.",
             "Before the first fast Raw stage, expect_and_grad is compared against the standard NetKet Hamiltonian on identical samples; the fast backend is used only if the energy and full parameter-gradient PyTrees agree within --fast-local-gradient-tolerance.",
             "--fast-local-check remains available as a stricter post-training per-hop ratio/local-energy diagnostic.",
             "The default trainer is legacy QGT+iterative SR because the current mixed real/complex parameter tree is not accepted by VMC_SR; --trainer auto remains available for compatibility testing.",
