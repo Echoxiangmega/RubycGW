@@ -521,6 +521,7 @@ def _stage(
     train_samples=None,
     train_samples_after=None,
     train_samples_switch_iter=None,
+    train_schedule=None,
     train_sweep_size=None,
     eval_samples_override=None,
     make_maps=False,
@@ -538,6 +539,24 @@ def _stage(
     )
     v0=None if initial_params is None else initial_params.get("v",None)
     eta0=None if initial_params is None else initial_params.get("eta",None)
+    if use_backflow and eta0 is not None and bf_mats is not None:
+        eta0=np.asarray(eta0,np.complex128).reshape(-1)
+        nbf=int(np.asarray(bf_mats).shape[0])
+        # Backward compatibility with pre-A/B backflow checkpoints:
+        # old eta=[eta_t,eta_t1,eta_t2] -> [eta_tA,eta_tB,eta_t1,eta_t2].
+        if eta0.size==3 and nbf==4:
+            eta0=np.asarray(
+                [eta0[0],eta0[0],eta0[1],eta0[2]],np.complex128
+            )
+            print(
+                "[backflow] expanded legacy 3-channel eta checkpoint to "
+                "A/B-resolved 4-channel form.",
+                flush=True,
+            )
+        elif eta0.size!=nbf:
+            raise ValueError(
+                f"Backflow eta has {eta0.size} channels but model expects {nbf}"
+            )
     tr0=(
         0.0 if initial_params is None
         else float(initial_params.get("tr_phase",0.0) or 0.0)
@@ -562,26 +581,75 @@ def _stage(
         packed_orbitals=True,
     )
 
-    stage_samples=(
-        int(train_samples)
-        if train_samples is not None
-        else int(args.n_samples)
-    )
-    stage_samples_after=(
-        int(train_samples_after)
-        if train_samples_after is not None
-        else int(stage_samples)
-    )
-    sample_switch=(
-        None if train_samples_switch_iter is None
-        else int(train_samples_switch_iter)
-    )
-    use_sample_schedule=(
-        int(n_iter)>0
-        and stage_samples_after!=stage_samples
-        and sample_switch is not None
-        and 0<sample_switch<int(n_iter)
-    )
+    normalized_train_schedule=None
+    if train_schedule is not None and int(n_iter)>0:
+        normalized_train_schedule=[]
+        prev_end=0
+        for item in train_schedule:
+            end_iter=int(item["end_iter"])
+            if end_iter<=prev_end:
+                raise ValueError("train_schedule end_iter values must increase")
+            if end_iter>int(n_iter):
+                end_iter=int(n_iter)
+            if end_iter<=prev_end:
+                continue
+            entry={
+                "end_iter":end_iter,
+                "learning_rate":float(item["learning_rate"]),
+                "n_samples":int(item["n_samples"]),
+                "diag_shift":float(item["diag_shift"]),
+            }
+            if entry["n_samples"]<1:
+                raise ValueError("train_schedule n_samples must be positive")
+            if entry["learning_rate"]<=0:
+                raise ValueError("train_schedule learning_rate must be positive")
+            if entry["diag_shift"]<0:
+                raise ValueError("train_schedule diag_shift must be nonnegative")
+            normalized_train_schedule.append(entry)
+            prev_end=end_iter
+            if end_iter==int(n_iter):
+                break
+        if not normalized_train_schedule:
+            raise ValueError("train_schedule contains no usable stages")
+        if normalized_train_schedule[-1]["end_iter"]<int(n_iter):
+            tail=dict(normalized_train_schedule[-1])
+            tail["end_iter"]=int(n_iter)
+            normalized_train_schedule.append(tail)
+
+    if normalized_train_schedule is not None:
+        stage_samples=int(normalized_train_schedule[0]["n_samples"])
+        stage_samples_after=int(normalized_train_schedule[-1]["n_samples"])
+        sample_switch=(
+            int(normalized_train_schedule[0]["end_iter"])
+            if len(normalized_train_schedule)>1 else None
+        )
+        use_sample_schedule=(
+            any(
+                x["n_samples"]!=normalized_train_schedule[0]["n_samples"]
+                for x in normalized_train_schedule[1:]
+            )
+        )
+    else:
+        stage_samples=(
+            int(train_samples)
+            if train_samples is not None
+            else int(args.n_samples)
+        )
+        stage_samples_after=(
+            int(train_samples_after)
+            if train_samples_after is not None
+            else int(stage_samples)
+        )
+        sample_switch=(
+            None if train_samples_switch_iter is None
+            else int(train_samples_switch_iter)
+        )
+        use_sample_schedule=(
+            int(n_iter)>0
+            and stage_samples_after!=stage_samples
+            and sample_switch is not None
+            and 0<sample_switch<int(n_iter)
+        )
     sweep_size=(
         int(train_sweep_size)
         if train_sweep_size is not None
@@ -628,37 +696,92 @@ def _stage(
                 "solver; no dense P x P QGT is formed.",
                 flush=True,
             )
-        lr0=float(learning_rate)
-        lr1=(
-            None if learning_rate_after is None
-            else float(learning_rate_after)
-        )
-        lr_switch=(
-            None if learning_rate_switch_iter is None
-            else int(learning_rate_switch_iter)
-        )
-        use_lr_schedule=(
-            lr1 is not None
-            and lr_switch is not None
-            and 0<lr_switch<int(n_iter)
-            and not np.isclose(lr1,lr0)
-        )
         import optax
-        if use_lr_schedule:
-            if lr0==0.0:
-                raise ValueError("Initial learning rate must be nonzero for a two-stage schedule")
-            schedule=optax.piecewise_constant_schedule(
+        if normalized_train_schedule is not None:
+            lr_values=[x["learning_rate"] for x in normalized_train_schedule]
+            diag_values=[x["diag_shift"] for x in normalized_train_schedule]
+            boundaries=[
+                int(x["end_iter"]) for x in normalized_train_schedule[:-1]
+            ]
+
+            lr0=float(lr_values[0])
+            lr_scales={}
+            for ib,boundary in enumerate(boundaries):
+                prev=float(lr_values[ib])
+                nxt=float(lr_values[ib+1])
+                lr_scales[int(boundary)]=nxt/prev
+            lr_schedule=optax.piecewise_constant_schedule(
                 init_value=lr0,
-                boundaries_and_scales={lr_switch:lr1/lr0},
+                boundaries_and_scales=lr_scales,
             )
-            optimizer=optax.sgd(learning_rate=schedule)
-            lr_description=(
-                f"{lr0:g} for steps 1-{lr_switch}, "
-                f"then {lr1:g} for steps {lr_switch+1}-{int(n_iter)}"
-            )
+            optimizer=optax.sgd(learning_rate=lr_schedule)
+
+            diag0=float(diag_values[0])
+            if diag0==0.0 and any(abs(x)>0 for x in diag_values[1:]):
+                raise ValueError(
+                    "A scheduled diag_shift cannot start at zero and later "
+                    "become nonzero with the multiplicative Optax schedule"
+                )
+            if diag0==0.0:
+                diag_shift_for_driver=0.0
+            else:
+                diag_scales={}
+                for ib,boundary in enumerate(boundaries):
+                    prev=float(diag_values[ib])
+                    nxt=float(diag_values[ib+1])
+                    if prev==0.0:
+                        raise ValueError(
+                            "diag_shift schedule cannot transition out of zero"
+                        )
+                    diag_scales[int(boundary)]=nxt/prev
+                diag_shift_for_driver=optax.piecewise_constant_schedule(
+                    init_value=diag0,
+                    boundaries_and_scales=diag_scales,
+                )
+
+            def _desc(key):
+                start=1
+                parts=[]
+                for item in normalized_train_schedule:
+                    end=int(item["end_iter"])
+                    parts.append(f"{item[key]:g}@{start}-{end}")
+                    start=end+1
+                return ", ".join(parts)
+            lr_description=_desc("learning_rate")
+            diag_description=_desc("diag_shift")
         else:
-            optimizer=optax.sgd(learning_rate=lr0)
-            lr_description=f"constant {lr0:g}"
+            lr0=float(learning_rate)
+            lr1=(
+                None if learning_rate_after is None
+                else float(learning_rate_after)
+            )
+            lr_switch=(
+                None if learning_rate_switch_iter is None
+                else int(learning_rate_switch_iter)
+            )
+            use_lr_schedule=(
+                lr1 is not None
+                and lr_switch is not None
+                and 0<lr_switch<int(n_iter)
+                and not np.isclose(lr1,lr0)
+            )
+            if use_lr_schedule:
+                if lr0==0.0:
+                    raise ValueError("Initial learning rate must be nonzero for a two-stage schedule")
+                schedule=optax.piecewise_constant_schedule(
+                    init_value=lr0,
+                    boundaries_and_scales={lr_switch:lr1/lr0},
+                )
+                optimizer=optax.sgd(learning_rate=schedule)
+                lr_description=(
+                    f"{lr0:g} for steps 1-{lr_switch}, "
+                    f"then {lr1:g} for steps {lr_switch+1}-{int(n_iter)}"
+                )
+            else:
+                optimizer=optax.sgd(learning_rate=lr0)
+                lr_description=f"constant {lr0:g}"
+            diag_shift_for_driver=float(args.diag_shift)
+            diag_description=f"constant {float(args.diag_shift):g}"
 
         trainer_requested=str(getattr(args,"trainer","legacy")).lower()
         if trainer_requested not in ("auto","vmc_sr","legacy"):
@@ -681,7 +804,7 @@ def _stage(
                     H_fast,
                     optimizer,
                     variational_state=vstate,
-                    diag_shift=args.diag_shift,
+                    diag_shift=diag_shift_for_driver,
                     momentum=(sr_momentum if sr_momentum>0 else None),
                     linear_solver=linear_solver,
                     mode="complex",
@@ -701,14 +824,14 @@ def _stage(
                 sr=nk.optimizer.SR(
                     qgt=qgt_ctor,
                     solver=solver,
-                    diag_shift=args.diag_shift,
+                    diag_shift=diag_shift_for_driver,
                     solver_restart=True,
                 )
             except TypeError:
                 sr=nk.optimizer.SR(
                     qgt=qgt_ctor,
                     solver=solver,
-                    diag_shift=args.diag_shift,
+                    diag_shift=diag_shift_for_driver,
                 )
             driver=nk.driver.VMC(
                 H_fast,optimizer,
@@ -723,7 +846,15 @@ def _stage(
                 )
 
         n_images=1 if maps is None else int(len(maps))
-        if use_sample_schedule:
+        if normalized_train_schedule is not None:
+            start=1
+            sample_parts=[]
+            for item in normalized_train_schedule:
+                end=int(item["end_iter"])
+                sample_parts.append(f"{int(item['n_samples'])}@{start}-{end}")
+                start=end+1
+            sample_description=", ".join(sample_parts)
+        elif use_sample_schedule:
             sample_description=(
                 f"{stage_samples} for steps 1-{sample_switch}, "
                 f"then {stage_samples_after} for steps "
@@ -738,11 +869,23 @@ def _stage(
             f"samples={sample_description} sweep={sweep_size} "
             f"trainer={trainer_requested}->{trainer_effective} "
             f"sr_momentum={(sr_momentum if trainer_effective=='vmc_sr' else 0.0):g} "
-            f"lr={lr_description}",
+            f"lr={lr_description} diag_shift={diag_description}",
             flush=True,
         )
         topt=time.perf_counter()
-        if use_sample_schedule:
+        if normalized_train_schedule is not None:
+            prev_end=0
+            for item in normalized_train_schedule:
+                end=int(item["end_iter"])
+                nsamp=int(item["n_samples"])
+                if int(vstate.n_samples)!=nsamp:
+                    vstate.n_samples=nsamp
+                driver.run(
+                    n_iter=end-prev_end,
+                    out=log,show_progress=True,
+                )
+                prev_end=end
+        elif use_sample_schedule:
             driver.run(
                 n_iter=sample_switch,
                 out=log,show_progress=True,
@@ -865,11 +1008,20 @@ def _stage(
         "cg_tol":float(args.cg_tol),
         "cg_maxiter":int(args.cg_maxiter),
         "diag_shift":float(args.diag_shift),
+        "diag_shift_schedule":(
+            diag_description if int(n_iter)>0 else "not_used_eval_only"
+        ),
+        "train_schedule":(
+            normalized_train_schedule if normalized_train_schedule is not None
+            else None
+        ),
         "n_samples":int(stage_samples),
         "training_n_samples":int(stage_samples),
         "training_n_samples_after":int(stage_samples_after),
         "training_n_samples_switch_iter":(
-            int(sample_switch) if use_sample_schedule else None
+            int(sample_switch)
+            if use_sample_schedule and normalized_train_schedule is None
+            else None
         ),
         "training_sample_schedule":(
             sample_description if int(n_iter)>0 else "not_used_eval_only"
