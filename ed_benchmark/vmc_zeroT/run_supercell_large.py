@@ -696,18 +696,26 @@ def _make_orbital_gauge_fix_callback(nk, occupations_per_k, interval):
         return None
 
     class OrbitalGaugeFix(nk.callbacks.AbstractCallback):
+        @staticmethod
+        def _reset_solver_restart(driver):
+            pre=getattr(driver,"preconditioner",None)
+            if pre is not None and hasattr(pre,"x0"):
+                pre.x0=None
+
         def on_step_end(self,step,log_data,driver):
             del log_data
             if (int(step)+1)%interval==0:
                 _gauge_fix_packed_orbitals(
                     driver.state,occupations_per_k
                 )
+                self._reset_solver_restart(driver)
 
         def on_run_end(self,step,driver):
             del step
             _gauge_fix_packed_orbitals(
                 driver.state,occupations_per_k
             )
+            self._reset_solver_restart(driver)
 
     return OrbitalGaugeFix()
 
@@ -1409,8 +1417,37 @@ def _stage(
                 )
                 analytic_logderiv_report["tolerance"]=tol
                 analytic_logderiv_report["passed"]=bool(passed)
-                if passed:
+                min_speedup=float(
+                    getattr(args,"analytic_logderiv_min_speedup",1.02)
+                )
+                perf_ok=(
+                    analytic_logderiv_report.get(
+                        "expect_and_grad_speedup",1.0
+                    )>=min_speedup
+                )
+                analytic_logderiv_report["min_speedup"]=min_speedup
+                analytic_logderiv_report["performance_passed"]=bool(perf_ok)
+
+                if passed and perf_ok:
                     _ANALYTIC_LOGDERIV_VALIDATED_KEYS.add(key)
+                elif passed and not perf_ok:
+                    analytic_logderiv_error=(
+                        "analytic log-derivative is correct but not faster: "
+                        f"speedup={analytic_logderiv_report.get('expect_and_grad_speedup',1.0):.3f}x "
+                        f"< required {min_speedup:.3f}x"
+                    )
+                    print(
+                        "[analytic logderiv] "
+                        +analytic_logderiv_error
+                        +"; using original autodiff model.",
+                        flush=True,
+                    )
+                    _fallback_samples=vstate.samples
+                    ref_vstate.parameters=vstate.parameters
+                    ref_vstate._samples=_fallback_samples
+                    vstate=ref_vstate
+                    model=ref_model
+                    analytic_logderiv_effective=False
                 else:
                     analytic_logderiv_error=(
                         "analytic log-derivative validation failed: "
@@ -1704,11 +1741,11 @@ def _stage(
 
         if driver is None:
             trainer_effective="legacy"
-            # Periodic QR gauge fixing changes the parameter coordinates while
-            # leaving the normalized physical state unchanged.  A previous CG
-            # solution is therefore not a meaningful restart vector across a
-            # gauge-fix event.  Disable solver restart in the QR-free gauge.
-            solver_restart_effective=not orbital_free_effective
+            # Keep CG restart for ordinary steps.  The orbital gauge-fix
+            # callback clears SR.x0 only when the parameter gauge is actually
+            # changed, so we retain restart speed without carrying an old-gauge
+            # solution across a QR reparameterisation.
+            solver_restart_effective=True
             try:
                 sr=nk.optimizer.SR(
                     qgt=qgt_ctor,
