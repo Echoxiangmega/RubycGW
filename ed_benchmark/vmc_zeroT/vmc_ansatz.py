@@ -149,28 +149,50 @@ def jastrow_channels(g, mode: str = "distance", n_shells: int = 4):
 
 
 def bond_backflow_channels(g):
-    """Three symmetric nearest-neighbor backflow channels: t, t1 and t2.
+    """A/B-resolved intra-triangle plus shared inter-triangle backflow.
 
     The backflow orbital deformation is
         Q_BF[i,a](x) = Q[i,a]
-          + sum_k eta_k sum_j B_k[i,j] (n_j-nu) Q[j,a],
-    with complex eta_k and k in {t,t1,t2}.
+          + sum_k eta_k sum_j B_k[i,j] (n_j-nu) Q[j,a].
+
+    Ruby t bonds live entirely inside one elementary triangle, so they are
+    split into independent A/B channels. The t1 and t2 bonds connect the two
+    triangle sublattices and remain shared:
+        k in {t_A, t_B, t1, t2}.
+
+    This is the minimal extension that lets the correlation dressing respond
+    differently on A and B triangles without assigning arbitrary A/B
+    ownership to inter-triangle bonds.
     """
     ns = g.Ns
-    labels = ["t", "t1", "t2"]
-    mats = np.zeros((3, ns, ns), dtype=float)
-    counts = np.zeros(3, dtype=int)
-    kind_to_k = {name: k for k, name in enumerate(labels)}
+    labels = ["t_A", "t_B", "t1", "t2"]
+    mats = np.zeros((4, ns, ns), dtype=float)
+    counts = np.zeros(4, dtype=int)
     seen = set()
     for e in g.edges:
-        if e.kind not in kind_to_k:
-            continue
         i, j = int(e.i), int(e.j)
         key = tuple(sorted((i, j)))
         if key in seen:
             raise RuntimeError(f"Duplicate graph pair in backflow channels: {key}")
         seen.add(key)
-        k = kind_to_k[e.kind]
+
+        if e.kind == "t":
+            oi=i % 6
+            oj=j % 6
+            if oi < 3 and oj < 3:
+                k=0
+            elif oi >= 3 and oj >= 3:
+                k=1
+            else:
+                raise RuntimeError(
+                    f"Intra-triangle t bond crosses A/B sectors: {i}-{j}"
+                )
+        elif e.kind == "t1":
+            k=2
+        elif e.kind == "t2":
+            k=3
+        else:
+            continue
         mats[k, i, j] = mats[k, j, i] = 1.0
         counts[k] += 1
     return [f"eta_{x}" for x in labels], mats, counts
