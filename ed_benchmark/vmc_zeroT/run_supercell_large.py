@@ -62,6 +62,7 @@ from symmetry_projection import (
 
 _FAST_RAW_OPERATOR_CLASS=None
 _FAST_LOCAL_GRADIENT_VALIDATED=False
+_ANALYTIC_LOGDERIV_VALIDATED_KEYS=set()
 
 
 def _fast_raw_operator_class(nk):
@@ -711,6 +712,44 @@ def _make_orbital_gauge_fix_callback(nk, occupations_per_k, interval):
     return OrbitalGaugeFix()
 
 
+def _validate_analytic_logderiv(
+    *,
+    vstate_analytic,
+    vstate_reference,
+    H_reference,
+    jax,
+):
+    """Compare analytic-JVP and original-autodiff Raw energy gradients."""
+    vstate_analytic.sample()
+    samples=vstate_analytic.samples
+    # Supported NetKet extension point: inject the same cached samples so the
+    # two gradient estimates are strictly comparable.
+    vstate_reference._samples=samples
+    vstate_reference.parameters=vstate_analytic.parameters
+
+    stats_a,grad_a=vstate_analytic.expect_and_grad(H_reference)
+    _sync_tree(jax,grad_a)
+    stats_r,grad_r=vstate_reference.expect_and_grad(H_reference)
+    _sync_tree(jax,grad_r)
+
+    report=_compare_parameter_trees(grad_r,grad_a)
+    Ea=complex(np.asarray(stats_a.mean))
+    Er=complex(np.asarray(stats_r.mean))
+    report.update({
+        "energy_abs_error":float(abs(Ea-Er)),
+        "analytic_energy_real":float(Ea.real),
+        "reference_energy_real":float(Er.real),
+    })
+    print(
+        "[analytic logderiv check] "
+        f"dE={report['energy_abs_error']:.3e} "
+        f"grad_max={report['max_abs_error']:.3e} "
+        f"grad_rel_l2={report['relative_l2_error']:.3e}",
+        flush=True,
+    )
+    return report
+
+
 def _profile_vmc_components(
     *,
     vstate,H_fast,jax,nk,
@@ -1136,6 +1175,14 @@ def _stage(
         and not bool(time_reversal_even)
     )
     orbital_orthonormalize=not orbital_free_effective
+    analytic_logderiv_requested=bool(
+        getattr(args,"analytic_logderiv",False)
+    )
+    analytic_logderiv_effective=(
+        analytic_logderiv_requested and orbital_free_effective
+    )
+    analytic_logderiv_report={}
+    analytic_logderiv_error=None
 
     t0=time.perf_counter()
     model=build_supercell_netket_model(
@@ -1155,6 +1202,7 @@ def _stage(
         sparse_correlators=True,
         packed_orbitals=True,
         orthonormalize_orbitals=orbital_orthonormalize,
+        analytic_logderiv=analytic_logderiv_effective,
     )
 
     normalized_train_schedule=None
@@ -1252,6 +1300,103 @@ def _stage(
         seed=rng_seed,
         sampler_seed=rng_seed+104729,
     )
+
+    if analytic_logderiv_effective:
+        key=(
+            int(g.Ns),
+            int(nf),
+            tuple(
+                int(x)
+                for x in np.asarray(
+                    seed_data["occupations_per_k"],int
+                )
+            ),
+        )
+        need_check=(
+            bool(getattr(args,"analytic_logderiv_check",True))
+            and key not in _ANALYTIC_LOGDERIV_VALIDATED_KEYS
+        )
+        if need_check:
+            ref_model=build_supercell_netket_model(
+                blocks,
+                seed_data["sc_coords"],
+                seed_data["internal_sites"],
+                seed_data["kpoints"],
+                shell_mats,
+                use_jastrow=True,
+                backflow_matrices=(bf_mats if use_backflow else None),
+                initial_v=v0,
+                initial_eta=eta0,
+                point_site_maps=maps,
+                point_characters=chars,
+                time_reversal_even=bool(time_reversal_even),
+                initial_tr_phase=tr0,
+                sparse_correlators=True,
+                packed_orbitals=True,
+                orthonormalize_orbitals=False,
+                analytic_logderiv=False,
+            )
+            ref_vstate=nk.vqs.MCState(
+                sampler,ref_model,
+                n_samples=stage_samples,
+                n_discard_per_chain=args.n_discard,
+                chunk_size=args.chunk_size,
+                seed=rng_seed+17,
+                sampler_seed=rng_seed+104746,
+            )
+            try:
+                analytic_logderiv_report=_validate_analytic_logderiv(
+                    vstate_analytic=vstate,
+                    vstate_reference=ref_vstate,
+                    H_reference=H_fast,
+                    jax=jax,
+                )
+                tol=float(
+                    getattr(
+                        args,
+                        "analytic_logderiv_tolerance",
+                        1e-8,
+                    )
+                )
+                passed=(
+                    analytic_logderiv_report["energy_abs_error"]<=tol
+                    and analytic_logderiv_report["max_abs_error"]<=tol
+                    and analytic_logderiv_report["relative_l2_error"]<=tol
+                )
+                analytic_logderiv_report["tolerance"]=tol
+                analytic_logderiv_report["passed"]=bool(passed)
+                if passed:
+                    _ANALYTIC_LOGDERIV_VALIDATED_KEYS.add(key)
+                else:
+                    analytic_logderiv_error=(
+                        "analytic log-derivative validation failed: "
+                        f"{analytic_logderiv_report}"
+                    )
+                    print(
+                        "[analytic logderiv] "
+                        +analytic_logderiv_error
+                        +"; using original autodiff model.",
+                        flush=True,
+                    )
+                    # Preserve exactly the parameters/samples used by the
+                    # failed check while falling back to the reference model.
+                    ref_vstate._samples=vstate.samples
+                    ref_vstate.parameters=vstate.parameters
+                    vstate=ref_vstate
+                    model=ref_model
+                    analytic_logderiv_effective=False
+            except Exception as exc:
+                analytic_logderiv_error=str(exc)
+                print(
+                    "[analytic logderiv] validation raised "
+                    f"{exc}; using original autodiff model.",
+                    flush=True,
+                )
+                ref_vstate._samples=vstate.samples
+                ref_vstate.parameters=vstate.parameters
+                vstate=ref_vstate
+                model=ref_model
+                analytic_logderiv_effective=False
 
     fast_local_requested=bool(getattr(args,"fast_local_energy",False))
     fast_local_eligible=(
@@ -1592,6 +1737,8 @@ def _stage(
             f"fast_local={fast_local_requested}->{fast_local_effective} "
             f"orbitals={orbital_parameterization}->"
             f"{'free' if orbital_free_effective else 'qr'} "
+            f"analytic_logderiv={analytic_logderiv_requested}->"
+            f"{analytic_logderiv_effective} "
             f"trainer={trainer_requested}->{trainer_effective} "
             f"sr_momentum={(sr_momentum if trainer_effective=='vmc_sr' else 0.0):g} "
             f"lr={lr_description} diag_shift={diag_description}",
@@ -1690,7 +1837,9 @@ def _stage(
             f"params={vstate.n_parameters} images={n_images} "
             f"eval_samples={requested_eval} sweep={sweep_size} "
             f"packed_kernel={packed_requested}->{packed_effective} "
-            f"fast_local={fast_local_requested}->{fast_local_effective}; "
+            f"fast_local={fast_local_requested}->{fast_local_effective} "
+            f"analytic_logderiv={analytic_logderiv_requested}->"
+            f"{analytic_logderiv_effective}; "
             "no SR/Jacobian and no duplicate warmup energy evaluation",
             flush=True,
         )
@@ -1790,6 +1939,10 @@ def _stage(
             int(getattr(args,"orbital_gauge_fix_interval",20))
             if orbital_free_effective else None
         ),
+        "analytic_logderiv_requested":bool(analytic_logderiv_requested),
+        "analytic_logderiv_effective":bool(analytic_logderiv_effective),
+        "analytic_logderiv_check":analytic_logderiv_report,
+        "analytic_logderiv_error":analytic_logderiv_error,
         "packed_kernel_requested":bool(packed_requested),
         "packed_kernel_effective":bool(packed_effective),
         "packed_kernel_error":packed_error,
