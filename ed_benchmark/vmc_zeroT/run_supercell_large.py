@@ -722,10 +722,13 @@ def _validate_analytic_logderiv(
     """Compare analytic-JVP and original-autodiff Raw energy gradients."""
     vstate_analytic.sample()
     samples=vstate_analytic.samples
+    # Setting parameters calls VariationalState.reset(), which clears the MC
+    # sample cache.  Therefore synchronise parameters FIRST and inject the
+    # identical cached samples only afterwards.
+    vstate_reference.parameters=vstate_analytic.parameters
     # Supported NetKet extension point: inject the same cached samples so the
     # two gradient estimates are strictly comparable.
     vstate_reference._samples=samples
-    vstate_reference.parameters=vstate_analytic.parameters
 
     stats_a,grad_a=vstate_analytic.expect_and_grad(H_reference)
     _sync_tree(jax,grad_a)
@@ -1382,8 +1385,9 @@ def _stage(
                     )
                     # Preserve exactly the parameters/samples used by the
                     # failed check while falling back to the reference model.
-                    ref_vstate._samples=vstate.samples
+                    _fallback_samples=vstate.samples
                     ref_vstate.parameters=vstate.parameters
+                    ref_vstate._samples=_fallback_samples
                     vstate=ref_vstate
                     model=ref_model
                     analytic_logderiv_effective=False
