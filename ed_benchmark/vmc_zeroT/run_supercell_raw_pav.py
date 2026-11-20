@@ -603,6 +603,16 @@ def parser():
         help="Only this seed runs the optional VMC component microprofiler.",
     )
     p.add_argument(
+        "--orbital-parameterization",
+        choices=["qr","free"],
+        default="qr",
+        help="Raw occupied-orbital gauge. qr orthonormalizes every model evaluation; free removes that redundant QR and periodically gauge-fixes the packed k blocks.",
+    )
+    p.add_argument(
+        "--orbital-gauge-fix-interval",type=int,default=20,
+        help="With --orbital-parameterization free, QR gauge-fix the packed occupied k blocks every N accepted VMC steps and at each run boundary. 0 disables periodic fixing.",
+    )
+    p.add_argument(
         "--fast-local-energy",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -925,6 +935,7 @@ def main():
             "The experimental NetKet packed local-value kernel is enabled by default when supported; --no-packed-kernel restores the padded kernel for timing/validation.",
             "--profile-vmc-repeats performs an optional pre-training microprofile only for --profile-seed and does not update variational parameters.",
             "The rank-3 Woodbury Raw local-energy backend is enabled by default for unprojected backflow stages; it falls back to the standard NetKet Hamiltonian unless --fast-local-strict is set.",
+            "--orbital-parameterization free is an exact Raw-state gauge reparameterization that removes per-evaluation orbital QR; periodic QR gauge fixing controls numerical conditioning without changing the normalized Slater-Jastrow-linear-backflow state.",
             "Before the first fast Raw stage, expect_and_grad is compared against the standard NetKet Hamiltonian on identical samples; the fast backend is used only if the energy and full parameter-gradient PyTrees agree within --fast-local-gradient-tolerance.",
             "--fast-local-check remains available as a stricter post-training per-hop ratio/local-energy diagnostic.",
             "The default trainer is legacy QGT+iterative SR because the current mixed real/complex parameter tree is not accepted by VMC_SR; --trainer auto remains available for compatibility testing.",
