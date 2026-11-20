@@ -613,6 +613,22 @@ def parser():
         help="With --orbital-parameterization free, QR gauge-fix the packed occupied k blocks every N accepted VMC steps and at each run boundary. 0 disables periodic fixing.",
     )
     p.add_argument(
+        "--analytic-logderiv",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="With QR-free Raw orbitals, use the exact custom JVP dlogdet=Tr(A^-1 dA) plus analytic backflow/Jastrow tangents to accelerate force and QGT derivatives.",
+    )
+    p.add_argument(
+        "--analytic-logderiv-check",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Validate the analytic Raw log-derivative against the original autodiff model once per occupation pattern before training.",
+    )
+    p.add_argument(
+        "--analytic-logderiv-tolerance",type=float,default=1e-8,
+        help="Maximum energy, max-gradient and relative-L2 discrepancy allowed by --analytic-logderiv-check.",
+    )
+    p.add_argument(
         "--fast-local-energy",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -936,6 +952,7 @@ def main():
             "--profile-vmc-repeats performs an optional pre-training microprofile only for --profile-seed and does not update variational parameters.",
             "The rank-3 Woodbury Raw local-energy backend is enabled by default for unprojected backflow stages; it falls back to the standard NetKet Hamiltonian unless --fast-local-strict is set.",
             "--orbital-parameterization free is an exact Raw-state gauge reparameterization that removes per-evaluation orbital QR; periodic QR gauge fixing controls numerical conditioning without changing the normalized Slater-Jastrow-linear-backflow state.",
+            "--analytic-logderiv optionally replaces generic autodiff through QR-free Raw logdet/backflow/Jastrow by an exact custom JVP and validates it against the original autodiff model before use.",
             "Before the first fast Raw stage, expect_and_grad is compared against the standard NetKet Hamiltonian on identical samples; the fast backend is used only if the energy and full parameter-gradient PyTrees agree within --fast-local-gradient-tolerance.",
             "--fast-local-check remains available as a stricter post-training per-hop ratio/local-energy diagnostic.",
             "The default trainer is legacy QGT+iterative SR because the current mixed real/complex parameter tree is not accepted by VMC_SR; --trainer auto remains available for compatibility testing.",
