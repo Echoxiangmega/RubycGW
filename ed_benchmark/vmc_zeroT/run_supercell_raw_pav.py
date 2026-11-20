@@ -603,6 +603,28 @@ def parser():
         help="Only this seed runs the optional VMC component microprofiler.",
     )
     p.add_argument(
+        "--fast-local-energy",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use the validated rank-3 Woodbury custom Raw local-energy kernel when eligible; --no-fast-local-energy restores the standard NetKet Hamiltonian path.",
+    )
+    p.add_argument(
+        "--fast-local-strict",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Raise instead of falling back if the custom fast local-energy backend cannot be constructed or validated.",
+    )
+    p.add_argument(
+        "--fast-local-gradient-check",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Once per process, compare custom and standard expect_and_grad on identical cached samples before using the fast local-energy backend.",
+    )
+    p.add_argument(
+        "--fast-local-gradient-tolerance",type=float,default=1e-8,
+        help="Maximum allowed energy, max-gradient and relative-L2 gradient discrepancy in the one-time fast-local validation.",
+    )
+    p.add_argument(
         "--fast-local-check",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -902,7 +924,9 @@ def main():
             "Backflow resolves intra-triangle t bonds into independent A/B channels while t1/t2 remain shared.",
             "The experimental NetKet packed local-value kernel is enabled by default when supported; --no-packed-kernel restores the padded kernel for timing/validation.",
             "--profile-vmc-repeats performs an optional pre-training microprofile only for --profile-seed and does not update variational parameters.",
-            "--fast-local-check validates the rank-3 Woodbury Raw local-energy prototype after training; it is diagnostic only and does not yet replace the production NetKet local-energy path.",
+            "The rank-3 Woodbury Raw local-energy backend is enabled by default for unprojected backflow stages; it falls back to the standard NetKet Hamiltonian unless --fast-local-strict is set.",
+            "Before the first fast Raw stage, expect_and_grad is compared against the standard NetKet Hamiltonian on identical samples; the fast backend is used only if the energy and full parameter-gradient PyTrees agree within --fast-local-gradient-tolerance.",
+            "--fast-local-check remains available as a stricter post-training per-hop ratio/local-energy diagnostic.",
             "The default trainer is legacy QGT+iterative SR because the current mixed real/complex parameter tree is not accepted by VMC_SR; --trainer auto remains available for compatibility testing.",
             "PAV branches are energy-only symmetry diagnostics and report Delta E relative to their source branch.",
             "Unless --skip-lanczos is set, each final A1/A2 C3v PAV is followed by a stochastic one-step Lanczos/Ritz correction in span{|PAV>,H|PAV>}; the intermediate Tint-PAV is not Lanczos-corrected.",
