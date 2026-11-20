@@ -76,17 +76,25 @@ def seed_bloch_blocks(
     l2: int,
     seed: str,
     seed_amplitude: float,
+    *,
+    random_seed: int | None = None,
 ):
     """Construct translation-compatible initial occupied orbital blocks.
 
-    The ring3-periodic seed Hamiltonian is transformed to each superlattice
-    momentum block. The globally lowest nf one-body levels determine the
-    fixed occupation count n_occ(k) used by the variational family.
+    Standard seeds use the existing ring3-periodic one-body seed Hamiltonian.
+    For seed="random", the normal-seed spectrum is used only to fix the
+    occupation counts n_occ(k); each occupied k-block is then replaced by an
+    independent random complex orthonormal subspace.  This keeps the same
+    momentum-sector occupation pattern as the normal variational family while
+    removing hand-designed CO/BOW/LC bias from the initial orbitals.
     """
     sc, internal, kpoints = bloch_layout(g, l1, l2)
     nsc = int(l1) * int(l2)
     star = ring3_periodic_star_formfactor(g, l1, l2)
-    h = one_body_seed_hamiltonian(g, seed, seed_amplitude, star)
+    seed_key=str(seed).lower()
+    random_mode=(seed_key=="random")
+    reference_seed="normal" if random_mode else seed
+    h = one_body_seed_hamiltonian(g, reference_seed, seed_amplitude, star)
 
     evecs = []
     embeddings = []
@@ -111,13 +119,25 @@ def seed_bloch_blocks(
 
     blocks = []
     counts = []
+    rng=(
+        np.random.default_rng(0 if random_seed is None else int(random_seed))
+        if random_mode else None
+    )
     for ik in range(len(kpoints)):
         ids = sorted(bands[ik])
-        counts.append(len(ids))
-        blocks.append(
-            np.asarray(evecs[ik][:, ids], np.complex128)
-            if ids else np.empty((18, 0), np.complex128)
-        )
+        nocc=len(ids)
+        counts.append(nocc)
+        if nocc==0:
+            block=np.empty((18,0),np.complex128)
+        elif random_mode:
+            z=(
+                rng.normal(size=(18,nocc))
+                +1j*rng.normal(size=(18,nocc))
+            )
+            block=np.linalg.qr(z,mode="reduced")[0].astype(np.complex128)
+        else:
+            block=np.asarray(evecs[ik][:,ids],np.complex128)
+        blocks.append(block)
 
     qparts = []
     for ik, block in enumerate(blocks):
@@ -153,6 +173,12 @@ def seed_bloch_blocks(
         "shell_gap": shell_gap,
         "total_supercell_momentum": total_k,
         "Q0_full": Q,
+        "seed_mode":("random_complex_orthonormal" if random_mode else "named"),
+        "random_seed":(
+            int(0 if random_seed is None else random_seed)
+            if random_mode else None
+        ),
+        "occupation_reference_seed":("normal" if random_mode else str(seed)),
     }
 
 
