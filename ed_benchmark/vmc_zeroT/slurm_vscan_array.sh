@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ruby_vscan
-#SBATCH --array=0-11
+#SBATCH --array=0-15
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
@@ -13,16 +13,16 @@ set -euo pipefail
 # Submit one array per supercell size, for example:
 #   sbatch --export=ALL,L1=4,L2=4,V_MIN=0,V_MAX=8,V_STEP=0.5,OUT=results/vscan #     ed_benchmark/vmc_zeroT/slurm_vscan_array.sh
 #
-# Array tasks 0..5  : six seed branches, V increasing.
-# Array tasks 6..11 : the same six seed branches, V decreasing.
+# Array tasks 0..7  : eight seed branches, V increasing.
+# Array tasks 8..15 : the same eight seed branches, V decreasing.
 #
 # Adapt the GPU/partition/module/conda lines to your cluster.
 
 mkdir -p logs
 
-SEEDS=(normal sd isd lc_same lc_opposite random)
-SEED_INDEX=$((SLURM_ARRAY_TASK_ID % 6))
-DIR_INDEX=$((SLURM_ARRAY_TASK_ID / 6))
+SEEDS=(normal sd isd lc_same lc_opposite random ps_co mix_co_lc_opposite)
+SEED_INDEX=$((SLURM_ARRAY_TASK_ID % 8))
+DIR_INDEX=$((SLURM_ARRAY_TASK_ID / 8))
 SEED="${SEEDS[${SEED_INDEX}]}"
 if [[ "${DIR_INDEX}" -eq 0 ]]; then
   DIRECTION="up"
