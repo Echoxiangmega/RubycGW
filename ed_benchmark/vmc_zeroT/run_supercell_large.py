@@ -500,6 +500,137 @@ def _qgt_and_solver(nk,jax,args):
     return qgt,solver,effective
 
 
+def _sync_tree(jax,tree):
+    """Block until all JAX leaves in a PyTree are ready."""
+    def _sync(x):
+        try:
+            return x.block_until_ready()
+        except Exception:
+            return x
+    return jax.tree_util.tree_map(_sync,tree)
+
+
+def _profile_vmc_components(
+    *,
+    vstate,H_fast,jax,nk,
+    qgt_ctor,solver,diag_shift,
+    repeats,
+):
+    """Microprofile the expensive VMC components without updating parameters.
+
+    The timings are intentionally component-level:
+      sample            : Markov-chain generation only;
+      expect            : local-energy evaluation/statistics on cached samples;
+      expect_and_grad   : local energy plus log-derivative/Jacobian gradient;
+      sr                : QGT construction/application plus the linear solve.
+
+    One untimed pass warms up JIT compilation.  The profiler uses its own SR
+    object so that its solver-restart state cannot affect the training driver.
+    """
+    repeats=max(0,int(repeats))
+    if repeats<=0:
+        return {}
+
+    profile_sr=None
+    if qgt_ctor is not None and solver is not None:
+        try:
+            profile_sr=nk.optimizer.SR(
+                qgt=qgt_ctor,
+                solver=solver,
+                diag_shift=diag_shift,
+                solver_restart=True,
+            )
+        except TypeError:
+            profile_sr=nk.optimizer.SR(
+                qgt=qgt_ctor,
+                solver=solver,
+                diag_shift=diag_shift,
+            )
+
+    def _sync_stats(st):
+        try:
+            np.asarray(st.mean)
+        except Exception:
+            pass
+
+    # JIT warmup. These calls do not update variational parameters.
+    vstate.sample()
+    np.asarray(vstate.samples)
+    st=vstate.expect(H_fast)
+    _sync_stats(st)
+    st,grad=vstate.expect_and_grad(H_fast)
+    _sync_stats(st)
+    _sync_tree(jax,grad)
+    if profile_sr is not None:
+        pgrad=profile_sr(vstate,grad,step=0)
+        _sync_tree(jax,pgrad)
+
+    sample_times=[]
+    expect_times=[]
+    grad_times=[]
+    sr_times=[]
+    for _ in range(repeats):
+        t=time.perf_counter()
+        vstate.sample()
+        np.asarray(vstate.samples)
+        sample_times.append(time.perf_counter()-t)
+
+        t=time.perf_counter()
+        st=vstate.expect(H_fast)
+        _sync_stats(st)
+        expect_times.append(time.perf_counter()-t)
+
+        t=time.perf_counter()
+        st,grad=vstate.expect_and_grad(H_fast)
+        _sync_stats(st)
+        _sync_tree(jax,grad)
+        grad_times.append(time.perf_counter()-t)
+
+        if profile_sr is not None:
+            t=time.perf_counter()
+            pgrad=profile_sr(vstate,grad,step=0)
+            _sync_tree(jax,pgrad)
+            sr_times.append(time.perf_counter()-t)
+
+    def _stats(xs):
+        if not xs:
+            return None
+        arr=np.asarray(xs,float)
+        return {
+            "median_s":float(np.median(arr)),
+            "min_s":float(np.min(arr)),
+            "max_s":float(np.max(arr)),
+        }
+
+    out={
+        "repeats":int(repeats),
+        "sample":_stats(sample_times),
+        "expect":_stats(expect_times),
+        "expect_and_grad":_stats(grad_times),
+        "sr":_stats(sr_times),
+    }
+    if out["expect"] is not None and out["expect_and_grad"] is not None:
+        out["gradient_overhead_median_s"]=float(
+            max(
+                0.0,
+                out["expect_and_grad"]["median_s"]
+                - out["expect"]["median_s"],
+            )
+        )
+    print(
+        "[profile] "
+        f"sample={out['sample']['median_s']:.3f}s "
+        f"expect={out['expect']['median_s']:.3f}s "
+        f"expect+grad={out['expect_and_grad']['median_s']:.3f}s "
+        + (
+            f"SR={out['sr']['median_s']:.3f}s"
+            if out["sr"] is not None else "SR=n/a"
+        ),
+        flush=True,
+    )
+    return out
+
+
 def _stage(
     *,
     stage_name,
@@ -532,6 +663,31 @@ def _stage(
     import jax
     jax.config.update("jax_enable_x64",True)
     import netket as nk
+
+    packed_requested=bool(getattr(args,"packed_kernel",False))
+    packed_effective=False
+    packed_error=None
+    try:
+        setattr(
+            nk.config,
+            "netket_experimental_packed_kernel",
+            packed_requested,
+        )
+        packed_effective=bool(
+            getattr(
+                nk.config,
+                "netket_experimental_packed_kernel",
+            )
+        )
+    except Exception as exc:
+        packed_error=str(exc)
+        packed_effective=False
+        if packed_requested:
+            print(
+                "[packed kernel] requested but unavailable in this NetKet "
+                f"version: {exc}; using the standard padded kernel.",
+                flush=True,
+            )
 
     blocks=(
         seed_data["blocks"]
@@ -680,6 +836,8 @@ def _stage(
 
     warm=None
     warmup_s=0.0
+    vmc_profile={}
+    train_segment_timings=[]
 
     effective_qgt="not_used_pav_only"
     log=nk.logging.RuntimeLog()
@@ -845,6 +1003,25 @@ def _stage(
                     flush=True,
                 )
 
+        profile_repeats=int(getattr(args,"profile_vmc_repeats",0))
+        profile_seed=str(getattr(args,"profile_seed","normal"))
+        if (
+            profile_repeats>0
+            and str(args._active_seed)==profile_seed
+        ):
+            profile_diag=(
+                float(normalized_train_schedule[0]["diag_shift"])
+                if normalized_train_schedule is not None
+                else float(args.diag_shift)
+            )
+            vmc_profile=_profile_vmc_components(
+                vstate=vstate,H_fast=H_fast,jax=jax,nk=nk,
+                qgt_ctor=(qgt_ctor if trainer_effective=="legacy" else None),
+                solver=(solver if trainer_effective=="legacy" else None),
+                diag_shift=profile_diag,
+                repeats=profile_repeats,
+            )
+
         n_images=1 if maps is None else int(len(maps))
         if normalized_train_schedule is not None:
             start=1
@@ -867,6 +1044,7 @@ def _stage(
             f"Ns={g.Ns} Nf={nf} "
             f"params={vstate.n_parameters} images={n_images} "
             f"samples={sample_description} sweep={sweep_size} "
+            f"packed_kernel={packed_requested}->{packed_effective} "
             f"trainer={trainer_requested}->{trainer_effective} "
             f"sr_momentum={(sr_momentum if trainer_effective=='vmc_sr' else 0.0):g} "
             f"lr={lr_description} diag_shift={diag_description}",
@@ -880,23 +1058,67 @@ def _stage(
                 nsamp=int(item["n_samples"])
                 if int(vstate.n_samples)!=nsamp:
                     vstate.n_samples=nsamp
+                seg_iter=end-prev_end
+                ts=time.perf_counter()
                 driver.run(
-                    n_iter=end-prev_end,
+                    n_iter=seg_iter,
                     out=log,show_progress=True,
                 )
+                seg_s=time.perf_counter()-ts
+                train_segment_timings.append({
+                    "start_iter":int(prev_end+1),
+                    "end_iter":int(end),
+                    "n_iter":int(seg_iter),
+                    "n_samples":int(nsamp),
+                    "learning_rate":float(item["learning_rate"]),
+                    "diag_shift":float(item["diag_shift"]),
+                    "time_s":float(seg_s),
+                    "time_per_iter_s":float(seg_s/max(1,seg_iter)),
+                })
                 prev_end=end
         elif use_sample_schedule:
+            ts=time.perf_counter()
             driver.run(
                 n_iter=sample_switch,
                 out=log,show_progress=True,
             )
+            seg_s=time.perf_counter()-ts
+            train_segment_timings.append({
+                "start_iter":1,
+                "end_iter":int(sample_switch),
+                "n_iter":int(sample_switch),
+                "n_samples":int(stage_samples),
+                "time_s":float(seg_s),
+                "time_per_iter_s":float(seg_s/max(1,sample_switch)),
+            })
             vstate.n_samples=stage_samples_after
+            seg_iter=int(n_iter)-sample_switch
+            ts=time.perf_counter()
             driver.run(
-                n_iter=int(n_iter)-sample_switch,
+                n_iter=seg_iter,
                 out=log,show_progress=True,
             )
+            seg_s=time.perf_counter()-ts
+            train_segment_timings.append({
+                "start_iter":int(sample_switch+1),
+                "end_iter":int(n_iter),
+                "n_iter":int(seg_iter),
+                "n_samples":int(stage_samples_after),
+                "time_s":float(seg_s),
+                "time_per_iter_s":float(seg_s/max(1,seg_iter)),
+            })
         else:
+            ts=time.perf_counter()
             driver.run(n_iter=n_iter,out=log,show_progress=True)
+            seg_s=time.perf_counter()-ts
+            train_segment_timings.append({
+                "start_iter":1,
+                "end_iter":int(n_iter),
+                "n_iter":int(n_iter),
+                "n_samples":int(stage_samples),
+                "time_s":float(seg_s),
+                "time_per_iter_s":float(seg_s/max(1,int(n_iter))),
+            })
         opt_s=time.perf_counter()-topt
     else:
         n_images=1 if maps is None else int(len(maps))
@@ -913,7 +1135,8 @@ def _stage(
             f"[large {stage_name} eval-only] seed={args._active_seed} "
             f"Ns={g.Ns} Nf={nf} "
             f"params={vstate.n_parameters} images={n_images} "
-            f"eval_samples={requested_eval} sweep={sweep_size}; "
+            f"eval_samples={requested_eval} sweep={sweep_size} "
+            f"packed_kernel={packed_requested}->{packed_effective}; "
             "no SR/Jacobian and no duplicate warmup energy evaluation",
             flush=True,
         )
@@ -992,6 +1215,11 @@ def _stage(
         "n_parameters":int(vstate.n_parameters),
         "packed_orbitals":True,
         "sparse_correlators":True,
+        "packed_kernel_requested":bool(packed_requested),
+        "packed_kernel_effective":bool(packed_effective),
+        "packed_kernel_error":packed_error,
+        "vmc_component_profile":vmc_profile,
+        "train_segment_timings":train_segment_timings,
         "trainer_requested":str(getattr(args,"trainer","legacy")),
         "trainer":(
             trainer_effective if int(n_iter)>0 else "not_used_eval_only"
