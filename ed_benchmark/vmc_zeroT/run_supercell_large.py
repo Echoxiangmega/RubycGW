@@ -519,6 +519,8 @@ def _stage(
     learning_rate_after=None,
     learning_rate_switch_iter=None,
     train_samples=None,
+    train_samples_after=None,
+    train_samples_switch_iter=None,
     train_sweep_size=None,
     eval_samples_override=None,
     make_maps=False,
@@ -564,6 +566,21 @@ def _stage(
         int(train_samples)
         if train_samples is not None
         else int(args.n_samples)
+    )
+    stage_samples_after=(
+        int(train_samples_after)
+        if train_samples_after is not None
+        else int(stage_samples)
+    )
+    sample_switch=(
+        None if train_samples_switch_iter is None
+        else int(train_samples_switch_iter)
+    )
+    use_sample_schedule=(
+        int(n_iter)>0
+        and stage_samples_after!=stage_samples
+        and sample_switch is not None
+        and 0<sample_switch<int(n_iter)
     )
     sweep_size=(
         int(train_sweep_size)
@@ -626,8 +643,8 @@ def _stage(
             and 0<lr_switch<int(n_iter)
             and not np.isclose(lr1,lr0)
         )
+        import optax
         if use_lr_schedule:
-            import optax
             if lr0==0.0:
                 raise ValueError("Initial learning rate must be nonzero for a two-stage schedule")
             schedule=optax.piecewise_constant_schedule(
@@ -640,39 +657,103 @@ def _stage(
                 f"then {lr1:g} for steps {lr_switch+1}-{int(n_iter)}"
             )
         else:
-            optimizer=nk.optimizer.Sgd(learning_rate=lr0)
+            optimizer=optax.sgd(learning_rate=lr0)
             lr_description=f"constant {lr0:g}"
-        try:
-            sr=nk.optimizer.SR(
-                qgt=qgt_ctor,
-                solver=solver,
-                diag_shift=args.diag_shift,
-                solver_restart=True,
-            )
-        except TypeError:
-            sr=nk.optimizer.SR(
-                qgt=qgt_ctor,
-                solver=solver,
-                diag_shift=args.diag_shift,
-            )
 
-        driver=nk.driver.VMC(
-            H_fast,optimizer,
-            variational_state=vstate,
-            preconditioner=sr,
-        )
+        trainer_requested=str(getattr(args,"trainer","legacy")).lower()
+        if trainer_requested not in ("auto","vmc_sr","legacy"):
+            raise ValueError(f"Unknown trainer={trainer_requested}")
+        trainer_effective=trainer_requested
+        sr_momentum=float(getattr(args,"sr_momentum",0.8))
+        if not 0.0<=sr_momentum<1.0:
+            raise ValueError("--sr-momentum must satisfy 0 <= momentum < 1")
+
+        driver=None
+        vmc_sr_error=None
+        if trainer_requested in ("auto","vmc_sr"):
+            try:
+                linear_solver=getattr(
+                    nk.optimizer.solver,
+                    "cholesky_with_fallback",
+                    nk.optimizer.solver.cholesky,
+                )
+                driver=nk.driver.VMC_SR(
+                    H_fast,
+                    optimizer,
+                    variational_state=vstate,
+                    diag_shift=args.diag_shift,
+                    momentum=(sr_momentum if sr_momentum>0 else None),
+                    linear_solver=linear_solver,
+                    mode="complex",
+                    use_ntk=False,
+                )
+                trainer_effective="vmc_sr"
+                effective_qgt="standard_parameter_space_sr"
+            except Exception as exc:
+                vmc_sr_error=exc
+                if trainer_requested=="vmc_sr":
+                    raise
+                driver=None
+
+        if driver is None:
+            trainer_effective="legacy"
+            try:
+                sr=nk.optimizer.SR(
+                    qgt=qgt_ctor,
+                    solver=solver,
+                    diag_shift=args.diag_shift,
+                    solver_restart=True,
+                )
+            except TypeError:
+                sr=nk.optimizer.SR(
+                    qgt=qgt_ctor,
+                    solver=solver,
+                    diag_shift=args.diag_shift,
+                )
+            driver=nk.driver.VMC(
+                H_fast,optimizer,
+                variational_state=vstate,
+                preconditioner=sr,
+            )
+            if vmc_sr_error is not None:
+                print(
+                    f"[trainer fallback] VMC_SR unavailable/failed: {vmc_sr_error}; "
+                    "using legacy QGT+iterative SR.",
+                    flush=True,
+                )
+
         n_images=1 if maps is None else int(len(maps))
+        if use_sample_schedule:
+            sample_description=(
+                f"{stage_samples} for steps 1-{sample_switch}, "
+                f"then {stage_samples_after} for steps "
+                f"{sample_switch+1}-{int(n_iter)}"
+            )
+        else:
+            sample_description=f"constant {stage_samples}"
         print(
             f"[large {stage_name}] seed={args._active_seed} "
             f"Ns={g.Ns} Nf={nf} "
             f"params={vstate.n_parameters} images={n_images} "
-            f"samples={stage_samples} sweep={sweep_size} "
-            f"qgt={args.qgt}->{effective_qgt}/{args.sr_solver} "
+            f"samples={sample_description} sweep={sweep_size} "
+            f"trainer={trainer_requested}->{trainer_effective} "
+            f"sr_momentum={(sr_momentum if trainer_effective=='vmc_sr' else 0.0):g} "
             f"lr={lr_description}",
             flush=True,
         )
         topt=time.perf_counter()
-        driver.run(n_iter=n_iter,out=log,show_progress=True)
+        if use_sample_schedule:
+            driver.run(
+                n_iter=sample_switch,
+                out=log,show_progress=True,
+            )
+            vstate.n_samples=stage_samples_after
+            driver.run(
+                n_iter=int(n_iter)-sample_switch,
+                out=log,show_progress=True,
+            )
+        else:
+            driver.run(n_iter=n_iter,out=log,show_progress=True)
         opt_s=time.perf_counter()-topt
     else:
         n_images=1 if maps is None else int(len(maps))
@@ -768,6 +849,14 @@ def _stage(
         "n_parameters":int(vstate.n_parameters),
         "packed_orbitals":True,
         "sparse_correlators":True,
+        "trainer_requested":str(getattr(args,"trainer","legacy")),
+        "trainer":(
+            trainer_effective if int(n_iter)>0 else "not_used_eval_only"
+        ),
+        "sr_momentum":(
+            float(sr_momentum)
+            if int(n_iter)>0 and trainer_effective=="vmc_sr" else 0.0
+        ),
         "qgt_requested":args.qgt,
         "qgt":effective_qgt,
         "qgt_mode":"complex",
@@ -778,6 +867,13 @@ def _stage(
         "diag_shift":float(args.diag_shift),
         "n_samples":int(stage_samples),
         "training_n_samples":int(stage_samples),
+        "training_n_samples_after":int(stage_samples_after),
+        "training_n_samples_switch_iter":(
+            int(sample_switch) if use_sample_schedule else None
+        ),
+        "training_sample_schedule":(
+            sample_description if int(n_iter)>0 else "not_used_eval_only"
+        ),
         "evaluation_n_samples":int(eval_samples),
         "n_chains":int(args.n_chains),
         "sweep_size":int(sweep_size),
