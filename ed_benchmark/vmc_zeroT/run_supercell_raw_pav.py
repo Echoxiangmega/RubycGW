@@ -702,6 +702,10 @@ def parser():
         "--fast-sampler-check-repeats",type=int,default=3,
         help="Repeated timing calls for cached versus direct full-logpsi sweeps in --fast-sampler-check.",
     )
+    p.add_argument(
+        "--fast-sampler-check-sweeps",type=int,default=40,
+        help="Number of consecutive sweeps performed after one inverse-cache initialization in --fast-sampler-check. Default 40 matches 8 discard + 32 retained samples for the standard 1024-sample/32-chain benchmark.",
+    )
     p.add_argument("--chunk-size",type=int,default=256)
     p.add_argument("--map-edge-chunk",type=int,default=12)
     p.add_argument(
