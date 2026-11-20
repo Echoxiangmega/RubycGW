@@ -68,6 +68,117 @@ _ANALYTIC_LOGDERIV_VALIDATED_KEYS=set()
 _SHARED_SR_VALIDATED_KEYS=set()
 
 
+def _make_fast_raw_sampler(
+    nk,
+    jax,
+    *,
+    hilbert,
+    clusters,
+    seed_data,
+    shell_mats,
+    bf_mats,
+    n_chains,
+    sweep_size,
+    chunk_size,
+    orthonormalize_orbitals,
+):
+    """Persistent-cache Raw sampler using rank-3 Woodbury hop updates.
+
+    The cache is rebuilt by sampler.reset() after every parameter update and
+    then persists through both discarded and retained Markov-chain samples.
+    The ordinary MetropolisSamplerState is reused; its rule_state field stores
+    the Slater/backflow/Jastrow cache.
+    """
+    import jax.numpy as jnp
+
+    init_cache,advance,_=make_fast_raw_sampler_cache_kernels(
+        sc_coords=seed_data["sc_coords"],
+        internal_sites=seed_data["internal_sites"],
+        kpoints=seed_data["kpoints"],
+        occupations_per_k=seed_data["occupations_per_k"],
+        shell_matrices=shell_mats,
+        backflow_matrices=bf_mats,
+        clusters=np.asarray(clusters,np.int32),
+        machine_pow=2.0,
+        orthonormalize_orbitals=orthonormalize_orbitals,
+    )
+
+    class FastRawMetropolisSampler(nk.sampler.MetropolisSampler):
+        _fast_init_cache: object = nk.utils.struct.field(
+            pytree_node=False,serialize=False,default=None
+        )
+        _fast_advance: object = nk.utils.struct.field(
+            pytree_node=False,serialize=False,default=None
+        )
+
+        def __init__(self):
+            rule=nk.sampler.rules.FermionHopRule(
+                hilbert,
+                clusters=[
+                    (int(i),int(j))
+                    for i,j in np.asarray(clusters,np.int32)
+                ],
+            )
+            super().__init__(
+                hilbert,
+                rule,
+                n_chains=int(n_chains),
+                sweep_size=int(sweep_size),
+                chunk_size=(
+                    None if chunk_size is None else int(chunk_size)
+                ),
+                machine_pow=2,
+            )
+            self._fast_init_cache=init_cache
+            self._fast_advance=advance
+
+        def _reset(self,machine,parameters,state):
+            # Let NetKet recompute the exact current log probability once and
+            # reset the standard acceptance counters/RNG bookkeeping.
+            state=super()._reset(machine,parameters,state)
+            model_pars=(
+                parameters["params"]
+                if "params" in parameters else parameters
+            )
+            cache=self._fast_init_cache(model_pars,state.σ)
+            return state.replace(rule_state=cache)
+
+        def _sample_next(self,machine,parameters,state):
+            del machine,parameters
+            new_rng,key_prop,key_acc=jax.random.split(state.rng,3)
+            dtype=state.log_prob.dtype
+            shape=(self.n_batches,self.sweep_size)
+            proposal_uniforms=jax.random.uniform(
+                key_prop,shape=shape,dtype=dtype
+            )
+            accept_uniforms=jax.random.uniform(
+                key_acc,shape=shape,dtype=dtype
+            )
+
+            cache,logp_delta,naccepted,_=self._fast_advance(
+                state.rule_state,
+                proposal_uniforms,
+                accept_uniforms,
+            )
+            new_state=state.replace(
+                σ=cache["x"],
+                log_prob=state.log_prob+logp_delta,
+                rng=new_rng,
+                rule_state=cache,
+                n_accepted_proc=state.n_accepted_proc+naccepted,
+                n_steps_proc=(
+                    state.n_steps_proc
+                    +jnp.asarray(
+                        self.n_batches*self.sweep_size,
+                        dtype=state.n_steps_proc.dtype,
+                    )
+                ),
+            )
+            return new_state,(new_state.σ,new_state.log_prob)
+
+    return FastRawMetropolisSampler()
+
+
 def _fast_raw_operator_class(nk):
     """Register and return the NetKet custom operator used by fast Raw VMC.
 
