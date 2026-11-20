@@ -263,6 +263,96 @@ def _mc_order_observables(vstate, g, nf, hi, current_ops):
     return out
 
 
+
+def _mc_site_bond_current(vstate,g,edge_chunk=12):
+    """Estimate density, <c_i^dag c_j>, bond order and current from cached MC samples.
+
+    Off-diagonal one-body density-matrix elements are evaluated from batched
+    fermion-hop wavefunction ratios instead of calling expect() once per bond.
+    For rho_ij=<c_i^dag c_j>, sampled configurations with i occupied and j
+    empty contribute the ratio psi(x with i->j)/psi(x), including the canonical
+    fermionic parity between i and j.
+    """
+    samples=np.asarray(vstate.samples)
+    x=np.asarray(samples,float).reshape((-1,g.Ns))
+    nsamp=len(x)
+    density=np.mean(x,axis=0)
+    logx=np.asarray(vstate.log_value(x),np.complex128).reshape(-1)
+    rho=np.zeros(len(g.edges),np.complex128)
+
+    for lo in range(0,len(g.edges),max(1,int(edge_chunk))):
+        hi=min(len(g.edges),lo+max(1,int(edge_chunk)))
+        configs=[]
+        meta=[]
+        for ie in range(lo,hi):
+            e=g.edges[ie]
+            i,j=int(e.i),int(e.j)
+            valid=np.flatnonzero((x[:,i]>0.5)&(x[:,j]<0.5))
+            if len(valid)==0:
+                continue
+            xp=x[valid].copy()
+            xp[:,i]=0.0
+            xp[:,j]=1.0
+            a=min(i,j)+1
+            b=max(i,j)
+            parity=np.sum(x[valid,a:b],axis=1,dtype=np.int64)&1
+            sign=1.0-2.0*parity.astype(float)
+            configs.append(xp)
+            meta.append((ie,valid,sign,len(xp)))
+
+        if not configs:
+            continue
+        joined=np.concatenate(configs,axis=0)
+        logp=np.asarray(vstate.log_value(joined),np.complex128).reshape(-1)
+        off=0
+        for ie,valid,sign,nv in meta:
+            vals=sign*np.exp(logp[off:off+nv]-logx[valid])
+            rho[ie]=np.sum(vals)/float(nsamp)
+            off+=nv
+
+    bond=2.0*np.real(rho)
+    current=np.asarray([
+        float((1j*float(g.t[e.kind])*(z-np.conjugate(z))).real)
+        for e,z in zip(g.edges,rho)
+    ])
+    return density,rho,bond,current
+
+
+def _save_mc_maps(directory,vstate,g,title,edge_chunk=12):
+    """Save site/bond/current CSVs and a single triptych for a large-system MC state."""
+    from plot_saved_state_maps import (
+        site_positions,edge_segments,export_site_csv,export_bond_csv,
+        plot_site_bond_current_triptych,
+    )
+    directory=Path(directory)
+    directory.mkdir(parents=True,exist_ok=True)
+    density,rho,bond,current=_mc_site_bond_current(
+        vstate,g,edge_chunk=edge_chunk
+    )
+    xy,cells=site_positions(g)
+    starts,ends,crossed=edge_segments(g,xy,cells)
+    export_site_csv(directory/"site_density.csv",g,xy,density)
+    export_bond_csv(
+        directory/"bond_observables.csv",
+        g,starts,ends,crossed,rho,bond,current,
+    )
+    plot_site_bond_current_triptych(
+        g,xy,starts,ends,crossed,density,bond,current,directory,title,
+        threshold_fraction=0.02,
+    )
+    meta={
+        "mean_density":float(np.mean(density)),
+        "density_min":float(np.min(density)),
+        "density_max":float(np.max(density)),
+        "max_abs_bond_order":float(np.max(np.abs(bond))),
+        "max_abs_current":float(np.max(np.abs(current))),
+        "n_samples":int(np.asarray(vstate.samples).reshape((-1,g.Ns)).shape[0]),
+        "estimator":"batched fermion-hop wavefunction ratios on cached MC samples",
+    }
+    atomic_json(directory/"map_summary.json",meta)
+    return meta
+
+
 def _memory_estimates(n_parameters,n_samples):
     # Complex-mode Jacobians can split real/imag directions. These are only
     # rough upper-scale diagnostics, not allocations performed by this script.
@@ -350,6 +440,8 @@ def _stage(
     rng_seed,
     train_samples=None,
     train_sweep_size=None,
+    make_maps=False,
+    map_edge_chunk=12,
 ):
     import jax
     jax.config.update("jax_enable_x64",True)
@@ -504,6 +596,17 @@ def _stage(
     _save_params(directory/"final_params.npz",params,seed_data)
     atomic_json(directory/"history.json",_history(log))
 
+    map_meta=None
+    if make_maps:
+        map_meta=_save_mc_maps(
+            directory,vstate,g,
+            title=(
+                f"{g.name} | seed={args._active_seed} | "
+                f"{stage_name} | irrep={point_label}"
+            ),
+            edge_chunk=map_edge_chunk,
+        )
+
     def _scalar_stat(obj,name):
         try:
             x=getattr(obj,name)
@@ -577,6 +680,10 @@ def _stage(
             int(x) for x in seed_data["occupations_per_k"]
         ],
         **order_obs,
+        "maps_saved":bool(make_maps),
+        "map_max_abs_current":(
+            None if map_meta is None else map_meta["max_abs_current"]
+        ),
         **_memory_estimates(vstate.n_parameters,args.n_samples),
     }
     atomic_json(directory/"summary.json",summary)
