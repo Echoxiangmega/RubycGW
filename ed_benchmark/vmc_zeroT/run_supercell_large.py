@@ -220,16 +220,50 @@ def _current_operators(hi,g):
         same += (1.0/ntri)*loopop
         opp += (sign_ab/ntri)*loopop
 
-    def collect(op):
+    # Build the squared channels before converting the operators, then
+    # explicitly move all four observables to a fixed-particle-number
+    # representation.  This preserves exactly the historical LC definition
+    # while reducing the connected-state count in vstate.expect().
+    same2=same@same
+    opp2=opp@opp
+
+    def fixed_number(op):
+        # NetKet naming changed across releases; prefer the newer
+        # particle-number-and-spin conserving class, but keep compatibility
+        # with the spinless particle-number-only class used by this project.
+        try:
+            from netket.experimental.operator import (
+                ParticleNumberAndSpinConservingFermioperator2nd as FastFermion,
+            )
+            fast=FastFermion.from_fermionoperator2nd(op)
+            try:
+                fast=fast.collect()
+            except Exception:
+                pass
+            return fast
+        except Exception:
+            pass
+        try:
+            from netket.experimental.operator import (
+                ParticleNumberConservingFermioperator2nd as FastFermion,
+            )
+            fast=FastFermion.from_fermionoperator2nd(op)
+            try:
+                fast=fast.collect()
+            except Exception:
+                pass
+            return fast
+        except Exception:
+            pass
         try:
             return op.collect()
         except Exception:
             return op
 
-    same2=collect(same@same)
-    opp2=collect(opp@opp)
-    same=collect(same)
-    opp=collect(opp)
+    same=fixed_number(same)
+    opp=fixed_number(opp)
+    same2=fixed_number(same2)
+    opp2=fixed_number(opp2)
     return same,opp,same2,opp2
 
 
@@ -629,7 +663,8 @@ def _stage(
         )
         n_images=1 if maps is None else int(len(maps))
         print(
-            f"[large {stage_name}] Ns={g.Ns} Nf={nf} "
+            f"[large {stage_name}] seed={args._active_seed} "
+            f"Ns={g.Ns} Nf={nf} "
             f"params={vstate.n_parameters} images={n_images} "
             f"samples={stage_samples} sweep={sweep_size} "
             f"qgt={args.qgt}->{effective_qgt}/{args.sr_solver} "
@@ -651,7 +686,8 @@ def _stage(
             )
         )
         print(
-            f"[large {stage_name} PAV-only] Ns={g.Ns} Nf={nf} "
+            f"[large {stage_name} eval-only] seed={args._active_seed} "
+            f"Ns={g.Ns} Nf={nf} "
             f"params={vstate.n_parameters} images={n_images} "
             f"eval_samples={requested_eval} sweep={sweep_size}; "
             "no SR/Jacobian and no duplicate warmup energy evaluation",
