@@ -279,12 +279,23 @@ def make_netket_hamiltonian(g, nf, V):
         H += t * (cdag(hi, e.i) @ c(hi, e.j) + cdag(hi, e.j) @ c(hi, e.i))
         if e.kind == "t" and V != 0:
             H += float(V) * (nc(hi, e.i) @ nc(hi, e.j))
+    # Explicitly use the fixed-particle-number representation when available.
+    # This reduces the number of connected configurations entering every local
+    # energy evaluation, which is especially important for projected
+    # multi-image wavefunctions.
+    H_fast = None
     try:
-        H_fast = H.collect()
-    except Exception:
+        from netket.experimental.operator import ParticleNumberConservingFermioperator2nd
+        H_fast = ParticleNumberConservingFermioperator2nd.from_fermionoperator2nd(H)
         try:
-            from netket.experimental.operator import ParticleNumberConservingFermioperator2nd
-            H_fast = ParticleNumberConservingFermioperator2nd.from_fermionoperator2nd(H)
+            H_fast = H_fast.collect()
+        except Exception:
+            pass
+    except Exception:
+        H_fast = None
+    if H_fast is None:
+        try:
+            H_fast = H.collect()
         except Exception:
             H_fast = H
     graph = nk.graph.Graph(edges=[(e.i, e.j) for e in g.edges], n_nodes=g.Ns)
