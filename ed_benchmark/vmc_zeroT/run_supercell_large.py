@@ -52,6 +52,7 @@ from supercell_ansatz import (
     build_supercell_netket_model,
     make_fast_raw_local_energy_kernel,
     make_fast_raw_sampler_sweep_kernel,
+    make_fast_raw_sampler_cache_kernels,
     extract_supercell_parameters,
 )
 from symmetry_projection import (
@@ -1527,9 +1528,10 @@ def _validate_fast_raw_sampler_sweep(
     rng_seed,
     n_roots=8,
     repeats=3,
+    n_sweeps=40,
     orthonormalize_orbitals=False,
 ):
-    """Compare one cached Woodbury sweep with full-logpsi Metropolis steps."""
+    """Compare persistent Woodbury cache with full-logpsi Metropolis dynamics."""
     import jax
     import jax.numpy as jnp
 
@@ -1537,6 +1539,8 @@ def _validate_fast_raw_sampler_sweep(
     n_roots=max(1,min(int(n_roots),len(roots)))
     roots=np.asarray(roots[:n_roots],np.int8)
     sweep_size=int(sweep_size)
+    n_sweeps=max(1,int(n_sweeps))
+    n_steps=sweep_size*n_sweeps
     clusters=np.asarray(
         [(int(e.i),int(e.j)) for e in g.edges],
         np.int32,
@@ -1545,13 +1549,13 @@ def _validate_fast_raw_sampler_sweep(
     key=jax.random.PRNGKey(int(rng_seed)+99173)
     k1,k2=jax.random.split(key)
     up=np.asarray(
-        jax.random.uniform(k1,(n_roots,sweep_size),dtype=jnp.float64)
+        jax.random.uniform(k1,(n_roots,n_steps),dtype=jnp.float64)
     )
     ua=np.asarray(
-        jax.random.uniform(k2,(n_roots,sweep_size),dtype=jnp.float64)
+        jax.random.uniform(k2,(n_roots,n_steps),dtype=jnp.float64)
     )
 
-    fast_kernel=make_fast_raw_sampler_sweep_kernel(
+    init_cache,advance,inverse_residual=make_fast_raw_sampler_cache_kernels(
         sc_coords=seed_data["sc_coords"],
         internal_sites=seed_data["internal_sites"],
         kpoints=seed_data["kpoints"],
@@ -1559,7 +1563,6 @@ def _validate_fast_raw_sampler_sweep(
         shell_matrices=shell_mats,
         backflow_matrices=bf_mats,
         clusters=clusters,
-        sweep_size=sweep_size,
         machine_pow=2.0,
         orthonormalize_orbitals=orthonormalize_orbitals,
     )
@@ -1633,6 +1636,16 @@ def _validate_fast_raw_sampler_sweep(
 
     direct_kernel=jax.jit(direct_kernel)
 
+    def fast_kernel(parameters,configurations,proposal_uniforms,accept_uniforms):
+        cache=init_cache(parameters,configurations)
+        cache,logp_delta,naccepted,diag=advance(
+            cache,proposal_uniforms,accept_uniforms
+        )
+        inv_res=inverse_residual(cache)
+        return cache["x"],logp_delta,naccepted,inv_res,diag
+
+    fast_kernel=jax.jit(fast_kernel)
+
     roots_j=jnp.asarray(roots)
     up_j=jnp.asarray(up)
     ua_j=jnp.asarray(ua)
@@ -1687,6 +1700,8 @@ def _validate_fast_raw_sampler_sweep(
     report={
         "n_roots":int(n_roots),
         "sweep_size":int(sweep_size),
+        "n_sweeps":int(n_sweeps),
+        "n_proposals_per_chain":int(n_steps),
         "config_mismatch_chains":config_mismatch,
         "accept_mismatch_steps":accept_mismatch,
         "accepted_count_max_error":accepted_count_err,
@@ -1702,7 +1717,8 @@ def _validate_fast_raw_sampler_sweep(
     )
     print(
         "[fast sampler check] "
-        f"roots={n_roots} sweep={sweep_size} "
+        f"roots={n_roots} sweeps={n_sweeps} "
+        f"proposals={n_steps} "
         f"config_mismatch={config_mismatch} "
         f"accept_mismatch={accept_mismatch} "
         f"logratio_abs={logratio_err:.3e} "
@@ -2679,6 +2695,7 @@ def _stage(
             rng_seed=rng_seed,
             n_roots=int(getattr(args,"fast_sampler_check_roots",8)),
             repeats=int(getattr(args,"fast_sampler_check_repeats",3)),
+            n_sweeps=int(getattr(args,"fast_sampler_check_sweeps",40)),
             orthonormalize_orbitals=orbital_orthonormalize,
         )
 
