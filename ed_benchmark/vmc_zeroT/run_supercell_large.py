@@ -797,6 +797,224 @@ def _validate_analytic_logderiv(
     return report
 
 
+def _shared_sr_update(
+    *,
+    vstate,
+    H,
+    nk,
+    jax,
+    diag_shift,
+    solver,
+    chunk_size,
+    x0=None,
+):
+    """One mixed-parameter SR update from a single explicit Jacobian.
+
+    This mirrors the standard-QGT branch of NetKet's VMC_SR, but first maps the
+    mixed real/complex parameter PyTree to a purely real coordinate PyTree.
+    The same centered Jacobian is then used both for the energy force and the
+    SR matrix-vector products, avoiding the duplicate log-derivative work of
+    legacy VMC(expect_and_grad)+SR.
+    """
+    import jax.numpy as jnp
+    from jax.flatten_util import ravel_pytree
+
+    local_estimators=vstate.local_estimators(H)
+    stats=local_estimators.to_stats()
+    local_e=jnp.asarray(local_estimators.data).reshape(-1)
+
+    samples=vstate.samples
+    if samples.ndim>=3:
+        samples=jax.lax.collapse(samples,0,samples.ndim-1)
+    n_samples=int(samples.shape[0])
+
+    params=vstate.parameters
+    params_real,reassemble=nk.jax.tree_to_real(params)
+    _,unravel_real=ravel_pytree(params_real)
+
+    jac=nk.jax.jacobian(
+        vstate._apply_fun,
+        params,
+        samples,
+        vstate.model_state,
+        mode="complex",
+        dense=True,
+        center=True,
+        chunk_size=chunk_size,
+    )
+
+    inv_sqrt_n=1.0/jnp.sqrt(jnp.asarray(float(n_samples)))
+    O=jac*inv_sqrt_n
+    # complex mode: (Ns,2,Nreal) -> (2*Ns,Nreal)
+    O=jax.lax.collapse(O,0,2)
+
+    de=local_e-jnp.mean(local_e)
+    dv=2.0*de*inv_sqrt_n
+    dv=jnp.stack((jnp.real(dv),jnp.imag(dv)),axis=-1)
+    dv=jax.lax.collapse(dv,0,2)
+
+    force_real=O.T@dv
+    shift=jnp.asarray(diag_shift,dtype=force_real.dtype)
+
+    def matvec(vec):
+        return O.T@(O@vec)+shift*vec
+
+    solved=solver(matvec,force_real,x0=x0)
+    if isinstance(solved,tuple):
+        update_real,info=solved
+    else:
+        update_real=solved
+        info=None
+
+    update_tree_real=unravel_real(update_real)
+    update_tree=reassemble(update_tree_real)
+    update_tree=nk.jax.tree_cast(update_tree,params)
+
+    return stats,update_tree,update_real,info
+
+
+def _make_shared_sr_driver(
+    nk,
+    jax,
+    *,
+    H,
+    optimizer,
+    vstate,
+    diag_shift,
+    solver,
+    chunk_size,
+):
+    class SharedJacobianVMC(nk.driver.VMC):
+        def __init__(self):
+            super().__init__(
+                H,optimizer,
+                variational_state=vstate,
+                preconditioner=None,
+            )
+            self._shared_diag_shift=diag_shift
+            self._shared_solver=solver
+            self._shared_chunk_size=chunk_size
+            self._shared_x0=None
+            self.info=None
+
+        def compute_loss_and_update(self):
+            self.state.reset()
+            shift=self._shared_diag_shift
+            if callable(shift):
+                shift=shift(self.step_count)
+            stats,dp,x0,info=_shared_sr_update(
+                vstate=self.state,
+                H=self._ham,
+                nk=nk,
+                jax=jax,
+                diag_shift=shift,
+                solver=self._shared_solver,
+                chunk_size=self._shared_chunk_size,
+                x0=self._shared_x0,
+            )
+            self._loss_stats=stats
+            self._dp=dp
+            self._shared_x0=x0
+            self.info=info
+            return stats,dp
+
+    return SharedJacobianVMC()
+
+
+def _validate_shared_sr(
+    *,
+    vstate,
+    H,
+    nk,
+    jax,
+    qgt_ctor,
+    solver,
+    diag_shift,
+    chunk_size,
+    repeats=3,
+):
+    """Compare shared-Jacobian SR against legacy expect_and_grad + SR."""
+    vstate.sample()
+    np.asarray(vstate.samples)
+
+    try:
+        ref_sr=nk.optimizer.SR(
+            qgt=qgt_ctor,
+            solver=solver,
+            diag_shift=diag_shift,
+            solver_restart=False,
+        )
+    except TypeError:
+        ref_sr=nk.optimizer.SR(
+            qgt=qgt_ctor,
+            solver=solver,
+            diag_shift=diag_shift,
+        )
+
+    # Warmup both paths on the identical cached sample pool.
+    st_ref,grad_ref=vstate.expect_and_grad(H)
+    _sync_tree(jax,grad_ref)
+    dp_ref=ref_sr(vstate,grad_ref,step=0)
+    _sync_tree(jax,dp_ref)
+
+    st_shared,dp_shared,_,_=_shared_sr_update(
+        vstate=vstate,H=H,nk=nk,jax=jax,
+        diag_shift=diag_shift,solver=solver,
+        chunk_size=chunk_size,x0=None,
+    )
+    _sync_tree(jax,dp_shared)
+
+    report=_compare_parameter_trees(dp_ref,dp_shared)
+    Er=complex(np.asarray(st_ref.mean))
+    Es=complex(np.asarray(st_shared.mean))
+    report["energy_abs_error"]=float(abs(Er-Es))
+
+    legacy_times=[]
+    shared_times=[]
+    nrep=max(1,int(repeats))
+    for _ in range(nrep):
+        t=time.perf_counter()
+        st,gr=vstate.expect_and_grad(H)
+        try:
+            np.asarray(st.mean)
+        except Exception:
+            pass
+        _sync_tree(jax,gr)
+        pre=ref_sr(vstate,gr,step=0)
+        _sync_tree(jax,pre)
+        legacy_times.append(time.perf_counter()-t)
+
+        t=time.perf_counter()
+        st,pre,_,_=_shared_sr_update(
+            vstate=vstate,H=H,nk=nk,jax=jax,
+            diag_shift=diag_shift,solver=solver,
+            chunk_size=chunk_size,x0=None,
+        )
+        try:
+            np.asarray(st.mean)
+        except Exception:
+            pass
+        _sync_tree(jax,pre)
+        shared_times.append(time.perf_counter()-t)
+
+    report["legacy_median_s"]=float(np.median(legacy_times))
+    report["shared_median_s"]=float(np.median(shared_times))
+    report["speedup"]=float(
+        report["legacy_median_s"]/max(1e-15,report["shared_median_s"])
+    )
+    print(
+        "[shared SR check] "
+        f"dE={report['energy_abs_error']:.3e} "
+        f"update_max={report['max_abs_error']:.3e} "
+        f"update_rel_l2={report['relative_l2_error']:.3e} "
+        f"speedup={report['speedup']:.2f}x "
+        f"({report['legacy_median_s']:.3f}s->"
+        f"{report['shared_median_s']:.3f}s)",
+        flush=True,
+    )
+    return report
+
+
 def _profile_vmc_components(
     *,
     vstate,H_fast,jax,nk,
