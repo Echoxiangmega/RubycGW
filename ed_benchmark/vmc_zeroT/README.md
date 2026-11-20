@@ -1873,3 +1873,88 @@ why Raw/Tint default to (N_f), while the expensive 18-image C3v training
 defaults to (max(2,N_f/4)).  The appropriate value should be checked using
 the measured autocorrelation time and R-hat diagnostics rather than interpreted
 as a physical parameter of the model.
+
+
+## Raw branch + PAV workflow for parameter scans
+
+For branch tracking and phase scans where full C3v VAP is too expensive, use
+
+```text
+ed_benchmark/vmc_zeroT/run_supercell_raw_pav.py
+```
+
+The default workflow is intentionally simple:
+
+[
+\text{Raw VAP}
+\rightarrow
+\left\{
+T_{\rm int}\text{-PAV},
+\,
+T_{\rm int}\rtimes C_{3v}(A_1)\text{-PAV},
+\,
+T_{\rm int}\rtimes C_{3v}(A_2)\text{-PAV}
+\right\}.
+]
+
+Only the Raw branch is optimized. The projected states reuse exactly the same
+Raw variational parameters and are evaluated without constructing a QGT or
+performing SR. This makes the PAV energy shifts a direct diagnostic of symmetry
+contamination in each branch.
+
+An optional three-image internal-translation VAP can be enabled with
+
+```text
+--tint-vap-iter N
+```
+
+with (N>0). The Tint-refined parameters are then also evaluated with A1/A2
+PAV, but no C3v VAP is ever performed by this script.
+
+Every evaluated branch saves
+
+```text
+summary.json
+final_params.npz
+site_density.csv
+bond_observables.csv
+site_bond_current_triptych.png
+site_bond_current_triptych.svg
+```
+
+and all scalar results are collected in
+
+```text
+raw_pav_summary.csv
+```
+
+including energy, CO, LC same/opposite, one-point loop currents and timing.
+
+Example for a 2x2 ring3-supercell torus:
+
+```powershell
+python ed_benchmark/vmc_zeroT/run_supercell_raw_pav.py `
+  --L1 2 --L2 2 --nf 24 `
+  --t 1 --t1 0.5 --t2 -0.5 --V 5.5 `
+  --seeds normal sd isd lc_same lc_opposite `
+  --correlator backflow `
+  --c3v-irrep both `
+  --raw-iter 150 `
+  --n-samples 2048 --eval-samples 2048 `
+  --qgt auto --sr-solver cg `
+  --output results/raw_pav_2x2_V5p5
+```
+
+To add the relatively cheap Tint VAP:
+
+```text
+--tint-vap-iter 40
+```
+
+If Raw/Tint parameters were already generated in the same output root, use
+`--reuse-raw` and/or `--reuse-tint-vap`.
+
+The large-system site/bond/current maps use the cached Monte Carlo samples.
+Bond density-matrix elements are evaluated from batched fermion-hop
+wavefunction ratios and the fermionic sign convention is cross-checked against
+a NetKet one-bond expectation value before writing the figure.
