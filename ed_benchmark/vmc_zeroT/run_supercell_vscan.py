@@ -28,7 +28,8 @@ HERE=Path(__file__).resolve().parent
 RAW_RUNNER=HERE/"run_supercell_raw_pav.py"
 
 DEFAULT_SEEDS=[
-    "normal","sd","isd","lc_same","lc_opposite","random"
+    "normal","sd","isd","lc_same","lc_opposite","random",
+    "ps_co","mix_co_lc_opposite",
 ]
 
 
