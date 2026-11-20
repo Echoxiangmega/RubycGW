@@ -90,11 +90,15 @@ def _fast_raw_operator_class(nk):
             return True
 
     def _local_kernel_impl(op):
-        def local_kernel(logpsi, pars, sigma, extra_args):
-            del logpsi, extra_args
-            # NetKet's lean kernel interface passes vstate.variables, while
-            # the specialised Woodbury kernel operates on the trainable
-            # parameter collection itself.
+        def local_kernel(
+            logpsi, pars, sigma, extra_args, *, chunk_size=None
+        ):
+            del logpsi, extra_args, chunk_size
+            # NetKet's chunked expect path injects chunk_size as a keyword.
+            # The Woodbury kernel already evaluates a batch of root samples
+            # directly; for now accept that hint for API compatibility.
+            # Internal Woodbury sample-axis chunking is added separately
+            # after the production path is validated.
             model_pars=pars["params"] if "params" in pars else pars
             return op.kernel(model_pars,sigma)
         return local_kernel
