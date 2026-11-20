@@ -18,9 +18,9 @@ No C3v VAP is performed.
 Optionally, --tint-vap-iter N>0 adds a modest 3-image Tint VAP starting from
 the optimized Raw branch, followed by the same A1/A2 PAV diagnostics.
 
-Every evaluated branch records energy, CO/LC diagnostics, optimized parameters,
-and a site-density | bond-order | bond-current triptych estimated from the same
-Monte Carlo state.
+Optimized branches (Raw and optional Tint-VAP) are characterized by measured
+one-point CO/BOW/LC order parameters and receive an automatic phase label.
+PAV states are used only for projected-energy shifts and do not define phases.
 """
 from __future__ import annotations
 
@@ -59,6 +59,104 @@ def _requested_irreps(spec):
     if spec=="all":
         return ["A1","A2","E"]
     return [spec]
+
+
+
+def _seed_bstar_reference(g,nf,l1,l2,seed_amplitude):
+    """Calibrate the sign of the Ruby star BOW to the sd/isd seed convention."""
+    from benchmark_observables import ruby_star_formfactor
+    f=np.asarray(ruby_star_formfactor(g),float)
+    out={}
+    for name in ("sd","isd"):
+        dat=seed_bloch_blocks(g,nf,l1,l2,name,seed_amplitude)
+        Q=np.asarray(dat["Q0_full"],complex)
+        C=Q@Q.conj().T
+        bond=np.asarray([
+            2.0*np.real(C[int(e.i),int(e.j)]) for e in g.edges
+        ])
+        out[name]=float(np.dot(f,bond)/len(g.edges))
+    return out
+
+
+def _classify_branch(row, bstar_ref, *, co_thr, bow_thr, current_thr):
+    """Classify an optimized unprojected/Tint-VAP branch from measured orders.
+
+    Classification deliberately uses one-point broken-symmetry observables.
+    Two-point S_CO/S_LC remain reported as correlation diagnostics but do not
+    by themselves name the Raw phase.
+    """
+    co=float(row.get("CO_onepoint_rms") or 0.0)
+    b=float(row.get("B_star_mean") or 0.0)
+    js=float(row.get("J_same_mean") or 0.0)
+    jo=float(row.get("J_opposite_mean") or 0.0)
+    es=float(row.get("J_same_mean_error") or 0.0)
+    eo=float(row.get("J_opposite_mean_error") or 0.0)
+
+    active=[]
+    scores={}
+
+    if co>=co_thr:
+        active.append("CO")
+        scores["CO"]=co/max(co_thr,1e-15)
+
+    if abs(b)>=bow_thr:
+        sdv=float(bstar_ref.get("sd",0.0))
+        isdv=float(bstar_ref.get("isd",0.0))
+        if sdv*isdv<0:
+            bow_label=(
+                "SD" if np.sign(b)==np.sign(sdv) else "ISD"
+            )
+        else:
+            bow_label="BOW_star_pos" if b>=0 else "BOW_star_neg"
+        active.append(bow_label)
+        scores[bow_label]=abs(b)/max(bow_thr,1e-15)
+
+    if abs(js)>=current_thr:
+        active.append("LC_same")
+        scores["LC_same"]=abs(js)/max(current_thr,1e-15)
+    if abs(jo)>=current_thr:
+        active.append("LC_opposite")
+        scores["LC_opposite"]=abs(jo)/max(current_thr,1e-15)
+
+    label="normal" if not active else "+".join(active)
+    dominant=(
+        "normal" if not scores
+        else max(scores,key=scores.get)
+    )
+    return {
+        "phase_label":label,
+        "dominant_order":dominant,
+        "CO_order_amplitude":co,
+        "B_star_order_amplitude":b,
+        "J_same_order_amplitude":js,
+        "J_opposite_order_amplitude":jo,
+        "J_same_snr":(
+            abs(js)/es if es>0 else None
+        ),
+        "J_opposite_snr":(
+            abs(jo)/eo if eo>0 else None
+        ),
+        "classification_CO_threshold":float(co_thr),
+        "classification_BOW_threshold":float(bow_thr),
+        "classification_current_threshold":float(current_thr),
+        "seed_sd_Bstar_reference":float(bstar_ref.get("sd",np.nan)),
+        "seed_isd_Bstar_reference":float(bstar_ref.get("isd",np.nan)),
+    }
+
+
+def _annotate_pav_energy(row, source_row):
+    row["PAV_source_stage"]=source_row["stage"]
+    row["PAV_source_phase_label"]=source_row.get("phase_label")
+    row["PAV_delta_E"]=float(row["mc_E"])-float(source_row["mc_E"])
+    row["PAV_delta_E_per_site"]=row["PAV_delta_E"]/float(row["Ns"])
+    e0=float(source_row.get("mc_E_error") or 0.0)
+    e1=float(row.get("mc_E_error") or 0.0)
+    comb=(e0*e0+e1*e1)**0.5
+    row["PAV_delta_E_combined_error"]=comb
+    row["PAV_delta_E_sigma"]=(
+        row["PAV_delta_E"]/comb if comb>0 else None
+    )
+    return row
 
 
 def parser():
@@ -130,6 +228,18 @@ def parser():
     p.add_argument("--sampler-chunk-size",type=int,default=None)
     p.add_argument("--chunk-size",type=int,default=256)
     p.add_argument("--map-edge-chunk",type=int,default=12)
+    p.add_argument(
+        "--classify-co-threshold",type=float,default=0.03,
+        help="Raw one-point CO RMS threshold used only for automatic branch labels.",
+    )
+    p.add_argument(
+        "--classify-bow-threshold",type=float,default=0.03,
+        help="Absolute Ruby-star bond-order threshold used only for automatic branch labels.",
+    )
+    p.add_argument(
+        "--classify-current-threshold",type=float,default=0.05,
+        help="Absolute loop-current one-point threshold used only for automatic branch labels.",
+    )
 
     p.add_argument(
         "--qgt",choices=["auto","pytree","onthefly","dense"],default="auto"
@@ -224,6 +334,9 @@ def main():
         if a.pav_sweep_size is not None
         else max(2,nf//4)
     )
+    bstar_ref=_seed_bstar_reference(
+        g,nf,a.L1,a.L2,a.seed_amplitude
+    )
 
     settings={
         **vars(a),
@@ -234,11 +347,13 @@ def main():
         "c3v_irreps":requested,
         "eval_samples_effective":eval_samples,
         "pav_sweep_size_effective":pav_sweep,
+        "Bstar_seed_reference":bstar_ref,
         "notes":[
             "No C3v VAP is performed in this script.",
             "Full residual A1/A2 PAV is applied directly to optimized Raw parameters.",
             "Tint VAP is optional and disabled by default.",
-            "Every evaluated branch saves site/bond/current maps.",
+            "Only optimized branches (Raw and optional Tint-VAP) are classified and mapped.",
+            "PAV branches are energy-only symmetry diagnostics and report Delta E relative to their source branch.",
         ],
     }
     atomic_json(out/"settings_raw_pav.json",settings)
@@ -247,6 +362,7 @@ def main():
     # _stage reads these fields from args.
     a.eval_samples=eval_samples
     rows=[]
+    optimized_rows=[]
 
     for iseed,seed in enumerate(a.seeds):
         a._active_seed=seed
@@ -298,7 +414,14 @@ def main():
                 make_maps=True,map_edge_chunk=a.map_edge_chunk,
             )
         raw_row["branch_source"]="Raw"
+        raw_row.update(_classify_branch(
+            raw_row,bstar_ref,
+            co_thr=a.classify_co_threshold,
+            bow_thr=a.classify_bow_threshold,
+            current_thr=a.classify_current_threshold,
+        ))
         rows.append(raw_row)
+        optimized_rows.append(dict(raw_row))
 
         # ---- 2. Tint PAV directly from Raw ----
         tint_pav_dir=out/f"raw_tint_pav_{a.correlator}__{seed}"
@@ -317,9 +440,11 @@ def main():
             args=a,rng_seed=base_seed+2,
             train_samples=a.pav_warmup_samples,
             train_sweep_size=pav_sweep,
-            make_maps=True,map_edge_chunk=a.map_edge_chunk,
+            make_maps=False,map_edge_chunk=a.map_edge_chunk,
+            measure_orders=False,
         )
         tint_pav_row["branch_source"]="Raw"
+        _annotate_pav_energy(tint_pav_row,raw_row)
         rows.append(tint_pav_row)
 
         # ---- 3. Full residual C3v PAV directly from Raw ----
@@ -340,9 +465,11 @@ def main():
                 args=a,rng_seed=base_seed+20+ii,
                 train_samples=a.pav_warmup_samples,
                 train_sweep_size=pav_sweep,
-                make_maps=True,map_edge_chunk=a.map_edge_chunk,
+                make_maps=False,map_edge_chunk=a.map_edge_chunk,
+                measure_orders=False,
             )
             row["branch_source"]="Raw"
+            _annotate_pav_energy(row,raw_row)
             rows.append(row)
 
         # ---- 4. Optional Tint VAP, then PAV the Tint-refined branch ----
@@ -388,7 +515,14 @@ def main():
                     make_maps=True,map_edge_chunk=a.map_edge_chunk,
                 )
             tint_row["branch_source"]="Tint-VAP"
+            tint_row.update(_classify_branch(
+                tint_row,bstar_ref,
+                co_thr=a.classify_co_threshold,
+                bow_thr=a.classify_bow_threshold,
+                current_thr=a.classify_current_threshold,
+            ))
             rows.append(tint_row)
+            optimized_rows.append(dict(tint_row))
 
             for ii,ir in enumerate(requested):
                 pav_dir=out/f"tintvap_c3v_pav_{a.correlator}__{ir}__{seed}"
@@ -407,23 +541,37 @@ def main():
                     args=a,rng_seed=base_seed+50+ii,
                     train_samples=a.pav_warmup_samples,
                     train_sweep_size=pav_sweep,
-                    make_maps=True,map_edge_chunk=a.map_edge_chunk,
+                    make_maps=False,map_edge_chunk=a.map_edge_chunk,
+                    measure_orders=False,
                 )
                 row["branch_source"]="Tint-VAP"
+                _annotate_pav_energy(row,tint_row)
                 rows.append(row)
 
         _write_csv(out/"raw_pav_summary.csv",rows)
+        _write_csv(out/"optimized_branch_summary.csv",optimized_rows)
 
-    print("\n[raw+pav branch summary]")
-    for r in rows:
+    print("\n[raw branch characterization]")
+    for r in optimized_rows:
         print(
-            f" seed={r['seed']:11s} "
-            f"stage={r['stage']:22s} "
-            f"irrep={str(r.get('point_label','-')):5s} "
+            f" seed={r['seed']:11s} stage={r['stage']:10s} "
+            f"phase={r['phase_label']:28s} "
             f"E={r['mc_E']:+.8f} +/- {r['mc_E_error']:.2e} "
-            f"SCO={r['S_CO']:.5g} "
-            f"SLC-={r['S_LC_opposite']:.5g} "
-            f"J-={r['J_opposite_mean']:+.5g}"
+            f"CO1={r.get('CO_onepoint_rms',0.0):.4g} "
+            f"B*={r.get('B_star_mean',0.0):+.4g} "
+            f"Jsame={r.get('J_same_mean',0.0):+.4g} "
+            f"Jopp={r.get('J_opposite_mean',0.0):+.4g}"
+        )
+
+    print("\n[PAV energy shifts]")
+    for r in rows:
+        if "PAV_delta_E" not in r:
+            continue
+        print(
+            f" seed={r['seed']:11s} stage={r['stage']:22s} "
+            f"irrep={str(r.get('point_label','-')):5s} "
+            f"dE={r['PAV_delta_E']:+.6f} "
+            f"({r.get('PAV_delta_E_sigma',float('nan')):+.2f} sigma)"
         )
     print(f"Saved: {out}")
 
