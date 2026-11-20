@@ -1400,6 +1400,11 @@ def _stage(
                 model=ref_model
                 analytic_logderiv_effective=False
 
+    fast_local_gradient_check={}
+    vmc_profile={}
+    fast_local_check={}
+    train_segment_timings=[]
+
     fast_local_requested=bool(getattr(args,"fast_local_energy",False))
     fast_local_eligible=(
         fast_local_requested
@@ -1515,10 +1520,7 @@ def _stage(
 
     warm=None
     warmup_s=0.0
-    vmc_profile={}
-    fast_local_check={}
-    fast_local_gradient_check={}
-    train_segment_timings=[]
+    solver_restart_effective=None
 
     effective_qgt="not_used_pav_only"
     log=nk.logging.RuntimeLog()
@@ -1623,7 +1625,6 @@ def _stage(
             diag_description=f"constant {float(args.diag_shift):g}"
 
         trainer_requested=str(getattr(args,"trainer","legacy")).lower()
-        solver_restart_effective=None
         if trainer_requested not in ("auto","vmc_sr","legacy"):
             raise ValueError(f"Unknown trainer={trainer_requested}")
         trainer_effective=trainer_requested
