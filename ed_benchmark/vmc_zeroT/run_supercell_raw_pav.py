@@ -501,8 +501,8 @@ def parser():
         help="Optional 3-image Tint VAP iterations. 0 disables Tint VAP.",
     )
     p.add_argument(
-        "--trainer",choices=["auto","vmc_sr","shared_sr","legacy"],default="legacy",
-        help="Raw/Tint-VAP optimizer backend. shared_sr uses one explicit mixed-real Jacobian for both force and SR; legacy keeps separate expect_and_grad and QGT passes; auto probes native VMC_SR, then shared_sr, then legacy.",
+        "--trainer",choices=["auto","vmc_sr","shared_sr","legacy"],default="shared_sr",
+        help="Raw/Tint-VAP optimizer backend. shared_sr is the default for the mixed real/complex Raw ansatz and uses one explicit mixed-real Jacobian for both force and SR; legacy keeps separate expect_and_grad and QGT passes; auto probes native VMC_SR, then shared_sr, then legacy.",
     )
     p.add_argument(
         "--sr-momentum",type=float,default=0.8,
@@ -625,7 +625,7 @@ def parser():
     p.add_argument(
         "--orbital-parameterization",
         choices=["qr","free"],
-        default="qr",
+        default="free",
         help="Raw occupied-orbital gauge. qr orthonormalizes every model evaluation; free removes that redundant QR and periodically gauge-fixes the packed k blocks.",
     )
     p.add_argument(
