@@ -660,6 +660,57 @@ def _sync_tree(jax,tree):
     return jax.tree_util.tree_map(_sync,tree)
 
 
+def _gauge_fix_packed_orbitals(vstate, occupations_per_k):
+    """QR each occupied k block in-place without changing the physical Raw state."""
+    import jax.numpy as jnp
+    from flax.core import FrozenDict, freeze, unfreeze
+
+    counts=np.asarray(occupations_per_k,int)
+    params=vstate.parameters
+    if "M_packed" not in params:
+        return
+    packed=params["M_packed"]
+    offsets=np.concatenate(([0],np.cumsum(counts))).astype(int)
+    blocks=[]
+    for ik,nocc in enumerate(counts):
+        nocc=int(nocc)
+        if nocc==0:
+            continue
+        lo=int(offsets[ik]); hi=int(offsets[ik+1])
+        q,_=jnp.linalg.qr(packed[:,lo:hi],mode="reduced")
+        blocks.append(q)
+    if not blocks:
+        return
+    newpacked=jnp.concatenate(blocks,axis=1)
+    mutable=unfreeze(params) if isinstance(params,FrozenDict) else dict(params)
+    mutable["M_packed"]=newpacked
+    vstate.parameters=(
+        freeze(mutable) if isinstance(params,FrozenDict) else mutable
+    )
+
+
+def _make_orbital_gauge_fix_callback(nk, occupations_per_k, interval):
+    interval=max(0,int(interval))
+    if interval<=0:
+        return None
+
+    class OrbitalGaugeFix(nk.callbacks.AbstractCallback):
+        def on_step_end(self,step,log_data,driver):
+            del log_data
+            if (int(step)+1)%interval==0:
+                _gauge_fix_packed_orbitals(
+                    driver.state,occupations_per_k
+                )
+
+        def on_run_end(self,step,driver):
+            del step
+            _gauge_fix_packed_orbitals(
+                driver.state,occupations_per_k
+            )
+
+    return OrbitalGaugeFix()
+
+
 def _profile_vmc_components(
     *,
     vstate,H_fast,jax,nk,
@@ -833,6 +884,7 @@ def _validate_fast_raw_local_energy(
     vstate,g,V,seed_data,shell_mats,bf_mats,
     n_roots=8,
     repeats=3,
+    orthonormalize_orbitals=True,
 ):
     """Validate the Woodbury Raw local-energy prototype against full logpsi.
 
@@ -863,6 +915,7 @@ def _validate_fast_raw_local_energy(
         edge_t=edge_t,
         edge_has_interaction=edge_v,
         interaction_V=V,
+        orthonormalize_orbitals=orthonormalize_orbitals,
     )
 
     # Warm up JIT.
@@ -1070,6 +1123,20 @@ def _stage(
         else float(initial_params.get("tr_phase",0.0) or 0.0)
     )
 
+    orbital_parameterization=str(
+        getattr(args,"orbital_parameterization","qr")
+    ).lower()
+    if orbital_parameterization not in ("qr","free"):
+        raise ValueError(
+            f"Unknown orbital parameterization={orbital_parameterization}"
+        )
+    orbital_free_effective=(
+        orbital_parameterization=="free"
+        and maps is None
+        and not bool(time_reversal_even)
+    )
+    orbital_orthonormalize=not orbital_free_effective
+
     t0=time.perf_counter()
     model=build_supercell_netket_model(
         blocks,
@@ -1087,6 +1154,7 @@ def _stage(
         initial_tr_phase=tr0,
         sparse_correlators=True,
         packed_orbitals=True,
+        orthonormalize_orbitals=orbital_orthonormalize,
     )
 
     normalized_train_schedule=None
@@ -1217,6 +1285,7 @@ def _stage(
                 edge_has_interaction=edge_v,
                 interaction_V=V,
                 return_diagnostics=False,
+                orthonormalize_orbitals=orbital_orthonormalize,
             )
             FastRawHamiltonian=_fast_raw_operator_class(nk)
             H_stage=FastRawHamiltonian(hi,fast_kernel)
@@ -1488,6 +1557,15 @@ def _stage(
                 H_reference=(H_fast if fast_local_effective else None),
             )
 
+        gauge_fix_callback=(
+            _make_orbital_gauge_fix_callback(
+                nk,
+                seed_data["occupations_per_k"],
+                int(getattr(args,"orbital_gauge_fix_interval",20)),
+            )
+            if orbital_free_effective else None
+        )
+
         n_images=1 if maps is None else int(len(maps))
         if normalized_train_schedule is not None:
             start=1
@@ -1512,6 +1590,8 @@ def _stage(
             f"samples={sample_description} sweep={sweep_size} "
             f"packed_kernel={packed_requested}->{packed_effective} "
             f"fast_local={fast_local_requested}->{fast_local_effective} "
+            f"orbitals={orbital_parameterization}->"
+            f"{'free' if orbital_free_effective else 'qr'} "
             f"trainer={trainer_requested}->{trainer_effective} "
             f"sr_momentum={(sr_momentum if trainer_effective=='vmc_sr' else 0.0):g} "
             f"lr={lr_description} diag_shift={diag_description}",
@@ -1530,6 +1610,7 @@ def _stage(
                 driver.run(
                     n_iter=seg_iter,
                     out=log,show_progress=True,
+                    callback=gauge_fix_callback,
                 )
                 seg_s=time.perf_counter()-ts
                 train_segment_timings.append({
@@ -1548,6 +1629,7 @@ def _stage(
             driver.run(
                 n_iter=sample_switch,
                 out=log,show_progress=True,
+                    callback=gauge_fix_callback,
             )
             seg_s=time.perf_counter()-ts
             train_segment_timings.append({
@@ -1564,6 +1646,7 @@ def _stage(
             driver.run(
                 n_iter=seg_iter,
                 out=log,show_progress=True,
+                    callback=gauge_fix_callback,
             )
             seg_s=time.perf_counter()-ts
             train_segment_timings.append({
@@ -1576,7 +1659,10 @@ def _stage(
             })
         else:
             ts=time.perf_counter()
-            driver.run(n_iter=n_iter,out=log,show_progress=True)
+            driver.run(
+                n_iter=n_iter,out=log,show_progress=True,
+                callback=gauge_fix_callback,
+            )
             seg_s=time.perf_counter()-ts
             train_segment_timings.append({
                 "start_iter":1,
@@ -1636,6 +1722,7 @@ def _stage(
             shell_mats=shell_mats,bf_mats=bf_mats,
             n_roots=int(getattr(args,"fast_local_check_roots",8)),
             repeats=int(getattr(args,"fast_local_check_repeats",3)),
+            orthonormalize_orbitals=orbital_orthonormalize,
         )
 
     tobs=time.perf_counter()
@@ -1695,6 +1782,14 @@ def _stage(
         "n_parameters":int(vstate.n_parameters),
         "packed_orbitals":True,
         "sparse_correlators":True,
+        "orbital_parameterization_requested":orbital_parameterization,
+        "orbital_parameterization_effective":(
+            "free" if orbital_free_effective else "qr"
+        ),
+        "orbital_gauge_fix_interval":(
+            int(getattr(args,"orbital_gauge_fix_interval",20))
+            if orbital_free_effective else None
+        ),
         "packed_kernel_requested":bool(packed_requested),
         "packed_kernel_effective":bool(packed_effective),
         "packed_kernel_error":packed_error,
