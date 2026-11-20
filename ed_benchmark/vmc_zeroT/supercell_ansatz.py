@@ -490,6 +490,172 @@ def build_supercell_netket_model(
     return SupercellBlochSlaterJastrow()
 
 
+def make_fast_raw_local_energy_kernel(
+    *,
+    sc_coords,
+    internal_sites,
+    kpoints,
+    occupations_per_k,
+    shell_matrices,
+    backflow_matrices,
+    edge_i,
+    edge_j,
+    edge_t,
+    edge_has_interaction,
+    interaction_V,
+):
+    """Build a JAX Woodbury local-energy kernel for the unprojected Raw ansatz.
+
+    This kernel is specialised to the translation-built-in
+    Slater-Jastrow-linear-backflow state used by the large-supercell workflow.
+    It is intentionally separate from the generic model path so it can first
+    be validated against full log-wavefunction recomputation before becoming
+    a production NetKet local-estimator backend.
+
+    For one fermion hop s->d, linear backflow gives
+
+        Q_BF(x') - Q_BF(x)
+          = -W[:,s] Q[s,:] + W[:,d] Q[d,:],
+
+    which has rank <= 2.  Keeping the root determinant row ordering and
+    replacing the source row by the destination adds one more rank-1 update.
+    Therefore every hopping determinant ratio is obtained from a 3x3
+    determinant after one solve of the root Nf x Nf Slater matrix.
+
+    The fermionic sign of c_d^dag c_s is exactly the row-permutation sign
+    between the replacement ordering and canonical sorted occupation order,
+    so those two signs cancel in the kinetic local energy.  The returned
+    per-edge ratio is therefore the replacement-order wavefunction ratio that
+    multiplies the bare hopping t_ij directly.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    sc_np=np.asarray(sc_coords,np.int32)
+    internal_np=np.asarray(internal_sites,np.int32)
+    k_np=np.asarray(kpoints,float)
+    counts_np=np.asarray(occupations_per_k,np.int32)
+    shells_np=np.asarray(shell_matrices,np.float64)
+    bf_np=np.asarray(backflow_matrices,np.float64)
+    ei_np=np.asarray(edge_i,np.int32)
+    ej_np=np.asarray(edge_j,np.int32)
+    et_np=np.asarray(edge_t,np.float64)
+    ev_np=np.asarray(edge_has_interaction,np.float64)
+
+    ns=int(len(internal_np))
+    nf=int(np.sum(counts_np))
+    nsc=int(len(np.unique(sc_np,axis=0)))
+    offsets=np.concatenate(([0],np.cumsum(counts_np))).astype(np.int32)
+
+    sc=jnp.asarray(sc_np)
+    internal=jnp.asarray(internal_np)
+    ks=jnp.asarray(k_np)
+    shells=jnp.asarray(shells_np)
+    bf=jnp.asarray(bf_np)
+    edge_i_j=jnp.asarray(ei_np)
+    edge_j_j=jnp.asarray(ej_np)
+    edge_t_j=jnp.asarray(et_np)
+    edge_v_j=jnp.asarray(ev_np)
+    filling=float(nf/ns)
+    interaction_V=float(interaction_V)
+
+    def assemble_Q(parameters):
+        packed=parameters["M_packed"]
+        qparts=[]
+        for ik in range(len(counts_np)):
+            nki=int(counts_np[ik])
+            if nki==0:
+                continue
+            lo=int(offsets[ik]); hi=int(offsets[ik+1])
+            M=packed[:,lo:hi]
+            U,_=jnp.linalg.qr(M,mode="reduced")
+            phase=jnp.exp(
+                2j*jnp.pi*jnp.sum(sc*ks[ik][None,:],axis=1)
+            )/jnp.sqrt(jnp.asarray(float(nsc)))
+            qparts.append(phase[:,None]*U[internal,:])
+        return jnp.concatenate(qparts,axis=1)
+
+    def kernel(parameters,configurations):
+        Q=assemble_Q(parameters)
+        eta=parameters["eta"]
+        v=parameters["v"]
+        W=jnp.einsum("k,kij->ij",eta,bf)
+        C=jnp.einsum("k,kij->ij",v,shells)
+        eye3=jnp.eye(3,dtype=Q.dtype)
+
+        def one(x):
+            occupied=jnp.nonzero(x,size=nf)[0]
+            dn=x-filling
+            Qx=Q+jnp.einsum("ij,j,ja->ia",W,dn,Q)
+            A=Qx[occupied]
+
+            xi=x[edge_i_j]
+            xj=x[edge_j_j]
+            forward=(xi>0.5)&(xj<0.5)
+            reverse=(xj>0.5)&(xi<0.5)
+            active=forward|reverse
+            src=jnp.where(forward,edge_i_j,edge_j_j)
+            dst=jnp.where(forward,edge_j_j,edge_i_j)
+
+            # Rank-2 backflow update restricted to the old occupied rows.
+            u1=-W[occupied[:,None],src[None,:]]
+            u2= W[occupied[:,None],dst[None,:]]
+
+            # Rank-1 row replacement.  For inactive edges this can be zero;
+            # their final contribution is masked out.
+            u3=(occupied[:,None]==src[None,:]).astype(Q.dtype)
+            Ue=jnp.stack((u1,u2,u3),axis=-1)  # (Nf,Nedge,3)
+
+            # One LU factorisation of A with all 3*Nedge RHS at once.
+            X=jnp.linalg.solve(A,Ue.reshape((nf,-1)))
+            X=X.reshape((nf,len(ei_np),3)).transpose((1,0,2))
+
+            qsrc=Q[src]
+            qdst=Q[dst]
+            d_src=(
+                -W[src,src,None]*qsrc
+                +W[src,dst,None]*qdst
+            )
+            d_dst=(
+                -W[dst,src,None]*qsrc
+                +W[dst,dst,None]*qdst
+            )
+            replacement=(
+                (Qx[dst]+d_dst)
+                -(Qx[src]+d_src)
+            )
+            Ve=jnp.stack((qsrc,qdst,replacement),axis=-1)  # (E,Nf,3)
+            small=eye3+jnp.einsum("eni,enj->eij",Ve,X)
+            det_ratio=jnp.linalg.det(small)
+
+            # Exact Jastrow ratio for delta n = -e_src + e_dst.
+            h=C@dn
+            delta_J=(
+                -h[src]+h[dst]
+                +0.5*(
+                    C[src,src]+C[dst,dst]
+                    -C[src,dst]-C[dst,src]
+                )
+            )
+            replacement_ratio=det_ratio*jnp.exp(delta_J)
+
+            kinetic=jnp.sum(
+                jnp.where(
+                    active,
+                    edge_t_j*replacement_ratio,
+                    jnp.asarray(0.0+0.0j,dtype=Q.dtype),
+                )
+            )
+            diagonal=interaction_V*jnp.sum(
+                edge_v_j*xi*xj
+            )
+            return diagonal+kinetic, replacement_ratio, active, src, dst
+
+        return jax.vmap(one)(configurations)
+
+    return jax.jit(kernel)
+
+
 def extract_supercell_parameters(
     parameters, nkpoints: int, occupations_per_k=None
 ) -> dict:
