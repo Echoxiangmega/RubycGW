@@ -510,7 +510,7 @@ def parser():
     )
     p.add_argument(
         "--pav-warmup-samples",type=int,default=256,
-        help="Cheap samples used only to initialise PAV MCState before final evaluation.",
+        help="Initial PAV MCState sample setting; PAV-only stages no longer perform a separate warmup energy evaluation.",
     )
     p.add_argument(
         "--pav-eval-samples",type=int,default=512,
@@ -601,6 +601,15 @@ def main():
     jax.config.update("jax_enable_x64",True)
 
     hi,_,H_fast,graph=make_netket_hamiltonian(g,nf,a.V)
+    try:
+        max_conn=int(H_fast.max_conn_size)
+    except Exception:
+        max_conn=None
+    print(
+        f"[hamiltonian] backend={type(H_fast).__name__} "
+        f"max_conn_size={max_conn}",
+        flush=True,
+    )
     current_ops=_current_operators(hi,g)
     _,_,shell_mats,_=jastrow_channels(
         g,mode=a.jastrow_mode,n_shells=a.jastrow_shells
