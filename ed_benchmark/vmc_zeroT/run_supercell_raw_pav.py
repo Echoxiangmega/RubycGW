@@ -11,7 +11,14 @@ Per seed the default workflow is
   Raw VAP
     -> Raw state observables/maps
     -> Tint PAV
-    -> Tint x C3v(A1/A2) PAV, when the finite torus supports ordinary C3v
+    -> Tint x C3v(A1/A2) PAV
+    -> one Lanczos/Ritz step on each final A1/A2 PAV state
+
+For larger systems, --skip-pav switches to the cheaper path
+
+  Raw VAP
+    -> Raw state observables/maps
+    -> one Lanczos/Ritz step directly on Raw
 
 No C3v VAP is performed.
 
@@ -384,11 +391,11 @@ def _jackknife_lanczos(e1,e2,sample_shape):
     }
 
 
-def _pav_lanczos_row(
+def _mc_lanczos_row(
     parent_row, *,
     vstate,H_fast,args,directory,lanczos_samples,
 ):
-    """One-step Lanczos diagnostic reusing the already sampled PAV MCState."""
+    """One-step Lanczos diagnostic reusing the already sampled parent MCState."""
     samples=np.asarray(vstate.samples)
     flat_all=samples.reshape((-1,samples.shape[-1]))
     nsamp=min(int(lanczos_samples),len(flat_all))
@@ -416,10 +423,13 @@ def _pav_lanczos_row(
         info["lanczos_delta_E"]/de_err
         if de_err is not None and de_err>0 else None
     )
+    parent_stage=str(parent_row.get("stage",""))
+    parent_is_pav=("PAV" in parent_stage)
     info.update({
         "lanczos_samples":int(len(flat)),
-        "lanczos_reused_pav_samples":True,
-        "lanczos_pav_sample_pool":int(len(flat_all)),
+        "lanczos_reused_parent_samples":True,
+        "lanczos_parent_sample_pool":int(len(flat_all)),
+        "lanczos_parent_is_pav":bool(parent_is_pav),
         "lanczos_m1":float(np.real(m1)),
         "lanczos_m1_imag":float(np.imag(m1)),
         "lanczos_m2":float(np.real(m2)),
@@ -432,6 +442,9 @@ def _pav_lanczos_row(
         "lanczos_parent_reported_E":float(parent_row["mc_E"]),
         "lanczos_parent_recheck_delta_E":(
             float(np.real(m1))-float(parent_row["mc_E"])
+        ),
+        "lanczos_delta_E_vs_parent_reported":(
+            float(info["lanczos_energy_after"])-float(parent_row["mc_E"])
         ),
         "lanczos_estimator":"MC spectral moments m1..m4; 2D Krylov Rayleigh-Ritz",
         "lanczos_state_materialized":False,
@@ -505,6 +518,10 @@ def parser():
         help="C3v PAV sectors. both=A1+A2; all=A1+A2+E.",
     )
     p.add_argument(
+        "--skip-pav",action="store_true",
+        help="Skip Tint/C3v PAV (and optional Tint-VAP); if Lanczos is enabled, apply 1LS directly to Raw.",
+    )
+    p.add_argument(
         "--spatial-symmetry",
         choices=["auto","c3v","none"],
         default="auto",
@@ -539,7 +556,7 @@ def parser():
     p.add_argument("--map-edge-chunk",type=int,default=12)
     p.add_argument(
         "--lanczos-samples",type=int,default=None,
-        help="Samples from the final PAV batch used for 1-step Lanczos moments. Default=--pav-eval-samples.",
+        help="Samples from the parent-state batch used for 1-step Lanczos moments. Default=--pav-eval-samples; with --skip-pav these are taken directly from Raw.",
     )
     p.add_argument(
         "--lanczos-root-chunk",type=int,default=16,
@@ -551,7 +568,7 @@ def parser():
     )
     p.add_argument(
         "--skip-lanczos",action="store_true",
-        help="Disable the PAV -> one-Lanczos-step energy/variance diagnostic.",
+        help="Disable the one-Lanczos-step energy/variance diagnostic (whether after PAV or directly after Raw).",
     )
     p.add_argument(
         "--classify-co-threshold",type=float,default=0.03,
@@ -625,38 +642,47 @@ def main():
     _,bf_mats,_=bond_backflow_channels(g)
     use_backflow=(a.correlator=="backflow")
 
-    tint_ops=internal_translation_site_maps(g)
-    tint_maps=np.asarray([p for _,p in tint_ops],np.int32)
-    tint_chars=np.ones(3,np.complex128)
-
+    tint_maps=None
+    tint_chars=None
     spatial_maps=None
     spatial_chars={}
-    requested=_requested_irreps(a.c3v_irrep)
+    requested=[]
     spatial_effective=False
-    if a.spatial_symmetry!="none":
-        try:
-            ops=internal_c3v_space_group_site_maps(g)
-            spatial_maps=np.asarray([p for _,p in ops],np.int32)
-            spatial_effective=True
-        except RuntimeError as exc:
-            if a.spatial_symmetry=="c3v":
-                raise
-            print(
-                f"[PAV] ordinary C3v unavailable for L1={a.L1},L2={a.L2}; "
-                "only Raw/Tint diagnostics will be produced.",
-                flush=True,
-            )
+    if not a.skip_pav:
+        tint_ops=internal_translation_site_maps(g)
+        tint_maps=np.asarray([p for _,p in tint_ops],np.int32)
+        tint_chars=np.ones(3,np.complex128)
+        requested=_requested_irreps(a.c3v_irrep)
+        if a.spatial_symmetry!="none":
+            try:
+                ops=internal_c3v_space_group_site_maps(g)
+                spatial_maps=np.asarray([p for _,p in ops],np.int32)
+                spatial_effective=True
+            except RuntimeError:
+                if a.spatial_symmetry=="c3v":
+                    raise
+                print(
+                    f"[PAV] ordinary C3v unavailable for L1={a.L1},L2={a.L2}; "
+                    "only Raw/Tint diagnostics will be produced.",
+                    flush=True,
+                )
 
-    if spatial_effective:
-        for ir in requested:
-            if ir in ("A1","A2"):
-                spatial_chars[ir]=internal_gamma_c3v_characters(ir)
-            else:
-                spatial_chars[ir]=np.tile(
-                    c3v_irrep_characters("E"),3
-                ).astype(np.complex128)
+        if spatial_effective:
+            for ir in requested:
+                if ir in ("A1","A2"):
+                    spatial_chars[ir]=internal_gamma_c3v_characters(ir)
+                else:
+                    spatial_chars[ir]=np.tile(
+                        c3v_irrep_characters("E"),3
+                    ).astype(np.complex128)
+        else:
+            requested=[]
     else:
-        requested=[]
+        print(
+            "[PAV] disabled by --skip-pav; no Tint-PAV, C3v-PAV, or Tint-VAP "
+            "will be constructed.",
+            flush=True,
+        )
 
     eval_samples=(
         int(a.eval_samples)
@@ -692,7 +718,11 @@ def main():
         **vars(a),
         "Ns":int(g.Ns),
         "Nf":int(nf),
-        "workflow":"Raw optimization -> Tint/A1/A2 PAV diagnostics; final A1/A2 PAV -> PAV+1LS; optional Tint VAP",
+        "workflow":(
+            "Raw optimization -> Raw+1LS (PAV disabled)"
+            if a.skip_pav
+            else "Raw optimization -> Tint/A1/A2 PAV diagnostics; final A1/A2 PAV -> PAV+1LS; optional Tint VAP"
+        ),
         "c3v_available":bool(spatial_effective),
         "c3v_irreps":requested,
         "eval_samples_effective":eval_samples,
@@ -703,6 +733,7 @@ def main():
         "Bstar_seed_reference":bstar_ref,
         "notes":[
             "No C3v VAP is performed in this script.",
+            "--skip-pav disables all Tint/C3v PAV diagnostics and optional Tint-VAP; with Lanczos enabled the one-step correction is applied directly to Raw.",
             "Full residual A1/A2 PAV is applied directly to optimized Raw parameters.",
             "Tint VAP is optional and disabled by default.",
             "Only optimized branches (Raw and optional Tint-VAP) are classified and mapped.",
@@ -719,12 +750,19 @@ def main():
 
     # _stage reads these fields from args.
     a.eval_samples=eval_samples
-    print(
-        f"[sampling] Raw eval={eval_samples}; Tint-PAV eval={pav_eval_samples}; "
-        f"final A1/A2 PAV shared pool={pav_l1_shared_samples}; "
-        f"1LS uses={lanczos_samples}",
-        flush=True,
-    )
+    if a.skip_pav:
+        print(
+            f"[sampling] PAV disabled; Raw eval pool={eval_samples}; "
+            f"Raw+1LS uses up to {lanczos_samples} cached Raw samples",
+            flush=True,
+        )
+    else:
+        print(
+            f"[sampling] Raw eval={eval_samples}; Tint-PAV eval={pav_eval_samples}; "
+            f"final A1/A2 PAV shared pool={pav_l1_shared_samples}; "
+            f"1LS uses={lanczos_samples}",
+            flush=True,
+        )
     rows=[]
     optimized_rows=[]
 
@@ -742,7 +780,7 @@ def main():
             # Re-evaluate the reused state so this workflow gets a fresh,
             # same-statistics summary and map.
             raw_eval_dir=out/f"raw_eval_{a.correlator}__{seed}"
-            raw_row,_=_stage(
+            raw_row,_,raw_state=_stage(
                 stage_name="Raw",
                 directory=raw_eval_dir,
                 g=g,nf=nf,V=a.V,
@@ -760,9 +798,10 @@ def main():
                     a.sweep_size if a.sweep_size is not None else nf
                 ),
                 make_maps=True,map_edge_chunk=a.map_edge_chunk,
+                return_vstate=True,
             )
         else:
-            raw_row,raw_params=_stage(
+            raw_row,raw_params,raw_state=_stage(
                 stage_name="Raw",
                 directory=raw_dir,
                 g=g,nf=nf,V=a.V,
@@ -778,6 +817,7 @@ def main():
                 learning_rate_after=a.raw_learning_rate_final,
                 learning_rate_switch_iter=a.raw_lr_switch_iter,
                 make_maps=True,map_edge_chunk=a.map_edge_chunk,
+                return_vstate=True,
             )
         raw_row["branch_source"]="Raw"
         raw_row.update(_classify_branch(
@@ -788,6 +828,23 @@ def main():
         ))
         rows.append(raw_row)
         optimized_rows.append(dict(raw_row))
+
+        if a.skip_pav:
+            if not a.skip_lanczos:
+                l1row=_mc_lanczos_row(
+                    raw_row,
+                    vstate=raw_state,H_fast=H_fast,args=a,
+                    lanczos_samples=lanczos_samples,
+                    directory=out/f"raw_1ls_{a.correlator}__{seed}",
+                )
+                rows.append(l1row)
+            raw_state=None
+            _write_csv(out/"raw_pav_summary.csv",rows)
+            _write_csv(out/"optimized_branch_summary.csv",optimized_rows)
+            continue
+
+        # Raw MCState is no longer needed once the projected path starts.
+        raw_state=None
 
         # ---- 2. Tint PAV directly from Raw ----
         tint_pav_dir=out/f"raw_tint_pav_{a.correlator}__{seed}"
@@ -842,7 +899,7 @@ def main():
             rows.append(row)
 
             if not a.skip_lanczos:
-                l1row=_pav_lanczos_row(
+                l1row=_mc_lanczos_row(
                     row,
                     vstate=pav_state,H_fast=H_fast,args=a,
                     lanczos_samples=lanczos_samples,
@@ -929,7 +986,7 @@ def main():
                 rows.append(row)
 
                 if not a.skip_lanczos:
-                    l1row=_pav_lanczos_row(
+                    l1row=_mc_lanczos_row(
                         row,
                         vstate=pav_state,H_fast=H_fast,args=a,
                         lanczos_samples=lanczos_samples,
@@ -952,19 +1009,20 @@ def main():
             f"Jopp={r.get('J_opposite_mean',0.0):+.4g}"
         )
 
-    print("\n[PAV energy shifts]")
-    for r in rows:
-        if "PAV_delta_E" not in r or "lanczos_delta_E" in r:
-            continue
-        print(
-            f" seed={r['seed']:11s} stage={r['stage']:22s} "
-            f"irrep={str(r.get('point_label','-')):5s} "
-            f"dE={r['PAV_delta_E']:+.6f} "
-            f"({r.get('PAV_delta_E_sigma',float('nan')):+.2f} sigma)"
-        )
+    if not a.skip_pav:
+        print("\n[PAV energy shifts]")
+        for r in rows:
+            if "PAV_delta_E" not in r or "lanczos_delta_E" in r:
+                continue
+            print(
+                f" seed={r['seed']:11s} stage={r['stage']:22s} "
+                f"irrep={str(r.get('point_label','-')):5s} "
+                f"dE={r['PAV_delta_E']:+.6f} "
+                f"({r.get('PAV_delta_E_sigma',float('nan')):+.2f} sigma)"
+            )
 
     if not a.skip_lanczos:
-        print("\n[PAV -> one-Lanczos-step energy shifts]")
+        print("\n[one-Lanczos-step energy shifts]")
         for r in rows:
             if "lanczos_delta_E" not in r:
                 continue
@@ -972,6 +1030,7 @@ def main():
             dss="nan" if ds is None else f"{ds:+.2f}"
             print(
                 f" seed={r['seed']:11s} stage={r['stage']:26s} "
+                f"parent={str(r.get('lanczos_parent_stage','-')):22s} "
                 f"irrep={str(r.get('point_label','-')):5s} "
                 f"E={r['mc_E']:+.8f} "
                 f"dE_L1={r['lanczos_delta_E']:+.6f} "
