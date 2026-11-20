@@ -78,7 +78,10 @@ def main():
     f_new=ring3_periodic_star_formfactor(g,1,1)
     assert np.max(np.abs(f_old-f_new))<1e-12
 
-    for seed in ("normal","sd","isd","lc_same","lc_opposite"):
+    for seed in (
+        "normal","sd","isd","lc_same","lc_opposite",
+        "ps_co","mix_co_lc_opposite",
+    ):
         ref=one_body_seed(old,6,seed,0.08,f_old)
         data=seed_bloch_blocks(g,6,1,1,seed,0.08)
         assert data["occupations_per_k"].tolist()==[6]
