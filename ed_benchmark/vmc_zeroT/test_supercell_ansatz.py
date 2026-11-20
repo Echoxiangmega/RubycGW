@@ -107,8 +107,9 @@ def main():
     data=seed_bloch_blocks(big,24,2,2,"sd",0.08)
     assert sum(data["occupations_per_k"])==24
 
-    # Random seed: preserve the normal n_occ(k) pattern, but randomize the
-    # occupied subspace reproducibly within each k block.
+    # Random seed: preserve the normal n_occ(k) pattern and apply a small,
+    # reproducible occupied-unoccupied rotation around the normal low-energy
+    # subspace.
     normal_data=seed_bloch_blocks(big,24,2,2,"normal",0.08)
     r1=seed_bloch_blocks(big,24,2,2,"random",0.08,random_seed=12345)
     r2=seed_bloch_blocks(big,24,2,2,"random",0.08,random_seed=12345)
@@ -116,7 +117,11 @@ def main():
     assert np.array_equal(
         r1["occupations_per_k"],normal_data["occupations_per_k"]
     )
-    assert r1["seed_mode"]=="random_complex_orthonormal"
+    assert (
+        r1["seed_mode"]
+        =="normal_low_energy_plus_random_occ_unocc_rotation"
+    )
+    assert np.isclose(r1["random_mixing_amplitude"],0.08)
     assert r1["occupation_reference_seed"]=="normal"
     assert r1["random_seed"]==12345
     assert all(
@@ -132,6 +137,15 @@ def main():
             assert np.linalg.norm(
                 block.conj().T@block-np.eye(int(nocc))
             )<1e-10
+
+    # The random seed should be a nearby low-energy subspace, not an
+    # unrelated Haar-random point.  It must differ from normal, while the
+    # projector displacement stays small for amplitude 0.08.
+    pnorm=projector(normal_data["Q0_full"])
+    prand=projector(r1["Q0_full"])
+    random_projector_distance=np.linalg.norm(prand-pnorm)
+    assert random_projector_distance>1e-4
+    assert random_projector_distance<0.5
     Q=assemble_bloch_orbitals_numpy(
         data["blocks"],data["sc_coords"],data["internal_sites"],data["kpoints"]
     )
@@ -205,7 +219,10 @@ def main():
     print("1x1: exact Hex18 one-body variational space")
     print("2x2 ring3 superlattice: Ns=",big.Ns,
           "occupations_per_k=",data["occupations_per_k"].tolist())
-    print("random seed: reproducible complex orthonormal k-blocks with normal n_occ(k)")
+    print(
+        "random seed: normal low-energy subspace plus small reproducible "
+        "occupied-unoccupied rotation"
+    )
     print("backflow: A/B-resolved t_A,t_B plus shared t1,t2 channels")
     print("C3v residual point group: 6 distinct site maps on 1x1 and 2x2")
     print("Residual Tint: 3 maps; Tint x C3v: 18 maps independent of supercell size")
