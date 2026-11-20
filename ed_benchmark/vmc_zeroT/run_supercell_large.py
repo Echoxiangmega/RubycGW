@@ -186,6 +186,38 @@ def _charge_structure_from_samples(g, samples, nf):
     }
 
 
+def _as_fixed_number_fermion_operator(op):
+    """Convert a NetKet fermion operator to the fastest fixed-N backend available."""
+    try:
+        from netket.experimental.operator import (
+            ParticleNumberAndSpinConservingFermioperator2nd as FastFermion,
+        )
+        fast=FastFermion.from_fermionoperator2nd(op)
+        try:
+            fast=fast.collect()
+        except Exception:
+            pass
+        return fast
+    except Exception:
+        pass
+    try:
+        from netket.experimental.operator import (
+            ParticleNumberConservingFermioperator2nd as FastFermion,
+        )
+        fast=FastFermion.from_fermionoperator2nd(op)
+        try:
+            fast=fast.collect()
+        except Exception:
+            pass
+        return fast
+    except Exception:
+        pass
+    try:
+        return op.collect()
+    except Exception:
+        return op
+
+
 def _current_operators(hi,g):
     """Benchmark-normalized same/opposite triangle loop-current operators.
 
@@ -227,43 +259,10 @@ def _current_operators(hi,g):
     same2=same@same
     opp2=opp@opp
 
-    def fixed_number(op):
-        # NetKet naming changed across releases; prefer the newer
-        # particle-number-and-spin conserving class, but keep compatibility
-        # with the spinless particle-number-only class used by this project.
-        try:
-            from netket.experimental.operator import (
-                ParticleNumberAndSpinConservingFermioperator2nd as FastFermion,
-            )
-            fast=FastFermion.from_fermionoperator2nd(op)
-            try:
-                fast=fast.collect()
-            except Exception:
-                pass
-            return fast
-        except Exception:
-            pass
-        try:
-            from netket.experimental.operator import (
-                ParticleNumberConservingFermioperator2nd as FastFermion,
-            )
-            fast=FastFermion.from_fermionoperator2nd(op)
-            try:
-                fast=fast.collect()
-            except Exception:
-                pass
-            return fast
-        except Exception:
-            pass
-        try:
-            return op.collect()
-        except Exception:
-            return op
-
-    same=fixed_number(same)
-    opp=fixed_number(opp)
-    same2=fixed_number(same2)
-    opp2=fixed_number(opp2)
+    same=_as_fixed_number_fermion_operator(same)
+    opp=_as_fixed_number_fermion_operator(opp)
+    same2=_as_fixed_number_fermion_operator(same2)
+    opp2=_as_fixed_number_fermion_operator(opp2)
     return same,opp,same2,opp2
 
 
@@ -369,7 +368,9 @@ def _save_mc_maps(directory,vstate,g,title,edge_chunk=12):
     try:
         from netket.operator.fermion import create as cdag, destroy as c
         e0=g.edges[0]
-        ref=vstate.expect(cdag(vstate.hilbert,e0.i)@c(vstate.hilbert,e0.j))
+        ref_op=cdag(vstate.hilbert,e0.i)@c(vstate.hilbert,e0.j)
+        ref_op=_as_fixed_number_fermion_operator(ref_op)
+        ref=vstate.expect(ref_op)
         ref_mean=complex(np.asarray(ref.mean))
         err=abs(rho[0]-ref_mean)
         scale=max(1.0,abs(ref_mean))
