@@ -398,64 +398,66 @@ def build_supercell_netket_model(
             out=out+jnp.dot(v,features)
         return out
 
-    @jax.custom_jvp
+    @jax.custom_vjp
     def _free_logpsi_analytic(Q,eta,v,x):
         return _free_logpsi_primal(Q,eta,v,x)
 
-    @_free_logpsi_analytic.defjvp
-    def _free_logpsi_analytic_jvp(primals,tangents):
-        Q,eta,v,x=primals
-        dQ,deta,dv,dx=tangents
-        del dx
-
+    def _free_logpsi_analytic_fwd(Q,eta,v,x):
         occupied=jnp.nonzero(x,size=nf)[0]
         dn=x-(nf/ns)
 
         if bf_np is not None:
             if sparse_correlators:
                 coeff=eta[_bf_ch]*_bf_v*dn[_bf_src]
-                primal_contrib=coeff[:,None]*Q[_bf_src,:]
-                bf_delta=jnp.zeros_like(Q).at[_bf_dst,:].add(
-                    primal_contrib
-                )
-                Qx=Q+bf_delta
-
-                tangent_contrib=(
-                    deta[_bf_ch,None]
-                    *_bf_v[:,None]
-                    *dn[_bf_src,None]
-                    *Q[_bf_src,:]
-                    +coeff[:,None]*dQ[_bf_src,:]
-                )
-                dQbf=jnp.zeros_like(Q).at[_bf_dst,:].add(
-                    tangent_contrib
-                )
-                dQx=dQ+dQbf
+                contrib=coeff[:,None]*Q[_bf_src,:]
+                dQ=jnp.zeros_like(Q).at[_bf_dst,:].add(contrib)
+                Qx=Q+dQ
             else:
                 backflow=jnp.asarray(bf_np)
-                bf_delta=jnp.einsum(
+                Qx=Q+jnp.einsum(
                     "k,kij,j,ja->ia",eta,backflow,dn,Q
-                )
-                Qx=Q+bf_delta
-                dQx=(
-                    dQ
-                    +jnp.einsum(
-                        "k,kij,j,ja->ia",
-                        deta,backflow,dn,Q,
-                    )
-                    +jnp.einsum(
-                        "k,kij,j,ja->ia",
-                        eta,backflow,dn,dQ,
-                    )
                 )
         else:
             Qx=Q
-            dQx=dQ
 
         A=Qx[occupied]
-        dA=dQx[occupied]
         primal=nk.jax.logdet_cmplx(A)
-        tangent=jnp.trace(jnp.linalg.solve(A,dA))
+
+        # G_A[r,a] = d log(det A) / d A[r,a] = (A^-1)^T[r,a].
+        # Compute it once in the custom forward pass so reverse-mode force
+        # and jacrev/QGT do not have to transpose a solve graph generated from
+        # a custom JVP.
+        eye=jnp.eye(nf,dtype=A.dtype)
+        G_A=jnp.linalg.solve(A.T,eye)
+
+        G_Qx=jnp.zeros_like(Q).at[occupied,:].set(G_A)
+
+        if bf_np is not None:
+            if sparse_correlators:
+                coeff=eta[_bf_ch]*_bf_v*dn[_bf_src]
+                G_Q=G_Qx.at[_bf_src,:].add(
+                    coeff[:,None]*G_Qx[_bf_dst,:]
+                )
+                eta_term=(
+                    _bf_v*dn[_bf_src]
+                    *jnp.sum(
+                        G_Qx[_bf_dst,:]*Q[_bf_src,:],
+                        axis=1,
+                    )
+                )
+                G_eta=jnp.zeros_like(eta).at[_bf_ch].add(eta_term)
+            else:
+                backflow=jnp.asarray(bf_np)
+                W=jnp.einsum("k,kij->ij",eta,backflow)
+                T=jnp.eye(ns,dtype=Q.dtype)+W*dn[None,:]
+                G_Q=T.T@G_Qx
+                G_eta=jnp.einsum(
+                    "ia,kij,j,ja->k",
+                    G_Qx,backflow,dn,Q,
+                )
+        else:
+            G_Q=G_Qx
+            G_eta=jnp.zeros_like(eta)
 
         if use_jastrow and shells_np.shape[0]>0:
             if sparse_correlators:
@@ -469,9 +471,28 @@ def build_supercell_netket_model(
                     dn,jnp.asarray(shells_np),dn,
                 )
             primal=primal+jnp.dot(v,features)
-            tangent=tangent+jnp.dot(dv,features)
+        else:
+            features=jnp.zeros_like(v)
 
-        return primal,tangent
+        # Residuals are already the exact first derivatives.  The reverse pass
+        # only contracts them with the scalar cotangent from NetKet.
+        return primal,(G_Q,G_eta,features,x)
+
+    def _free_logpsi_analytic_bwd(res,g):
+        G_Q,G_eta,features,x=res
+        dQ=g*G_Q
+        deta=g*G_eta
+
+        # v is real-valued while logpsi and its cotangent are complex.  JAX's
+        # real->complex VJP uses the real bilinear pairing Re(g * df/dv).
+        dv=jnp.real(g*features)
+        dx=jnp.zeros_like(x)
+        return dQ,deta,dv,dx
+
+    _free_logpsi_analytic.defvjp(
+        _free_logpsi_analytic_fwd,
+        _free_logpsi_analytic_bwd,
+    )
 
     class SupercellBlochSlaterJastrow(nn.Module):
         @nn.compact
