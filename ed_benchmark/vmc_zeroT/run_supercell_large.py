@@ -61,6 +61,7 @@ from symmetry_projection import (
 
 
 _FAST_RAW_OPERATOR_CLASS=None
+_FAST_LOCAL_GRADIENT_VALIDATED=False
 
 
 def _fast_raw_operator_class(nk):
@@ -108,6 +109,59 @@ def _fast_raw_operator_class(nk):
 
     _FAST_RAW_OPERATOR_CLASS=FastRawHamiltonian
     return FastRawHamiltonian
+
+
+def _compare_parameter_trees(a,b):
+    import jax
+    la=jax.tree_util.tree_leaves(a)
+    lb=jax.tree_util.tree_leaves(b)
+    if len(la)!=len(lb):
+        raise ValueError("Gradient PyTrees have different leaf counts")
+    max_abs=0.0
+    sq_diff=0.0
+    sq_ref=0.0
+    for xa,xb in zip(la,lb):
+        aa=np.asarray(xa)
+        bb=np.asarray(xb)
+        if aa.shape!=bb.shape:
+            raise ValueError(
+                f"Gradient leaf shape mismatch: {aa.shape} != {bb.shape}"
+            )
+        d=aa-bb
+        if d.size:
+            max_abs=max(max_abs,float(np.max(np.abs(d))))
+            sq_diff+=float(np.sum(np.abs(d)**2))
+            sq_ref+=float(np.sum(np.abs(aa)**2))
+    rel_l2=float(np.sqrt(sq_diff)/max(1e-15,np.sqrt(sq_ref)))
+    return {"max_abs_error":float(max_abs),"relative_l2_error":rel_l2}
+
+
+def _validate_fast_raw_gradient(
+    *,
+    vstate,H_reference,H_fast_custom,jax,
+):
+    """Compare custom/local-energy and standard NetKet energy gradients."""
+    vstate.sample()
+    ref_stats,ref_grad=vstate.expect_and_grad(H_reference)
+    _sync_tree(jax,ref_grad)
+    fast_stats,fast_grad=vstate.expect_and_grad(H_fast_custom)
+    _sync_tree(jax,fast_grad)
+    report=_compare_parameter_trees(ref_grad,fast_grad)
+    ref_E=complex(np.asarray(ref_stats.mean))
+    fast_E=complex(np.asarray(fast_stats.mean))
+    report.update({
+        "energy_abs_error":float(abs(ref_E-fast_E)),
+        "reference_energy_real":float(ref_E.real),
+        "fast_energy_real":float(fast_E.real),
+    })
+    print(
+        "[fast local gradient check] "
+        f"dE={report['energy_abs_error']:.3e} "
+        f"grad_max={report['max_abs_error']:.3e} "
+        f"grad_rel_l2={report['relative_l2_error']:.3e}",
+        flush=True,
+    )
+    return report
 
 
 def _history(log):
@@ -1098,12 +1152,65 @@ def _stage(
             flush=True,
         )
 
+    if fast_local_effective:
+        global _FAST_LOCAL_GRADIENT_VALIDATED
+        need_grad_check=(
+            bool(getattr(args,"fast_local_gradient_check",True))
+            and not _FAST_LOCAL_GRADIENT_VALIDATED
+        )
+        if need_grad_check:
+            try:
+                fast_local_gradient_check=_validate_fast_raw_gradient(
+                    vstate=vstate,
+                    H_reference=H_fast,
+                    H_fast_custom=H_stage,
+                    jax=jax,
+                )
+                grad_tol=float(
+                    getattr(args,"fast_local_gradient_tolerance",1e-8)
+                )
+                passed=(
+                    fast_local_gradient_check["energy_abs_error"]<=grad_tol
+                    and fast_local_gradient_check["max_abs_error"]<=grad_tol
+                    and fast_local_gradient_check["relative_l2_error"]<=grad_tol
+                )
+                fast_local_gradient_check["tolerance"]=grad_tol
+                fast_local_gradient_check["passed"]=bool(passed)
+                if not passed:
+                    msg=(
+                        "Fast local-energy gradient validation failed: "
+                        f"{fast_local_gradient_check}"
+                    )
+                    if bool(getattr(args,"fast_local_strict",False)):
+                        raise RuntimeError(msg)
+                    print(
+                        "[fast local] "+msg+"; falling back to NetKet operator.",
+                        flush=True,
+                    )
+                    H_stage=H_fast
+                    fast_local_effective=False
+                    fast_local_error=msg
+                else:
+                    _FAST_LOCAL_GRADIENT_VALIDATED=True
+            except Exception as exc:
+                if bool(getattr(args,"fast_local_strict",False)):
+                    raise
+                fast_local_error=f"gradient validation error: {exc}"
+                H_stage=H_fast
+                fast_local_effective=False
+                print(
+                    "[fast local] gradient validation raised "
+                    f"{exc}; falling back to NetKet operator.",
+                    flush=True,
+                )
+
     setup_s=time.perf_counter()-t0
 
     warm=None
     warmup_s=0.0
     vmc_profile={}
     fast_local_check={}
+    fast_local_gradient_check={}
     train_segment_timings=[]
 
     effective_qgt="not_used_pav_only"
@@ -1502,6 +1609,7 @@ def _stage(
         "fast_local_energy_requested":bool(fast_local_requested),
         "fast_local_energy_effective":bool(fast_local_effective),
         "fast_local_energy_error":fast_local_error,
+        "fast_local_gradient_check":fast_local_gradient_check,
         "vmc_component_profile":vmc_profile,
         "fast_local_check":fast_local_check,
         "train_segment_timings":train_segment_timings,
