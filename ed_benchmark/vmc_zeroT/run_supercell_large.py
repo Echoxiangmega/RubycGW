@@ -2060,7 +2060,58 @@ def _stage(
     if args.sampler_chunk_size is not None:
         sampler_kwargs["chunk_size"]=int(args.sampler_chunk_size)
 
-    sampler=nk.sampler.MetropolisFermionHop(hi,**sampler_kwargs)
+    fast_sampler_requested=bool(getattr(args,"fast_sampler",False))
+    fast_sampler_eligible=(
+        fast_sampler_requested
+        and maps is None
+        and not bool(time_reversal_even)
+        and use_backflow
+    )
+    fast_sampler_effective=False
+    fast_sampler_error=None
+    if fast_sampler_eligible:
+        try:
+            sampler=_make_fast_raw_sampler(
+                nk,jax,
+                hilbert=hi,
+                clusters=[
+                    (int(e.i),int(e.j)) for e in g.edges
+                ],
+                seed_data=seed_data,
+                shell_mats=shell_mats,
+                bf_mats=bf_mats,
+                n_chains=args.n_chains,
+                sweep_size=sweep_size,
+                chunk_size=args.sampler_chunk_size,
+                orthonormalize_orbitals=orbital_orthonormalize,
+            )
+            fast_sampler_effective=True
+        except Exception as exc:
+            fast_sampler_error=str(exc)
+            if bool(getattr(args,"fast_sampler_strict",False)):
+                raise
+            print(
+                "[fast sampler] setup failed: "
+                f"{exc}; using NetKet MetropolisFermionHop.",
+                flush=True,
+            )
+            sampler=nk.sampler.MetropolisFermionHop(
+                hi,**sampler_kwargs
+            )
+    else:
+        sampler=nk.sampler.MetropolisFermionHop(hi,**sampler_kwargs)
+        if fast_sampler_requested and not fast_sampler_eligible:
+            reason=(
+                "projection/TR stage"
+                if maps is not None or bool(time_reversal_even)
+                else "backflow disabled"
+            )
+            print(
+                f"[fast sampler] not eligible for {stage_name}: {reason}; "
+                "using NetKet MetropolisFermionHop.",
+                flush=True,
+            )
+
     vstate=nk.vqs.MCState(
         sampler,model,
         n_samples=stage_samples,
@@ -2655,6 +2706,7 @@ def _stage(
             f"samples={sample_description} sweep={sweep_size} "
             f"packed_kernel={packed_requested}->{packed_effective} "
             f"fast_local={fast_local_requested}->{fast_local_effective} "
+            f"fast_sampler={fast_sampler_requested}->{fast_sampler_effective} "
             f"orbitals={orbital_parameterization}->"
             f"{'free' if orbital_free_effective else 'qr'} "
             f"analytic_logderiv={analytic_logderiv_requested}->"
@@ -2758,6 +2810,7 @@ def _stage(
             f"eval_samples={requested_eval} sweep={sweep_size} "
             f"packed_kernel={packed_requested}->{packed_effective} "
             f"fast_local={fast_local_requested}->{fast_local_effective} "
+            f"fast_sampler={fast_sampler_requested}->{fast_sampler_effective} "
             f"analytic_logderiv={analytic_logderiv_requested}->"
             f"{analytic_logderiv_effective}; "
             "no SR/Jacobian and no duplicate warmup energy evaluation",
@@ -2886,6 +2939,9 @@ def _stage(
         "fast_local_energy_effective":bool(fast_local_effective),
         "fast_local_energy_error":fast_local_error,
         "fast_local_gradient_check":fast_local_gradient_check,
+        "fast_sampler_requested":bool(fast_sampler_requested),
+        "fast_sampler_effective":bool(fast_sampler_effective),
+        "fast_sampler_error":fast_sampler_error,
         "vmc_component_profile":vmc_profile,
         "shared_sr_check":shared_sr_check,
         "shared_sr_profile":shared_sr_profile,
