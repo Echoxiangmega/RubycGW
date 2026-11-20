@@ -82,11 +82,11 @@ def seed_bloch_blocks(
     """Construct translation-compatible initial occupied orbital blocks.
 
     Standard seeds use the existing ring3-periodic one-body seed Hamiltonian.
-    For seed="random", the normal-seed spectrum is used only to fix the
-    occupation counts n_occ(k); each occupied k-block is then replaced by an
-    independent random complex orthonormal subspace.  This keeps the same
-    momentum-sector occupation pattern as the normal variational family while
-    removing hand-designed CO/BOW/LC bias from the initial orbitals.
+    For seed="random", start from the normal low-energy occupied subspace in
+    every k sector and apply a small random occupied-unoccupied rotation before
+    re-orthonormalising.  The mixing amplitude is seed_amplitude.  This keeps
+    the initial state inside the low-energy Slater neighbourhood while removing
+    hand-designed CO/BOW/LC directional bias.
     """
     sc, internal, kpoints = bloch_layout(g, l1, l2)
     nsc = int(l1) * int(l2)
@@ -130,11 +130,29 @@ def seed_bloch_blocks(
         if nocc==0:
             block=np.empty((18,0),np.complex128)
         elif random_mode:
-            z=(
-                rng.normal(size=(18,nocc))
-                +1j*rng.normal(size=(18,nocc))
+            U=np.asarray(evecs[ik],np.complex128)
+            occ=np.asarray(ids,dtype=np.int32)
+            unocc=np.asarray(
+                [ib for ib in range(U.shape[1]) if ib not in set(ids)],
+                dtype=np.int32,
             )
-            block=np.linalg.qr(z,mode="reduced")[0].astype(np.complex128)
+            Uocc=U[:,occ]
+            if len(unocc)==0 or float(seed_amplitude)==0.0:
+                block=Uocc.copy()
+            else:
+                # Random tangent direction on the Grassmann manifold at the
+                # normal low-energy occupied subspace.  Scaling by sqrt(2*n)
+                # makes each occupied-column perturbation have O(1) expected
+                # norm before multiplying by seed_amplitude.
+                z=(
+                    rng.normal(size=(len(unocc),nocc))
+                    +1j*rng.normal(size=(len(unocc),nocc))
+                )
+                z=z/np.sqrt(2.0*float(len(unocc)))
+                trial=Uocc+float(seed_amplitude)*(U[:,unocc]@z)
+                block=np.linalg.qr(
+                    trial,mode="reduced"
+                )[0].astype(np.complex128)
         else:
             block=np.asarray(evecs[ik][:,ids],np.complex128)
         blocks.append(block)
@@ -173,7 +191,13 @@ def seed_bloch_blocks(
         "shell_gap": shell_gap,
         "total_supercell_momentum": total_k,
         "Q0_full": Q,
-        "seed_mode":("random_complex_orthonormal" if random_mode else "named"),
+        "seed_mode":(
+            "normal_low_energy_plus_random_occ_unocc_rotation"
+            if random_mode else "named"
+        ),
+        "random_mixing_amplitude":(
+            float(seed_amplitude) if random_mode else None
+        ),
         "random_seed":(
             int(0 if random_seed is None else random_seed)
             if random_mode else None
