@@ -38,10 +38,7 @@ import geometry as native_geometry
 
 from run_benchmark import atomic_json, make_netket_hamiltonian
 from vmc_ansatz import jastrow_channels, bond_backflow_channels
-from supercell_ansatz import (
-    seed_bloch_blocks,
-    build_supercell_netket_model,
-)
+from supercell_ansatz import seed_bloch_blocks
 from symmetry_projection import (
     internal_translation_site_maps,
     internal_c3v_space_group_site_maps,
@@ -387,72 +384,17 @@ def _jackknife_lanczos(e1,e2,sample_shape):
     }
 
 
-def _make_pav_eval_state(
-    *,
-    hi,graph,seed_data,params,shell_mats,bf_mats,use_backflow,
-    maps,chars,n_samples,n_discard,n_chains,sweep_size,
-    sampler_chunk_size,chunk_size,rng_seed,
-):
-    """Rebuild the fixed PAV wavefunction as an MCState for Lanczos moments."""
-    import netket as nk
-    model=build_supercell_netket_model(
-        params["blocks"],
-        seed_data["sc_coords"],
-        seed_data["internal_sites"],
-        seed_data["kpoints"],
-        shell_mats,
-        use_jastrow=True,
-        backflow_matrices=(bf_mats if use_backflow else None),
-        initial_v=params.get("v",None),
-        initial_eta=params.get("eta",None),
-        point_site_maps=maps,
-        point_characters=chars,
-        time_reversal_even=False,
-        sparse_correlators=True,
-        packed_orbitals=True,
-    )
-    sampler_kwargs={
-        "graph":graph,
-        "n_chains":int(n_chains),
-        "sweep_size":int(sweep_size),
-    }
-    if sampler_chunk_size is not None:
-        sampler_kwargs["chunk_size"]=int(sampler_chunk_size)
-    sampler=nk.sampler.MetropolisFermionHop(hi,**sampler_kwargs)
-    state=nk.vqs.MCState(
-        sampler,model,
-        n_samples=int(n_samples),
-        n_discard_per_chain=int(n_discard),
-        chunk_size=chunk_size,
-        seed=int(rng_seed),
-        sampler_seed=int(rng_seed)+104729,
-    )
-    state.sample()
-    return state
-
-
 def _pav_lanczos_row(
     parent_row, *,
-    hi,H_fast,graph,seed_data,params,shell_mats,bf_mats,use_backflow,
-    maps,chars,args,rng_seed,sweep_size,directory,
+    vstate,H_fast,args,directory,lanczos_samples,
 ):
-    """Stochastic one-Lanczos-step energy/variance diagnostic after PAV."""
-    nsamp=(
-        int(args.lanczos_samples)
-        if args.lanczos_samples is not None
-        else int(args.eval_samples)
-    )
-    vstate=_make_pav_eval_state(
-        hi=hi,graph=graph,seed_data=seed_data,params=params,
-        shell_mats=shell_mats,bf_mats=bf_mats,use_backflow=use_backflow,
-        maps=maps,chars=chars,n_samples=nsamp,
-        n_discard=args.n_discard,n_chains=args.n_chains,
-        sweep_size=sweep_size,
-        sampler_chunk_size=args.sampler_chunk_size,
-        chunk_size=args.chunk_size,rng_seed=rng_seed,
-    )
+    """One-step Lanczos diagnostic reusing the already sampled PAV MCState."""
     samples=np.asarray(vstate.samples)
-    flat=samples.reshape((-1,samples.shape[-1]))
+    flat_all=samples.reshape((-1,samples.shape[-1]))
+    nsamp=min(int(lanczos_samples),len(flat_all))
+    if nsamp<1:
+        raise ValueError("lanczos_samples must be positive")
+    flat=flat_all[:nsamp]
     e1,e2=_local_h1_h2_values(
         vstate,H_fast,flat,
         root_chunk=args.lanczos_root_chunk,
@@ -465,7 +407,9 @@ def _pav_lanczos_row(
     m3=np.mean(np.conjugate(e1)*e2)
     m4=np.mean(np.abs(e2)**2)
     info=_lanczos_from_moments(m1,m2,m3,m4)
-    info.update(_jackknife_lanczos(e1,e2,samples.shape))
+    info.update(_jackknife_lanczos(
+        e1,e2,(int(len(flat)),flat.shape[-1])
+    ))
 
     de_err=info.get("lanczos_delta_E_error")
     info["lanczos_delta_E_sigma"]=(
@@ -474,6 +418,8 @@ def _pav_lanczos_row(
     )
     info.update({
         "lanczos_samples":int(len(flat)),
+        "lanczos_reused_pav_samples":True,
+        "lanczos_pav_sample_pool":int(len(flat_all)),
         "lanczos_m1":float(np.real(m1)),
         "lanczos_m1_imag":float(np.imag(m1)),
         "lanczos_m2":float(np.real(m2)),
@@ -566,6 +512,10 @@ def parser():
         "--pav-warmup-samples",type=int,default=256,
         help="Cheap samples used only to initialise PAV MCState before final evaluation.",
     )
+    p.add_argument(
+        "--pav-eval-samples",type=int,default=512,
+        help="Final samples for Tint/A1/A2 PAV energy evaluation. Independent of Raw --eval-samples.",
+    )
     p.add_argument("--n-discard",type=int,default=8)
     p.add_argument("--n-chains",type=int,default=32)
     p.add_argument(
@@ -581,7 +531,7 @@ def parser():
     p.add_argument("--map-edge-chunk",type=int,default=12)
     p.add_argument(
         "--lanczos-samples",type=int,default=None,
-        help="PAV samples for stochastic 1-step Lanczos moments. Default=--eval-samples.",
+        help="Samples from the final PAV batch used for 1-step Lanczos moments. Default=--pav-eval-samples.",
     )
     p.add_argument(
         "--lanczos-root-chunk",type=int,default=16,
@@ -701,6 +651,22 @@ def main():
         if a.pav_sweep_size is not None
         else max(2,nf//4)
     )
+    pav_eval_samples=int(a.pav_eval_samples)
+    if pav_eval_samples<1:
+        raise ValueError("--pav-eval-samples must be positive")
+    lanczos_samples=(
+        int(a.lanczos_samples)
+        if a.lanczos_samples is not None
+        else pav_eval_samples
+    )
+    if lanczos_samples<1:
+        raise ValueError("--lanczos-samples must be positive")
+    # Final A1/A2 PAV and 1LS share one Markov-chain batch.  If L1 asks for
+    # more samples, enlarge that one shared batch rather than resampling.
+    pav_l1_shared_samples=(
+        max(pav_eval_samples,lanczos_samples)
+        if not a.skip_lanczos else pav_eval_samples
+    )
     bstar_ref=_seed_bstar_reference(
         g,nf,a.L1,a.L2,a.seed_amplitude
     )
@@ -714,6 +680,9 @@ def main():
         "c3v_irreps":requested,
         "eval_samples_effective":eval_samples,
         "pav_sweep_size_effective":pav_sweep,
+        "pav_eval_samples_requested":pav_eval_samples,
+        "lanczos_samples_effective":lanczos_samples,
+        "pav_l1_shared_sample_pool":pav_l1_shared_samples,
         "Bstar_seed_reference":bstar_ref,
         "notes":[
             "No C3v VAP is performed in this script.",
@@ -723,6 +692,7 @@ def main():
             "PAV branches are energy-only symmetry diagnostics and report Delta E relative to their source branch.",
             "Unless --skip-lanczos is set, each final A1/A2 C3v PAV is followed by a stochastic one-step Lanczos/Ritz correction in span{|PAV>,H|PAV>}; the intermediate Tint-PAV is not Lanczos-corrected.",
             "Large-supercell 1LS uses MC spectral moments m1..m4 and never enumerates the full Hilbert space.",
+            "Final A1/A2 PAV and 1LS reuse one shared Markov-chain sample batch; no second Lanczos sampling pass is run.",
             "1LS rows are energy/variance diagnostics only and do not define or relabel the Raw phase.",
         ],
     }
@@ -731,6 +701,12 @@ def main():
 
     # _stage reads these fields from args.
     a.eval_samples=eval_samples
+    print(
+        f"[sampling] Raw eval={eval_samples}; Tint-PAV eval={pav_eval_samples}; "
+        f"final A1/A2 PAV shared pool={pav_l1_shared_samples}; "
+        f"1LS uses={lanczos_samples}",
+        flush=True,
+    )
     rows=[]
     optimized_rows=[]
 
@@ -810,6 +786,7 @@ def main():
             args=a,rng_seed=base_seed+2,
             train_samples=a.pav_warmup_samples,
             train_sweep_size=pav_sweep,
+            eval_samples_override=pav_eval_samples,
             make_maps=False,map_edge_chunk=a.map_edge_chunk,
             measure_orders=False,
         )
@@ -820,7 +797,7 @@ def main():
         # ---- 3. Full residual C3v PAV directly from Raw ----
         for ii,ir in enumerate(requested):
             pav_dir=out/f"raw_c3v_pav_{a.correlator}__{ir}__{seed}"
-            row,_=_stage(
+            row,_,pav_state=_stage(
                 stage_name="Raw->Tint+C3v-PAV",
                 directory=pav_dir,
                 g=g,nf=nf,V=a.V,
@@ -835,8 +812,10 @@ def main():
                 args=a,rng_seed=base_seed+20+ii,
                 train_samples=a.pav_warmup_samples,
                 train_sweep_size=pav_sweep,
+                eval_samples_override=pav_l1_shared_samples,
                 make_maps=False,map_edge_chunk=a.map_edge_chunk,
                 measure_orders=False,
+                return_vstate=True,
             )
             row["branch_source"]="Raw"
             _annotate_pav_energy(row,raw_row)
@@ -845,12 +824,8 @@ def main():
             if not a.skip_lanczos:
                 l1row=_pav_lanczos_row(
                     row,
-                    hi=hi,H_fast=H_fast,graph=graph,
-                    seed_data=seed_data,params=raw_params,
-                    shell_mats=shell_mats,bf_mats=bf_mats,
-                    use_backflow=use_backflow,
-                    maps=spatial_maps,chars=spatial_chars[ir],args=a,
-                    rng_seed=base_seed+120+ii,sweep_size=pav_sweep,
+                    vstate=pav_state,H_fast=H_fast,args=a,
+                    lanczos_samples=lanczos_samples,
                     directory=out/f"raw_c3v_pav_1ls_{a.correlator}__{ir}__{seed}",
                 )
                 rows.append(l1row)
@@ -909,7 +884,7 @@ def main():
 
             for ii,ir in enumerate(requested):
                 pav_dir=out/f"tintvap_c3v_pav_{a.correlator}__{ir}__{seed}"
-                row,_=_stage(
+                row,_,pav_state=_stage(
                     stage_name="Tint-VAP->C3v-PAV",
                     directory=pav_dir,
                     g=g,nf=nf,V=a.V,
@@ -924,8 +899,10 @@ def main():
                     args=a,rng_seed=base_seed+50+ii,
                     train_samples=a.pav_warmup_samples,
                     train_sweep_size=pav_sweep,
+                    eval_samples_override=pav_l1_shared_samples,
                     make_maps=False,map_edge_chunk=a.map_edge_chunk,
                     measure_orders=False,
+                    return_vstate=True,
                 )
                 row["branch_source"]="Tint-VAP"
                 _annotate_pav_energy(row,tint_row)
@@ -934,12 +911,8 @@ def main():
                 if not a.skip_lanczos:
                     l1row=_pav_lanczos_row(
                         row,
-                        hi=hi,H_fast=H_fast,graph=graph,
-                        seed_data=seed_data,params=tint_params,
-                        shell_mats=shell_mats,bf_mats=bf_mats,
-                        use_backflow=use_backflow,
-                        maps=spatial_maps,chars=spatial_chars[ir],args=a,
-                        rng_seed=base_seed+150+ii,sweep_size=pav_sweep,
+                        vstate=pav_state,H_fast=H_fast,args=a,
+                        lanczos_samples=lanczos_samples,
                         directory=out/f"tintvap_c3v_pav_1ls_{a.correlator}__{ir}__{seed}",
                     )
                     rows.append(l1row)
