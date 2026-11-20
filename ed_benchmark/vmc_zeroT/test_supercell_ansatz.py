@@ -12,7 +12,7 @@ sys.path.insert(0,str(NATIVE))
 import geometry
 
 from benchmark_observables import ruby_star_formfactor
-from vmc_ansatz import one_body_seed
+from vmc_ansatz import one_body_seed, bond_backflow_channels
 from supercell_ansatz import (
     ring3_periodic_star_formfactor,
     seed_bloch_blocks,
@@ -140,6 +140,28 @@ def main():
         p=big.translate(dr)
         assert np.linalg.norm(P[np.ix_(p,p)]-P)<1e-9
 
+    # A/B-resolved backflow: t bonds split evenly between the two
+    # elementary triangles, while t1/t2 stay shared inter-triangle channels.
+    bf_labels,bf_real,bf_counts=bond_backflow_channels(big)
+    assert bf_labels==["eta_t_A","eta_t_B","eta_t1","eta_t2"]
+    expected=3*big.num_cells
+    assert bf_counts.tolist()==[expected,expected,expected,expected]
+    assert bf_real.shape==(4,big.Ns,big.Ns)
+    assert np.max(np.abs(bf_real-bf_real.transpose(0,2,1)))<1e-12
+    support=np.sum(np.abs(bf_real)>0,axis=0)
+    for e in big.edges:
+        assert support[e.i,e.j]==1
+        assert support[e.j,e.i]==1
+        if e.kind=="t":
+            if e.i%6<3:
+                assert bf_real[0,e.i,e.j]==1 and bf_real[1,e.i,e.j]==0
+            else:
+                assert bf_real[1,e.i,e.j]==1 and bf_real[0,e.i,e.j]==0
+        elif e.kind=="t1":
+            assert bf_real[2,e.i,e.j]==1
+        elif e.kind=="t2":
+            assert bf_real[3,e.i,e.j]==1
+
     f=data["star_formfactor"]
     # Each of the four 18-site supercells carries the same 36-edge reference
     # pattern, hence every reference-edge value appears four times.
@@ -184,6 +206,7 @@ def main():
     print("2x2 ring3 superlattice: Ns=",big.Ns,
           "occupations_per_k=",data["occupations_per_k"].tolist())
     print("random seed: reproducible complex orthonormal k-blocks with normal n_occ(k)")
+    print("backflow: A/B-resolved t_A,t_B plus shared t1,t2 channels")
     print("C3v residual point group: 6 distinct site maps on 1x1 and 2x2")
     print("Residual Tint: 3 maps; Tint x C3v: 18 maps independent of supercell size")
 
