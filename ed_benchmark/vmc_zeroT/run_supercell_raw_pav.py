@@ -485,7 +485,10 @@ def parser():
         "--seeds",nargs="+",
         default=["normal","sd","isd","lc_same","lc_opposite","random"],
     )
-    p.add_argument("--seed-amplitude",type=float,default=0.08)
+    p.add_argument(
+        "--seed-amplitude",type=float,default=0.08,
+        help="Amplitude of SD/ISD/LC seed fields; for seed=random, the small occupied-unoccupied mixing amplitude around the normal low-energy subspace.",
+    )
     p.add_argument(
         "--correlator",choices=["sj","backflow"],default="backflow"
     )
