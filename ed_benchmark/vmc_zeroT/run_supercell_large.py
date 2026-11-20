@@ -50,6 +50,7 @@ from vmc_ansatz import jastrow_channels, bond_backflow_channels
 from supercell_ansatz import (
     seed_bloch_blocks,
     build_supercell_netket_model,
+    make_fast_raw_local_energy_kernel,
     extract_supercell_parameters,
 )
 from symmetry_projection import (
@@ -632,6 +633,161 @@ def _profile_vmc_components(
     return out
 
 
+def _validate_fast_raw_local_energy(
+    *,
+    vstate,g,V,seed_data,shell_mats,bf_mats,
+    n_roots=8,
+    repeats=3,
+):
+    """Validate the Woodbury Raw local-energy prototype against full logpsi.
+
+    This is deliberately a post-training diagnostic only.  It compares both
+    every active hopping ratio and the final local energy, so sign mistakes
+    cannot hide behind cancellations among bonds.
+    """
+    import jax.numpy as jnp
+
+    roots=np.asarray(vstate.samples).reshape((-1,g.Ns))
+    n_roots=max(1,min(int(n_roots),len(roots)))
+    roots=np.asarray(roots[:n_roots],float)
+
+    edge_i=np.asarray([int(e.i) for e in g.edges],np.int32)
+    edge_j=np.asarray([int(e.j) for e in g.edges],np.int32)
+    edge_t=np.asarray([float(g.t[e.kind]) for e in g.edges],float)
+    edge_v=np.asarray([1.0 if e.kind=="t" else 0.0 for e in g.edges],float)
+
+    kernel=make_fast_raw_local_energy_kernel(
+        sc_coords=seed_data["sc_coords"],
+        internal_sites=seed_data["internal_sites"],
+        kpoints=seed_data["kpoints"],
+        occupations_per_k=seed_data["occupations_per_k"],
+        shell_matrices=shell_mats,
+        backflow_matrices=bf_mats,
+        edge_i=edge_i,
+        edge_j=edge_j,
+        edge_t=edge_t,
+        edge_has_interaction=edge_v,
+        interaction_V=V,
+    )
+
+    # Warm up JIT.
+    fast=kernel(vstate.parameters,jnp.asarray(roots))
+    fast_E=np.asarray(fast[0])
+    fast_ratio=np.asarray(fast[1])
+    fast_active=np.asarray(fast[2],bool)
+    fast_src=np.asarray(fast[3],int)
+    fast_dst=np.asarray(fast[4],int)
+
+    fast_times=[]
+    for _ in range(max(1,int(repeats))):
+        t=time.perf_counter()
+        out=kernel(vstate.parameters,jnp.asarray(roots))
+        vals=np.asarray(out[0])
+        fast_times.append(time.perf_counter()-t)
+        fast_E=vals
+
+    root_log=np.asarray(vstate.log_value(roots),np.complex128).reshape(-1)
+    xprime=[]
+    root_id=[]
+    edge_id=[]
+    signs=[]
+    direct_diag=np.zeros(n_roots,np.complex128)
+    for ir,x in enumerate(roots):
+        direct_diag[ir]=float(V)*sum(
+            1.0
+            for e in g.edges
+            if e.kind=="t" and x[int(e.i)]>0.5 and x[int(e.j)]>0.5
+        )
+        for ie,e in enumerate(g.edges):
+            i=int(e.i); j=int(e.j)
+            xi=x[i]>0.5; xj=x[j]>0.5
+            if xi==xj:
+                continue
+            src=i if xi else j
+            dst=j if xi else i
+            xp=x.copy()
+            xp[src]=0.0
+            xp[dst]=1.0
+            lo=min(src,dst)+1
+            hi=max(src,dst)
+            n_between=int(np.sum(x[lo:hi]))
+            sign=-1.0 if (n_between&1) else 1.0
+            xprime.append(xp)
+            root_id.append(ir)
+            edge_id.append(ie)
+            signs.append(sign)
+
+    xprime=np.asarray(xprime,float)
+    root_id=np.asarray(root_id,int)
+    edge_id=np.asarray(edge_id,int)
+    signs=np.asarray(signs,float)
+
+    t=time.perf_counter()
+    if len(xprime):
+        logp=np.asarray(vstate.log_value(xprime),np.complex128).reshape(-1)
+    else:
+        logp=np.empty(0,np.complex128)
+    direct_logpsi_s=time.perf_counter()-t
+
+    direct_E=direct_diag.copy()
+    ratio_abs_errors=[]
+    ratio_rel_errors=[]
+    for k in range(len(xprime)):
+        ir=int(root_id[k]); ie=int(edge_id[k])
+        canonical_ratio=np.exp(logp[k]-root_log[ir])
+        replacement_ref=signs[k]*canonical_ratio
+        direct_E[ir]+=edge_t[ie]*replacement_ref
+
+        replacement_fast=fast_ratio[ir,ie]
+        ae=abs(replacement_fast-replacement_ref)
+        re=ae/max(1e-12,abs(replacement_ref))
+        ratio_abs_errors.append(float(ae))
+        ratio_rel_errors.append(float(re))
+
+        if not fast_active[ir,ie]:
+            raise RuntimeError(
+                "Fast local-energy active-edge mask disagrees with direct hop list"
+            )
+        expected_src=(
+            edge_i[ie] if roots[ir,edge_i[ie]]>0.5 else edge_j[ie]
+        )
+        expected_dst=(
+            edge_j[ie] if roots[ir,edge_i[ie]]>0.5 else edge_i[ie]
+        )
+        if (
+            int(fast_src[ir,ie])!=int(expected_src)
+            or int(fast_dst[ir,ie])!=int(expected_dst)
+        ):
+            raise RuntimeError("Fast local-energy hop orientation mismatch")
+
+    energy_abs=np.abs(fast_E-direct_E)
+    energy_rel=energy_abs/np.maximum(1e-12,np.abs(direct_E))
+    report={
+        "n_roots":int(n_roots),
+        "n_active_hops":int(len(xprime)),
+        "ratio_max_abs_error":(
+            float(max(ratio_abs_errors)) if ratio_abs_errors else 0.0
+        ),
+        "ratio_max_rel_error":(
+            float(max(ratio_rel_errors)) if ratio_rel_errors else 0.0
+        ),
+        "local_energy_max_abs_error":float(np.max(energy_abs)),
+        "local_energy_max_rel_error":float(np.max(energy_rel)),
+        "fast_kernel_median_s":float(np.median(fast_times)),
+        "direct_connected_logpsi_s":float(direct_logpsi_s),
+    }
+    print(
+        "[fast local check] "
+        f"roots={report['n_roots']} hops={report['n_active_hops']} "
+        f"ratio_abs={report['ratio_max_abs_error']:.3e} "
+        f"Eloc_abs={report['local_energy_max_abs_error']:.3e} "
+        f"fast={report['fast_kernel_median_s']:.4f}s "
+        f"direct_logpsi={report['direct_connected_logpsi_s']:.4f}s",
+        flush=True,
+    )
+    return report
+
+
 def _stage(
     *,
     stage_name,
@@ -838,6 +994,7 @@ def _stage(
     warm=None
     warmup_s=0.0
     vmc_profile={}
+    fast_local_check={}
     train_segment_timings=[]
 
     effective_qgt="not_used_pav_only"
@@ -1159,6 +1316,18 @@ def _stage(
     final_stats=vstate.expect(H_fast)
     final_eval_s=time.perf_counter()-te
 
+    if (
+        bool(getattr(args,"fast_local_check",False))
+        and maps is None
+        and use_backflow
+    ):
+        fast_local_check=_validate_fast_raw_local_energy(
+            vstate=vstate,g=g,V=V,seed_data=seed_data,
+            shell_mats=shell_mats,bf_mats=bf_mats,
+            n_roots=int(getattr(args,"fast_local_check_roots",8)),
+            repeats=int(getattr(args,"fast_local_check_repeats",3)),
+        )
+
     tobs=time.perf_counter()
     if measure_orders:
         order_obs=_mc_order_observables(
@@ -1220,6 +1389,7 @@ def _stage(
         "packed_kernel_effective":bool(packed_effective),
         "packed_kernel_error":packed_error,
         "vmc_component_profile":vmc_profile,
+        "fast_local_check":fast_local_check,
         "train_segment_timings":train_segment_timings,
         "trainer_requested":str(getattr(args,"trainer","legacy")),
         "trainer":(
