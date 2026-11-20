@@ -500,6 +500,26 @@ def parser():
         "--tint-vap-iter",type=int,default=0,
         help="Optional 3-image Tint VAP iterations. 0 disables Tint VAP.",
     )
+    p.add_argument(
+        "--trainer",choices=["auto","vmc_sr","legacy"],default="auto",
+        help="Raw/Tint-VAP optimizer backend. auto prefers VMC_SR and falls back to the legacy QGT+iterative-SR path.",
+    )
+    p.add_argument(
+        "--sr-momentum",type=float,default=0.8,
+        help="SPRING momentum used by VMC_SR. Set 0 to disable.",
+    )
+    p.add_argument(
+        "--train-samples-early",type=int,default=1024,
+        help="Training samples per Raw step before --train-samples-switch-iter.",
+    )
+    p.add_argument(
+        "--train-samples-late",type=int,default=None,
+        help="Training samples per Raw step after the switch. Default=--n-samples.",
+    )
+    p.add_argument(
+        "--train-samples-switch-iter",type=int,default=100,
+        help="Switch Raw training samples from early to late value after this many steps.",
+    )
     p.add_argument("--raw-learning-rate",type=float,default=0.03)
     p.add_argument(
         "--raw-learning-rate-final",type=float,default=0.01,
@@ -694,6 +714,14 @@ def main():
         if a.eval_samples is not None
         else int(a.n_samples)
     )
+    train_samples_early=int(a.train_samples_early)
+    train_samples_late=(
+        int(a.train_samples_late)
+        if a.train_samples_late is not None
+        else int(a.n_samples)
+    )
+    if train_samples_early<1 or train_samples_late<1:
+        raise ValueError("training sample counts must be positive")
     pav_sweep=(
         int(a.pav_sweep_size)
         if a.pav_sweep_size is not None
@@ -731,6 +759,9 @@ def main():
         "c3v_available":bool(spatial_effective),
         "c3v_irreps":requested,
         "eval_samples_effective":eval_samples,
+        "train_samples_early_effective":train_samples_early,
+        "train_samples_late_effective":train_samples_late,
+        "train_samples_switch_iter_effective":int(a.train_samples_switch_iter),
         "pav_sweep_size_effective":pav_sweep,
         "pav_eval_samples_requested":pav_eval_samples,
         "lanczos_samples_effective":lanczos_samples,
@@ -743,6 +774,8 @@ def main():
             "Tint VAP is optional and disabled by default.",
             "Only optimized branches (Raw and optional Tint-VAP) are classified and mapped.",
             "Raw optimization uses a two-stage learning-rate schedule: --raw-learning-rate for the first --raw-lr-switch-iter steps, then --raw-learning-rate-final.",
+            "Raw optimization also uses staged Monte Carlo sampling: --train-samples-early before --train-samples-switch-iter, then --train-samples-late (defaulting to --n-samples).",
+            "The default trainer is auto: prefer VMC_SR with standard parameter-space SR, cholesky_with_fallback, and SPRING momentum; use --trainer legacy to recover the previous QGT+iterative-SR path.",
             "PAV branches are energy-only symmetry diagnostics and report Delta E relative to their source branch.",
             "Unless --skip-lanczos is set, each final A1/A2 C3v PAV is followed by a stochastic one-step Lanczos/Ritz correction in span{|PAV>,H|PAV>}; the intermediate Tint-PAV is not Lanczos-corrected.",
             "Large-supercell 1LS uses MC spectral moments m1..m4 and never enumerates the full Hilbert space.",
@@ -821,6 +854,9 @@ def main():
                 args=a,rng_seed=base_seed+1,
                 learning_rate_after=a.raw_learning_rate_final,
                 learning_rate_switch_iter=a.raw_lr_switch_iter,
+                train_samples=train_samples_early,
+                train_samples_after=train_samples_late,
+                train_samples_switch_iter=a.train_samples_switch_iter,
                 make_maps=True,map_edge_chunk=a.map_edge_chunk,
                 return_vstate=True,
             )
@@ -952,6 +988,9 @@ def main():
                     n_iter=a.tint_vap_iter,
                     learning_rate=a.tint_learning_rate,
                     args=a,rng_seed=base_seed+40,
+                    train_samples=train_samples_early,
+                    train_samples_after=train_samples_late,
+                    train_samples_switch_iter=a.train_samples_switch_iter,
                     make_maps=True,map_edge_chunk=a.map_edge_chunk,
                 )
             tint_row["branch_source"]="Tint-VAP"
