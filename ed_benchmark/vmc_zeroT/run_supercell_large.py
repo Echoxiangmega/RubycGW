@@ -484,9 +484,11 @@ def _stage(
     rng_seed,
     train_samples=None,
     train_sweep_size=None,
+    eval_samples_override=None,
     make_maps=False,
     map_edge_chunk=12,
     measure_orders=True,
+    return_vstate=False,
 ):
     import jax
     jax.config.update("jax_enable_x64",True)
@@ -555,13 +557,15 @@ def _stage(
     )
     setup_s=time.perf_counter()-t0
 
-    tw=time.perf_counter()
-    warm=vstate.expect(H_fast)
-    warmup_s=time.perf_counter()-tw
+    warm=None
+    warmup_s=0.0
 
     effective_qgt="not_used_pav_only"
     log=nk.logging.RuntimeLog()
     if int(n_iter)>0:
+        tw=time.perf_counter()
+        warm=vstate.expect(H_fast)
+        warmup_s=time.perf_counter()-tw
         qgt_ctor,solver,effective_qgt=_qgt_and_solver(nk,jax,args)
         if str(args.qgt).lower()=="onthefly" and effective_qgt!="onthefly":
             print(
@@ -604,18 +608,32 @@ def _stage(
         opt_s=time.perf_counter()-topt
     else:
         n_images=1 if maps is None else int(len(maps))
+        requested_eval=(
+            int(eval_samples_override)
+            if eval_samples_override is not None
+            else (
+                int(args.eval_samples)
+                if args.eval_samples is not None
+                else int(args.n_samples)
+            )
+        )
         print(
             f"[large {stage_name} PAV-only] Ns={g.Ns} Nf={nf} "
             f"params={vstate.n_parameters} images={n_images} "
-            f"samples={stage_samples} sweep={sweep_size}; no SR/Jacobian",
+            f"eval_samples={requested_eval} sweep={sweep_size}; "
+            "no SR/Jacobian and no duplicate warmup energy evaluation",
             flush=True,
         )
         opt_s=0.0
 
     eval_samples=(
-        int(args.eval_samples)
-        if args.eval_samples is not None
-        else int(args.n_samples)
+        int(eval_samples_override)
+        if eval_samples_override is not None
+        else (
+            int(args.eval_samples)
+            if args.eval_samples is not None
+            else int(args.n_samples)
+        )
     )
     if int(vstate.n_samples)!=eval_samples:
         vstate.n_samples=eval_samples
@@ -703,8 +721,12 @@ def _stage(
             None if args.qgt_chunk_size is None
             else int(args.qgt_chunk_size)
         ),
-        "warmup_E":float(np.real(warm.mean)),
-        "warmup_E_error":stats_error(warm),
+        "warmup_E":(
+            None if warm is None else float(np.real(warm.mean))
+        ),
+        "warmup_E_error":(
+            None if warm is None else stats_error(warm)
+        ),
         "mc_E":float(np.real(final_stats.mean)),
         "mc_E_error":stats_error(final_stats),
         "mc_tau_corr":_scalar_stat(final_stats,"tau_corr"),
@@ -751,6 +773,8 @@ def _stage(
         **_memory_estimates(vstate.n_parameters,args.n_samples),
     }
     atomic_json(directory/"summary.json",summary)
+    if return_vstate:
+        return summary,params,vstate
     return summary,params
 
 
