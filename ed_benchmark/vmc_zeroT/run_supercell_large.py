@@ -96,7 +96,11 @@ def _fast_raw_operator_class(nk):
     ):
         def local_kernel(logpsi, pars, sigma, extra_args):
             del logpsi, extra_args
-            return op.kernel(pars,sigma)
+            # NetKet's lean kernel interface passes vstate.variables, while
+            # the specialised Woodbury kernel operates on the trainable
+            # parameter collection itself.
+            model_pars=pars["params"] if "params" in pars else pars
+            return op.kernel(model_pars,sigma)
         return local_kernel
 
     @nk.vqs.get_local_kernel_arguments.dispatch
