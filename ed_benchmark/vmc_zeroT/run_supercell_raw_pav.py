@@ -488,6 +488,14 @@ def parser():
         help="Optional 3-image Tint VAP iterations. 0 disables Tint VAP.",
     )
     p.add_argument("--raw-learning-rate",type=float,default=0.03)
+    p.add_argument(
+        "--raw-learning-rate-final",type=float,default=0.01,
+        help="Raw-stage learning rate after --raw-lr-switch-iter.",
+    )
+    p.add_argument(
+        "--raw-lr-switch-iter",type=int,default=100,
+        help="Use --raw-learning-rate for the first N Raw steps, then switch to --raw-learning-rate-final.",
+    )
     p.add_argument("--tint-learning-rate",type=float,default=0.01)
 
     p.add_argument(
@@ -698,6 +706,7 @@ def main():
             "Full residual A1/A2 PAV is applied directly to optimized Raw parameters.",
             "Tint VAP is optional and disabled by default.",
             "Only optimized branches (Raw and optional Tint-VAP) are classified and mapped.",
+            "Raw optimization uses a two-stage learning-rate schedule: --raw-learning-rate for the first --raw-lr-switch-iter steps, then --raw-learning-rate-final.",
             "PAV branches are energy-only symmetry diagnostics and report Delta E relative to their source branch.",
             "Unless --skip-lanczos is set, each final A1/A2 C3v PAV is followed by a stochastic one-step Lanczos/Ritz correction in span{|PAV>,H|PAV>}; the intermediate Tint-PAV is not Lanczos-corrected.",
             "Large-supercell 1LS uses MC spectral moments m1..m4 and never enumerates the full Hilbert space.",
@@ -766,6 +775,8 @@ def main():
                 time_reversal_even=False,
                 n_iter=a.raw_iter,learning_rate=a.raw_learning_rate,
                 args=a,rng_seed=base_seed+1,
+                learning_rate_after=a.raw_learning_rate_final,
+                learning_rate_switch_iter=a.raw_lr_switch_iter,
                 make_maps=True,map_edge_chunk=a.map_edge_chunk,
             )
         raw_row["branch_source"]="Raw"
