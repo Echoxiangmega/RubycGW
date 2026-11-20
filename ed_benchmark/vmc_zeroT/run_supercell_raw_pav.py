@@ -636,6 +636,11 @@ def main():
         flush=True,
     )
     current_ops=_current_operators(hi,g)
+    print(
+        "[current operators] "
+        + ", ".join(type(op).__name__ for op in current_ops),
+        flush=True,
+    )
     _,_,shell_mats,_=jastrow_channels(
         g,mode=a.jastrow_mode,n_shells=a.jastrow_shells
     )
