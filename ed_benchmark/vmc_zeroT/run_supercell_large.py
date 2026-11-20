@@ -51,6 +51,7 @@ from supercell_ansatz import (
     seed_bloch_blocks,
     build_supercell_netket_model,
     make_fast_raw_local_energy_kernel,
+    make_fast_raw_sampler_sweep_kernel,
     extract_supercell_parameters,
 )
 from symmetry_projection import (
@@ -1515,6 +1516,205 @@ def _validate_fast_raw_local_energy(
     return report
 
 
+def _validate_fast_raw_sampler_sweep(
+    *,
+    vstate,
+    g,
+    seed_data,
+    shell_mats,
+    bf_mats,
+    sweep_size,
+    rng_seed,
+    n_roots=8,
+    repeats=3,
+    orthonormalize_orbitals=False,
+):
+    """Compare one cached Woodbury sweep with full-logpsi Metropolis steps."""
+    import jax
+    import jax.numpy as jnp
+
+    roots=np.asarray(vstate.samples).reshape((-1,g.Ns))
+    n_roots=max(1,min(int(n_roots),len(roots)))
+    roots=np.asarray(roots[:n_roots],np.int8)
+    sweep_size=int(sweep_size)
+    clusters=np.asarray(
+        [(int(e.i),int(e.j)) for e in g.edges],
+        np.int32,
+    )
+
+    key=jax.random.PRNGKey(int(rng_seed)+99173)
+    k1,k2=jax.random.split(key)
+    up=np.asarray(
+        jax.random.uniform(k1,(n_roots,sweep_size),dtype=jnp.float64)
+    )
+    ua=np.asarray(
+        jax.random.uniform(k2,(n_roots,sweep_size),dtype=jnp.float64)
+    )
+
+    fast_kernel=make_fast_raw_sampler_sweep_kernel(
+        sc_coords=seed_data["sc_coords"],
+        internal_sites=seed_data["internal_sites"],
+        kpoints=seed_data["kpoints"],
+        occupations_per_k=seed_data["occupations_per_k"],
+        shell_matrices=shell_mats,
+        backflow_matrices=bf_mats,
+        clusters=clusters,
+        sweep_size=sweep_size,
+        machine_pow=2.0,
+        orthonormalize_orbitals=orthonormalize_orbitals,
+    )
+
+    clusters_j=jnp.asarray(clusters)
+    apply_fun=vstate._apply_fun
+    model_state=vstate.model_state
+
+    def choose_hoppable(x,u):
+        a=clusters_j[:,0]
+        b=clusters_j[:,1]
+        mask=x[a]!=x[b]
+        n_active=jnp.sum(mask,dtype=jnp.int32)
+        rank=jnp.minimum(
+            jnp.asarray(jnp.floor(u*n_active),jnp.int32),
+            n_active-1,
+        )
+        cumulative=jnp.cumsum(mask.astype(jnp.int32))
+        edge=jnp.argmax(cumulative>rank)
+        return edge,n_active
+
+    def direct_kernel(parameters,configurations,proposal_uniforms,accept_uniforms):
+        variables={"params":parameters,**model_state}
+
+        def one(x,u_prop,u_acc):
+            x=x.astype(jnp.int8)
+            logp=2.0*jnp.real(apply_fun(variables,x))
+            logp0=logp
+
+            def step(carry,inputs):
+                x,logp,naccepted=carry
+                up_i,ua_i=inputs
+                edge,n_active=choose_hoppable(x,up_i)
+                i=clusters_j[edge,0]
+                j=clusters_j[edge,1]
+                src=jnp.where(x[i]>0,i,j)
+                dst=jnp.where(x[i]>0,j,i)
+                x_prop=x.at[src].set(0).at[dst].set(1)
+                logp_prop=2.0*jnp.real(apply_fun(variables,x_prop))
+                _,n_active_prop=choose_hoppable(
+                    x_prop,jnp.asarray(0.0,dtype=up_i.dtype)
+                )
+                log_corr=(
+                    jnp.log(n_active.astype(jnp.float64))
+                    -jnp.log(n_active_prop.astype(jnp.float64))
+                )
+                log_wave_ratio=logp_prop-logp
+                accept=jnp.log(
+                    jnp.maximum(
+                        ua_i,jnp.asarray(1e-300,dtype=ua_i.dtype)
+                    )
+                )<(log_wave_ratio+log_corr)
+                x_new=jnp.where(accept,x_prop,x)
+                lp_new=jnp.where(accept,logp_prop,logp)
+                na_new=naccepted+accept.astype(jnp.int32)
+                return (
+                    x_new,lp_new,na_new
+                ),(edge,accept,log_wave_ratio,log_corr)
+
+            carry,diag=jax.lax.scan(
+                step,
+                (x,logp,jnp.asarray(0,jnp.int32)),
+                (u_prop,u_acc),
+            )
+            x,logp,naccepted=carry
+            return x,logp-logp0,naccepted,diag
+
+        return jax.vmap(one)(
+            configurations,proposal_uniforms,accept_uniforms
+        )
+
+    direct_kernel=jax.jit(direct_kernel)
+
+    roots_j=jnp.asarray(roots)
+    up_j=jnp.asarray(up)
+    ua_j=jnp.asarray(ua)
+
+    # JIT warmup.
+    fast=fast_kernel(vstate.parameters,roots_j,up_j,ua_j)
+    direct=direct_kernel(vstate.parameters,roots_j,up_j,ua_j)
+    np.asarray(fast[0]); np.asarray(direct[0])
+
+    fast_times=[]
+    direct_times=[]
+    for _ in range(max(1,int(repeats))):
+        t=time.perf_counter()
+        out=fast_kernel(vstate.parameters,roots_j,up_j,ua_j)
+        np.asarray(out[0])
+        fast_times.append(time.perf_counter()-t)
+        fast=out
+
+        t=time.perf_counter()
+        out=direct_kernel(vstate.parameters,roots_j,up_j,ua_j)
+        np.asarray(out[0])
+        direct_times.append(time.perf_counter()-t)
+        direct=out
+
+    fast_x=np.asarray(fast[0])
+    fast_lp=np.asarray(fast[1])
+    fast_na=np.asarray(fast[2])
+    inv_res=np.asarray(fast[3])
+    fast_diag=fast[4]
+
+    direct_x=np.asarray(direct[0])
+    direct_lp=np.asarray(direct[1])
+    direct_na=np.asarray(direct[2])
+    direct_diag=direct[3]
+
+    config_mismatch=int(np.sum(np.any(fast_x!=direct_x,axis=1)))
+    accept_fast=np.asarray(fast_diag[1],bool)
+    accept_direct=np.asarray(direct_diag[1],bool)
+    accept_mismatch=int(np.sum(accept_fast!=accept_direct))
+    logratio_err=float(
+        np.max(
+            np.abs(
+                np.asarray(fast_diag[2])
+                -np.asarray(direct_diag[2])
+            )
+        )
+    )
+    logp_err=float(np.max(np.abs(fast_lp-direct_lp)))
+    accepted_count_err=int(np.max(np.abs(fast_na-direct_na)))
+    max_inv_res=float(np.max(inv_res))
+
+    report={
+        "n_roots":int(n_roots),
+        "sweep_size":int(sweep_size),
+        "config_mismatch_chains":config_mismatch,
+        "accept_mismatch_steps":accept_mismatch,
+        "accepted_count_max_error":accepted_count_err,
+        "log_wave_ratio_max_abs_error":logratio_err,
+        "log_probability_delta_max_abs_error":logp_err,
+        "cached_inverse_max_residual":max_inv_res,
+        "fast_median_s":float(np.median(fast_times)),
+        "direct_median_s":float(np.median(direct_times)),
+    }
+    report["speedup"]=float(
+        report["direct_median_s"]
+        /max(1e-15,report["fast_median_s"])
+    )
+    print(
+        "[fast sampler check] "
+        f"roots={n_roots} sweep={sweep_size} "
+        f"config_mismatch={config_mismatch} "
+        f"accept_mismatch={accept_mismatch} "
+        f"logratio_abs={logratio_err:.3e} "
+        f"inv_res={max_inv_res:.3e} "
+        f"speedup={report['speedup']:.2f}x "
+        f"({report['direct_median_s']:.4f}s->"
+        f"{report['fast_median_s']:.4f}s)",
+        flush=True,
+    )
+    return report
+
+
 def _stage(
     *,
     stage_name,
@@ -1880,6 +2080,7 @@ def _stage(
     train_segment_timings=[]
     shared_sr_check={}
     shared_sr_profile={}
+    fast_sampler_check={}
 
     fast_local_requested=bool(getattr(args,"fast_local_energy",False))
     fast_local_eligible=(
@@ -2466,6 +2667,21 @@ def _stage(
             orthonormalize_orbitals=orbital_orthonormalize,
         )
 
+    if (
+        bool(getattr(args,"fast_sampler_check",False))
+        and maps is None
+        and use_backflow
+    ):
+        fast_sampler_check=_validate_fast_raw_sampler_sweep(
+            vstate=vstate,g=g,seed_data=seed_data,
+            shell_mats=shell_mats,bf_mats=bf_mats,
+            sweep_size=sweep_size,
+            rng_seed=rng_seed,
+            n_roots=int(getattr(args,"fast_sampler_check_roots",8)),
+            repeats=int(getattr(args,"fast_sampler_check_repeats",3)),
+            orthonormalize_orbitals=orbital_orthonormalize,
+        )
+
     tobs=time.perf_counter()
     if measure_orders:
         order_obs=_mc_order_observables(
@@ -2545,6 +2761,7 @@ def _stage(
         "vmc_component_profile":vmc_profile,
         "shared_sr_check":shared_sr_check,
         "shared_sr_profile":shared_sr_profile,
+        "fast_sampler_check":fast_sampler_check,
         "fast_local_check":fast_local_check,
         "train_segment_timings":train_segment_timings,
         "trainer_requested":str(getattr(args,"trainer","legacy")),
