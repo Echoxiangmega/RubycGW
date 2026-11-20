@@ -629,6 +629,10 @@ def parser():
         help="Maximum energy, max-gradient and relative-L2 discrepancy allowed by --analytic-logderiv-check.",
     )
     p.add_argument(
+        "--analytic-logderiv-min-speedup",type=float,default=1.02,
+        help="If the validated analytic derivative is slower than this same-sample expect_and_grad speedup, automatically fall back to original autodiff.",
+    )
+    p.add_argument(
         "--fast-local-energy",
         action=argparse.BooleanOptionalAction,
         default=True,
