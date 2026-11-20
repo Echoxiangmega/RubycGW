@@ -1006,7 +1006,7 @@ def _validate_shared_sr(
         t=time.perf_counter()
         st,pre,_,_=_shared_sr_update(
             vstate=vstate,H=H,nk=nk,jax=jax,
-            diag_shift=diag_shift,solver=solver,
+            diag_shift=diag_shift,linear_solve=shared_linear_solve,
             chunk_size=chunk_size,x0=None,
         )
         try:
