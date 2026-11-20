@@ -89,11 +89,7 @@ def _fast_raw_operator_class(nk):
         def is_hermitian(self):
             return True
 
-    @nk.vqs.get_local_kernel.dispatch
-    def _get_fast_raw_kernel(
-        vstate: nk.vqs.MCState,
-        op: FastRawHamiltonian,
-    ):
+    def _get_fast_raw_kernel(vstate,op):
         def local_kernel(logpsi, pars, sigma, extra_args):
             del logpsi, extra_args
             # NetKet's lean kernel interface passes vstate.variables, while
@@ -103,13 +99,27 @@ def _fast_raw_operator_class(nk):
             return op.kernel(model_pars,sigma)
         return local_kernel
 
-    @nk.vqs.get_local_kernel_arguments.dispatch
-    def _get_fast_raw_kernel_arguments(
-        vstate: nk.vqs.MCState,
-        op: FastRawHamiltonian,
-    ):
+    # This module postpones annotations. Using a nested annotation such as
+    # vstate: nk.vqs.MCState would leave Plum with an unresolved string
+    # forward reference to the local alias nk. Attach runtime classes
+    # explicitly before registering each dispatch method.
+    _get_fast_raw_kernel.__annotations__={
+        "vstate":nk.vqs.MCState,
+        "op":FastRawHamiltonian,
+    }
+    nk.vqs.get_local_kernel.dispatch(_get_fast_raw_kernel)
+
+    def _get_fast_raw_kernel_arguments(vstate,op):
         del op
         return vstate.samples, None
+
+    _get_fast_raw_kernel_arguments.__annotations__={
+        "vstate":nk.vqs.MCState,
+        "op":FastRawHamiltonian,
+    }
+    nk.vqs.get_local_kernel_arguments.dispatch(
+        _get_fast_raw_kernel_arguments
+    )
 
     _FAST_RAW_OPERATOR_CLASS=FastRawHamiltonian
     return FastRawHamiltonian
