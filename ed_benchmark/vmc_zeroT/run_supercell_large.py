@@ -89,7 +89,7 @@ def _fast_raw_operator_class(nk):
         def is_hermitian(self):
             return True
 
-    def _get_fast_raw_kernel(vstate,op):
+    def _local_kernel_impl(op):
         def local_kernel(logpsi, pars, sigma, extra_args):
             del logpsi, extra_args
             # NetKet's lean kernel interface passes vstate.variables, while
@@ -99,15 +99,31 @@ def _fast_raw_operator_class(nk):
             return op.kernel(model_pars,sigma)
         return local_kernel
 
-    # This module postpones annotations. Using a nested annotation such as
-    # vstate: nk.vqs.MCState would leave Plum with an unresolved string
-    # forward reference to the local alias nk. Attach runtime classes
-    # explicitly before registering each dispatch method.
-    _get_fast_raw_kernel.__annotations__={
+    # NetKet 3.22+ dispatches get_local_kernel(vstate, op, chunk_size) when
+    # MCState.chunk_size is set. Register both the chunked and unchunked
+    # signatures explicitly. Runtime class objects avoid postponed-annotation
+    # forward-reference issues with Plum.
+    def _get_fast_raw_kernel_chunked(vstate,op,chunk_size):
+        del vstate, chunk_size
+        return _local_kernel_impl(op)
+
+    _get_fast_raw_kernel_chunked.__annotations__={
         "vstate":nk.vqs.MCState,
         "op":FastRawHamiltonian,
+        "chunk_size":int,
     }
-    nk.vqs.get_local_kernel.dispatch(_get_fast_raw_kernel)
+    nk.vqs.get_local_kernel.dispatch(_get_fast_raw_kernel_chunked)
+
+    def _get_fast_raw_kernel_unchunked(vstate,op,chunk_size):
+        del vstate, chunk_size
+        return _local_kernel_impl(op)
+
+    _get_fast_raw_kernel_unchunked.__annotations__={
+        "vstate":nk.vqs.MCState,
+        "op":FastRawHamiltonian,
+        "chunk_size":type(None),
+    }
+    nk.vqs.get_local_kernel.dispatch(_get_fast_raw_kernel_unchunked)
 
     def _get_fast_raw_kernel_arguments(vstate,op):
         del op
