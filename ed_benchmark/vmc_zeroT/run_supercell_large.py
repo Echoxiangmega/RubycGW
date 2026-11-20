@@ -1179,7 +1179,9 @@ def _stage(
         getattr(args,"analytic_logderiv",False)
     )
     analytic_logderiv_effective=(
-        analytic_logderiv_requested and orbital_free_effective
+        analytic_logderiv_requested
+        and orbital_free_effective
+        and use_backflow
     )
     analytic_logderiv_report={}
     analytic_logderiv_error=None
@@ -1621,6 +1623,7 @@ def _stage(
             diag_description=f"constant {float(args.diag_shift):g}"
 
         trainer_requested=str(getattr(args,"trainer","legacy")).lower()
+        solver_restart_effective=None
         if trainer_requested not in ("auto","vmc_sr","legacy"):
             raise ValueError(f"Unknown trainer={trainer_requested}")
         trainer_effective=trainer_requested
@@ -1657,12 +1660,17 @@ def _stage(
 
         if driver is None:
             trainer_effective="legacy"
+            # Periodic QR gauge fixing changes the parameter coordinates while
+            # leaving the normalized physical state unchanged.  A previous CG
+            # solution is therefore not a meaningful restart vector across a
+            # gauge-fix event.  Disable solver restart in the QR-free gauge.
+            solver_restart_effective=not orbital_free_effective
             try:
                 sr=nk.optimizer.SR(
                     qgt=qgt_ctor,
                     solver=solver,
                     diag_shift=diag_shift_for_driver,
-                    solver_restart=True,
+                    solver_restart=solver_restart_effective,
                 )
             except TypeError:
                 sr=nk.optimizer.SR(
@@ -1966,6 +1974,7 @@ def _stage(
         "qgt_mode":"complex",
         "qgt_holomorphic":"implicit_nonholomorphic_from_mode_complex",
         "sr_solver":args.sr_solver,
+        "solver_restart_effective":solver_restart_effective,
         "cg_tol":float(args.cg_tol),
         "cg_maxiter":int(args.cg_maxiter),
         "diag_shift":float(args.diag_shift),
