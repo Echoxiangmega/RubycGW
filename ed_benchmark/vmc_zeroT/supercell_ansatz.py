@@ -503,6 +503,7 @@ def make_fast_raw_local_energy_kernel(
     edge_t,
     edge_has_interaction,
     interaction_V,
+    return_diagnostics=True,
 ):
     """Build a JAX Woodbury local-energy kernel for the unprojected Raw ansatz.
 
@@ -521,6 +522,10 @@ def make_fast_raw_local_energy_kernel(
     replacing the source row by the destination adds one more rank-1 update.
     Therefore every hopping determinant ratio is obtained from a 3x3
     determinant after one solve of the root Nf x Nf Slater matrix.
+
+    Set return_diagnostics=False for the production scalar local-estimator
+    kernel so XLA can eliminate ratio/source/destination outputs used only by
+    the validation path.
 
     The fermionic sign of c_d^dag c_s is exactly the row-permutation sign
     between the replacement ordering and canonical sorted occupation order,
@@ -649,7 +654,10 @@ def make_fast_raw_local_energy_kernel(
             diagonal=interaction_V*jnp.sum(
                 edge_v_j*xi*xj
             )
-            return diagonal+kinetic, replacement_ratio, active, src, dst
+            energy=diagonal+kinetic
+            if return_diagnostics:
+                return energy, replacement_ratio, active, src, dst
+            return energy
 
         return jax.vmap(one)(configurations)
 
