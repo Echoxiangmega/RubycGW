@@ -209,6 +209,32 @@ def one_body_seed_hamiltonian(g, seed: str, seed_amplitude: float, star_formfact
 
     s = seed.lower()
     amp = float(seed_amplitude)
+
+    def add_ps_co(a):
+        # Transverse pseudospin CO seed inferred from the converged normal/CO
+        # branch: on every primitive cell, favour A-triangle local orbital 1
+        # and B-triangle local orbital 2 (global orbital 5).  The zero-trace
+        # onsite pattern selects a pseudospin direction without shifting the
+        # cell-average chemical potential.
+        onsite=np.asarray(
+            [0.5,-1.0,0.5, 0.5,0.5,-1.0],
+            dtype=float,
+        )
+        for i in range(ns):
+            h[i,i] += float(a)*onsite[i%6]
+
+    def add_lc(a, opposite):
+        for loop in [x for x in g.cycles() if len(x) == 3]:
+            is_a = loop[0] % 6 < 3
+            chirality = (
+                1.0
+                if (not opposite or is_a)
+                else -1.0
+            )
+            for i, j in zip(loop, loop[1:] + loop[:1]):
+                h[i, j] += 1j * chirality * float(a)
+                h[j, i] -= 1j * chirality * float(a)
+
     if s in ("sd", "isd"):
         sign = 1.0 if s == "sd" else -1.0
         f = np.asarray(star_formfactor, float)
@@ -216,13 +242,16 @@ def one_body_seed_hamiltonian(g, seed: str, seed_amplitude: float, star_formfact
             z = sign * amp * fb
             h[e.i, e.j] += z
             h[e.j, e.i] += z
-    elif s in ("lc_same", "lc_opposite"):
-        for loop in [x for x in g.cycles() if len(x) == 3]:
-            is_a = loop[0] % 6 < 3
-            chirality = 1.0 if (s == "lc_same" or is_a) else -1.0
-            for i, j in zip(loop, loop[1:] + loop[:1]):
-                h[i, j] += 1j * chirality * amp
-                h[j, i] -= 1j * chirality * amp
+    elif s=="ps_co":
+        add_ps_co(amp)
+    elif s=="mix_co_lc_opposite":
+        a=amp/np.sqrt(2.0)
+        add_ps_co(a)
+        add_lc(a,opposite=True)
+    elif s=="lc_same":
+        add_lc(amp,opposite=False)
+    elif s=="lc_opposite":
+        add_lc(amp,opposite=True)
     elif s != "normal":
         raise ValueError(f"Unknown VMC seed: {seed}")
     return h
