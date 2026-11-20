@@ -521,8 +521,8 @@ def parser():
         help="Raise instead of falling back to legacy if shared_sr validation or setup fails.",
     )
     p.add_argument(
-        "--shared-sr-tolerance",type=float,default=1e-8,
-        help="Maximum energy, max-update and relative-L2 discrepancy accepted by --shared-sr-check.",
+        "--shared-sr-tolerance",type=float,default=5e-5,
+        help="Maximum max-update and relative-L2 discrepancy accepted by --shared-sr-check. Default matches the scale expected from production CG tolerance 1e-5; the energy check is typically much tighter.",
     )
     p.add_argument(
         "--shared-sr-min-speedup",type=float,default=1.02,
