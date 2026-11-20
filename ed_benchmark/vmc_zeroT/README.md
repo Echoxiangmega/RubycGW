@@ -1958,3 +1958,69 @@ The large-system site/bond/current maps use the cached Monte Carlo samples.
 Bond density-matrix elements are evaluated from batched fermion-hop
 wavefunction ratios and the fermionic sign convention is cross-checked against
 a NetKet one-bond expectation value before writing the figure.
+
+
+### Raw branch classification versus PAV energy diagnostics
+
+The Raw/PAV scan now treats phase identification and symmetry diagnostics as
+separate tasks.
+
+**Optimized branches** (Raw, and optional Tint-VAP) are characterized using
+one-point broken-symmetry order parameters and receive an automatic
+`phase_label`:
+
+```text
+CO_onepoint_rms
+B_star_mean
+J_same_mean
+J_opposite_mean
+phase_label
+dominant_order
+```
+
+The Raw label is therefore determined by the final optimized wave function,
+not by the name of the initialization seed. A seed called `lc_opposite` can,
+for example, finish as `normal`, `CO`, `LC_opposite`, or an intertwined
+label if the measured order parameters say so.
+
+The Ruby-star bond sign is calibrated automatically from the SD and ISD
+auxiliary seed Hamiltonians for the actual geometry/filling, rather than
+hard-coded. Multiple significant one-point orders are retained as a combined
+label such as `CO+LC_opposite`.
+
+The default classification thresholds are only convenient reporting choices:
+
+```text
+--classify-co-threshold 0.03
+--classify-bow-threshold 0.03
+--classify-current-threshold 0.05
+```
+
+All raw order amplitudes are saved, so the classification can be redone later
+with different thresholds without rerunning VMC.
+
+**PAV branches** are now energy-only diagnostics. Tint-PAV and A1/A2 full
+spatial PAV do not define the phase and do not compute order maps. They report
+
+```text
+PAV_delta_E
+PAV_delta_E_per_site
+PAV_delta_E_combined_error
+PAV_delta_E_sigma
+```
+
+relative to the optimized source branch. This keeps PAV focused on how much
+finite-size symmetry restoration changes the branch energy.
+
+Two summary tables are written:
+
+```text
+optimized_branch_summary.csv
+raw_pav_summary.csv
+```
+
+The first contains only the physically classified optimized branches. The
+second additionally contains all PAV energy diagnostics.
+
+Site-density/bond-order/bond-current triptychs are saved only for optimized
+branches (Raw and optional Tint-VAP), not for the PAV projections.
