@@ -718,6 +718,7 @@ def _validate_analytic_logderiv(
     vstate_reference,
     H_reference,
     jax,
+    timing_repeats=3,
 ):
     """Compare analytic-JVP and original-autodiff Raw energy gradients."""
     vstate_analytic.sample()
@@ -743,11 +744,46 @@ def _validate_analytic_logderiv(
         "analytic_energy_real":float(Ea.real),
         "reference_energy_real":float(Er.real),
     })
+
+    # The calls above also serve as JIT warmup. Benchmark both derivative
+    # paths on the exact same cached samples without resampling.
+    nrep=max(1,int(timing_repeats))
+    ta=[]
+    tr=[]
+    for _ in range(nrep):
+        t=time.perf_counter()
+        st,gr=vstate_analytic.expect_and_grad(H_reference)
+        try:
+            np.asarray(st.mean)
+        except Exception:
+            pass
+        _sync_tree(jax,gr)
+        ta.append(time.perf_counter()-t)
+
+        t=time.perf_counter()
+        st,gr=vstate_reference.expect_and_grad(H_reference)
+        try:
+            np.asarray(st.mean)
+        except Exception:
+            pass
+        _sync_tree(jax,gr)
+        tr.append(time.perf_counter()-t)
+
+    report["analytic_expect_and_grad_median_s"]=float(np.median(ta))
+    report["autodiff_expect_and_grad_median_s"]=float(np.median(tr))
+    report["expect_and_grad_speedup"]=float(
+        report["autodiff_expect_and_grad_median_s"]
+        / max(1e-15,report["analytic_expect_and_grad_median_s"])
+    )
+
     print(
         "[analytic logderiv check] "
         f"dE={report['energy_abs_error']:.3e} "
         f"grad_max={report['max_abs_error']:.3e} "
-        f"grad_rel_l2={report['relative_l2_error']:.3e}",
+        f"grad_rel_l2={report['relative_l2_error']:.3e} "
+        f"speedup={report['expect_and_grad_speedup']:.2f}x "
+        f"({report['autodiff_expect_and_grad_median_s']:.3f}s->"
+        f"{report['analytic_expect_and_grad_median_s']:.3f}s)",
         flush=True,
     )
     return report
@@ -1355,6 +1391,9 @@ def _stage(
                     vstate_reference=ref_vstate,
                     H_reference=H_fast,
                     jax=jax,
+                    timing_repeats=max(
+                        1,int(getattr(args,"profile_vmc_repeats",3))
+                    ),
                 )
                 tol=float(
                     getattr(
