@@ -55,6 +55,7 @@ from symmetry_projection import (
 from run_supercell_large import (
     _stage,
     _load_params,
+    _load_params_file,
     _write_csv,
     _current_operators,
 )
@@ -1076,7 +1077,7 @@ def main():
         if a.raw_warmstart_dir is not None:
             warm_text=str(a.raw_warmstart_dir).format(seed=seed)
             warm_dir=Path(warm_text).expanduser().resolve()
-            _,raw_warmstart_params=_load_params(warm_dir)
+            raw_warmstart_params=_load_params_file(warm_dir)
             raw_warmstart_source=str(warm_dir)
             expected_counts=np.asarray(
                 seed_data["occupations_per_k"],int
