@@ -570,6 +570,87 @@ def _mc_order_observables(vstate, g, nf, hi, current_ops):
 
 
 
+def _mc_site_bond_current_fast(
+    vstate,g,fast_map_kernel,chunk_size=None
+):
+    """Fast bond/current map from the validated Woodbury hopping ratios.
+
+    For an edge e=(i,j), the local estimator of <c_i^dag c_j> on a root
+    configuration with i occupied and j empty is exactly the replacement-order
+    ratio returned by the fast local-energy kernel.  The fermionic operator
+    sign is already contained in that ratio.  Thus all edge observables are
+    accumulated from the original MC roots without constructing or evaluating
+    any hopped configurations with full logpsi.
+    """
+    samples=np.asarray(vstate.samples)
+    x=np.asarray(samples,float).reshape((-1,g.Ns))
+    nsamp=len(x)
+    density=np.mean(x,axis=0)
+    edge_i=np.asarray([int(e.i) for e in g.edges],np.int32)
+
+    if chunk_size is None:
+        chunk_size=(
+            int(vstate.chunk_size)
+            if getattr(vstate,"chunk_size",None) is not None
+            else 256
+        )
+    chunk_size=max(1,int(chunk_size))
+
+    rho_sum=np.zeros(len(g.edges),np.complex128)
+    nchunks=(nsamp+chunk_size-1)//chunk_size
+    t0=time.perf_counter()
+    print(
+        "[maps] fast Woodbury bond/current estimator: "
+        f"samples={nsamp} edges={len(g.edges)} chunk={chunk_size} "
+        f"chunks={nchunks}",
+        flush=True,
+    )
+
+    for ichunk,c0 in enumerate(range(0,nsamp,chunk_size),1):
+        c1=min(nsamp,c0+chunk_size)
+        out=fast_map_kernel(
+            vstate.parameters,
+            np.asarray(x[c0:c1],dtype=np.float64),
+        )
+        # diagnostic output:
+        # energy, replacement_ratio, active, src, dst
+        ratio=np.asarray(out[1],np.complex128)
+        active=np.asarray(out[2],bool)
+        src=np.asarray(out[3],np.int32)
+
+        # Existing map convention for rho[e=(i,j)] estimates
+        # <c_i^dag c_j> from root states with i occupied, j empty.  In the
+        # fast kernel those are precisely active proposals with src==i.
+        forward=active & (src==edge_i[None,:])
+        rho_sum += np.sum(
+            np.where(forward,ratio,0.0+0.0j),
+            axis=0,
+        )
+
+        if (
+            ichunk==1
+            or ichunk==nchunks
+            or ichunk % max(1,nchunks//10)==0
+        ):
+            print(
+                f"[maps] fast ratio chunks {ichunk}/{nchunks}",
+                flush=True,
+            )
+
+    rho=rho_sum/float(nsamp)
+    bond=2.0*np.real(rho)
+    current=np.asarray([
+        float((1j*float(g.t[e.kind])*(z-np.conjugate(z))).real)
+        for e,z in zip(g.edges,rho)
+    ])
+    print(
+        f"[maps] fast Woodbury estimator done in "
+        f"{time.perf_counter()-t0:.2f}s",
+        flush=True,
+    )
+    return density,rho,bond,current
+
+
 def _mc_site_bond_current(
     vstate,g,edge_chunk=12,log_chunk_size=None
 ):
@@ -690,7 +771,8 @@ def _mc_density_onepoint_meta(vstate,g):
 
 
 def _save_mc_maps(
-    directory,vstate,g,title,edge_chunk=12,log_chunk_size=None
+    directory,vstate,g,title,edge_chunk=12,log_chunk_size=None,
+    fast_map_kernel=None,fast_map_chunk_size=None,
 ):
     """Save site/bond/current CSVs and a single triptych for a large-system MC state."""
     from plot_saved_state_maps import (
@@ -699,11 +781,25 @@ def _save_mc_maps(
     )
     directory=Path(directory)
     directory.mkdir(parents=True,exist_ok=True)
-    density,rho,bond,current=_mc_site_bond_current(
-        vstate,g,
-        edge_chunk=edge_chunk,
-        log_chunk_size=log_chunk_size,
-    )
+    if fast_map_kernel is not None:
+        density,rho,bond,current=_mc_site_bond_current_fast(
+            vstate,g,fast_map_kernel,
+            chunk_size=fast_map_chunk_size,
+        )
+        map_estimator="rank-3 Woodbury ratios on cached MC roots"
+    else:
+        print(
+            "[maps] using full-logpsi fallback estimator",
+            flush=True,
+        )
+        density,rho,bond,current=_mc_site_bond_current(
+            vstate,g,
+            edge_chunk=edge_chunk,
+            log_chunk_size=log_chunk_size,
+        )
+        map_estimator=(
+            "batched fermion-hop full-logpsi ratios on cached MC samples"
+        )
 
     # Validate the batched fermionic hop/sign convention against NetKet on
     # one representative edge using the exact same cached samples.
@@ -768,7 +864,7 @@ def _save_mc_maps(
         "max_abs_bond_order":float(np.max(np.abs(bond))),
         "max_abs_current":float(np.max(np.abs(current))),
         "n_samples":int(np.asarray(vstate.samples).reshape((-1,g.Ns)).shape[0]),
-        "estimator":"batched fermion-hop wavefunction ratios on cached MC samples",
+        "estimator":map_estimator,
     }
     atomic_json(directory/"map_summary.json",meta)
     return meta
