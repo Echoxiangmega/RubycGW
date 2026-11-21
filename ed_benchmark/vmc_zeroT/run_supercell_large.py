@@ -2586,9 +2586,9 @@ def _stage(
                 return_diagnostics=False,
                 orthonormalize_orbitals=orbital_orthonormalize,
             )
-            if make_maps:
-                # Same exact rank-3 machinery, but retain the per-edge
-                # replacement ratios needed for <c_i^dag c_j>.
+            if make_maps or measure_orders:
+                # Same exact rank-3 machinery, but retain per-edge hopping
+                # ratios needed by bond/current maps and LC observables.
                 fast_map_kernel=make_fast_raw_local_energy_kernel(
                     sc_coords=seed_data["sc_coords"],
                     internal_sites=seed_data["internal_sites"],
@@ -3175,10 +3175,25 @@ def _stage(
             orthonormalize_orbitals=orbital_orthonormalize,
         )
 
+    fast_hopping_data=None
+    if (
+        fast_map_kernel is not None
+        and (measure_orders or make_maps)
+    ):
+        fast_hopping_data=_mc_fast_hopping_data(
+            vstate,g,fast_map_kernel,
+            chunk_size=(
+                None if args.chunk_size is None
+                else int(args.chunk_size)
+            ),
+            show_progress=True,
+        )
+
     tobs=time.perf_counter()
     if measure_orders:
         order_obs=_mc_order_observables(
-            vstate,g,nf,hi,current_ops
+            vstate,g,nf,hi,current_ops,
+            fast_hopping_data=fast_hopping_data,
         )
     else:
         order_obs={}
@@ -3213,6 +3228,7 @@ def _stage(
                 None if args.chunk_size is None
                 else int(args.chunk_size)
             ),
+            fast_hopping_data=fast_hopping_data,
         )
     elif measure_orders:
         # Preserve cheap one-point CO information at scan points where the
@@ -3339,6 +3355,10 @@ def _stage(
         ),
         "time_final_eval_s":float(final_eval_s),
         "time_order_observables_s":float(observable_eval_s),
+        "time_fast_hopping_observables_s":(
+            None if fast_hopping_data is None
+            else float(fast_hopping_data.get("time_s",0.0))
+        ),
         "n_iter":int(n_iter),
         "learning_rate":float(learning_rate),
         "learning_rate_after":(
