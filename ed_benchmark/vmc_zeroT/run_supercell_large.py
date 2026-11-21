@@ -723,6 +723,43 @@ def _mc_fast_hopping_data(
             )
 
     elapsed=time.perf_counter()-t0
+    rho=rho_sum/float(nsamp)
+
+    # Internal orientation/sign check: reconstruct the mean loop-current
+    # channels from the one-body rho values and compare to the direct mean of
+    # the per-sample local-current estimators built from the same ratios.
+    mean_same_from_rho=0.0
+    mean_opp_from_rho=0.0
+    index={
+        tuple(sorted((int(e.i),int(e.j)))):ie
+        for ie,e in enumerate(g.edges)
+    }
+    triangles=[lp for lp in g.cycles() if len(lp)==3]
+    ntri=float(len(triangles))
+    for lp in triangles:
+        sign_ab=1.0 if lp[0]%6<3 else -1.0
+        for i,j in zip(lp,lp[1:]+lp[:1]):
+            e,sgn=g._directed_edge(i,j)
+            ie=index[tuple(sorted((int(e.i),int(e.j))))]
+            z=rho[ie]
+            canonical=float(
+                (1j*float(g.t[e.kind])*(z-np.conjugate(z))).real
+            )
+            contrib=float(sgn)*canonical/float(len(lp))/ntri
+            mean_same_from_rho+=contrib
+            mean_opp_from_rho+=sign_ab*contrib
+    mean_same_loc=float(np.real(np.mean(j_same)))
+    mean_opp_loc=float(np.real(np.mean(j_opp)))
+    check_err=max(
+        abs(mean_same_from_rho-mean_same_loc),
+        abs(mean_opp_from_rho-mean_opp_loc),
+    )
+    if check_err>5e-10:
+        raise RuntimeError(
+            "Fast hopping LC orientation check failed: "
+            f"max error={check_err:.3e}"
+        )
+
     if show_progress:
         print(
             f"[hopping obs] fast Woodbury pass done in {elapsed:.2f}s",
@@ -730,7 +767,7 @@ def _mc_fast_hopping_data(
         )
     return {
         "density":density,
-        "rho":rho_sum/float(nsamp),
+        "rho":rho,
         "J_same_loc":j_same.reshape(leading_shape),
         "J_opposite_loc":j_opp.reshape(leading_shape),
         "time_s":float(elapsed),
