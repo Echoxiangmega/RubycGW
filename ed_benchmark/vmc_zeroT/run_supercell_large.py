@@ -656,6 +656,39 @@ def _mc_site_bond_current(
     return density,rho,bond,current
 
 
+def _mc_density_onepoint_meta(vstate,g):
+    """Cheap one-point density/CO summary without evaluating bond hops."""
+    density=np.mean(
+        np.asarray(vstate.samples,float).reshape((-1,g.Ns)),
+        axis=0,
+    )
+    nc=int(g.num_cells)
+    filling=float(np.mean(density))
+    dcell=density.reshape((nc,6))-filling
+    reps=np.asarray(g.reps,float)
+    qs=np.asarray(g.permitted_momenta(),float)
+    phase=np.exp(
+        -2j*np.pi*np.einsum("qd,cd->qc",qs,reps)
+    )/np.sqrt(float(nc))
+    nq=np.einsum("qc,ca->qa",phase,dcell,optimize=True)
+    co1_sq=np.sum(np.abs(nq)**2,axis=1)/(6.0*nc)
+    ico=int(np.argmax(co1_sq))
+    return {
+        "mean_density":float(np.mean(density)),
+        "density_min":float(np.min(density)),
+        "density_max":float(np.max(density)),
+        "density_rms_modulation":float(np.std(density)),
+        "CO_onepoint_rms":float(np.sqrt(max(0.0,co1_sq[ico]))),
+        "CO_onepoint_q1":float(qs[ico,0]),
+        "CO_onepoint_q2":float(qs[ico,1]),
+        "B_star_mean":None,
+        "max_abs_bond_order":None,
+        "max_abs_current":None,
+        "n_samples":int(len(np.asarray(vstate.samples).reshape((-1,g.Ns)))),
+        "estimator":"density-only one-point summary from cached MC samples",
+    }
+
+
 def _save_mc_maps(
     directory,vstate,g,title,edge_chunk=12,log_chunk_size=None
 ):
@@ -2942,6 +2975,10 @@ def _stage(
                 else int(args.chunk_size)
             ),
         )
+    elif measure_orders:
+        # Preserve cheap one-point CO information at scan points where the
+        # expensive bond/current spatial map is intentionally skipped.
+        map_meta=_mc_density_onepoint_meta(vstate,g)
 
     def _scalar_stat(obj,name):
         try:
