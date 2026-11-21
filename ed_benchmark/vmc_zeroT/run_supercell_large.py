@@ -366,14 +366,12 @@ def _save_params(path,params,seed_data):
     np.savez_compressed(path,**payload)
 
 
-def _load_params(directory):
+def _load_params_file(directory):
+    """Load final_params.npz even if a later map/summary step was interrupted."""
     directory=Path(directory)
     state=directory/"final_params.npz"
-    summary=directory/"summary.json"
-    if not state.exists() or not summary.exists():
-        raise FileNotFoundError(
-            f"Missing saved large-supercell stage: {state} / {summary}"
-        )
+    if not state.exists():
+        raise FileNotFoundError(f"Missing saved parameters: {state}")
     with np.load(state,allow_pickle=False) as z:
         counts=np.asarray(z["occupations_per_k"],int)
         params={
@@ -388,6 +386,17 @@ def _load_params(directory):
                 if "variational_tr_phase" in z.files else None
             ),
         }
+    return params
+
+
+def _load_params(directory):
+    directory=Path(directory)
+    summary=directory/"summary.json"
+    if not summary.exists():
+        raise FileNotFoundError(
+            f"Missing saved large-supercell summary: {summary}"
+        )
+    params=_load_params_file(directory)
     return json.loads(summary.read_text(encoding="utf-8")),params
 
 
