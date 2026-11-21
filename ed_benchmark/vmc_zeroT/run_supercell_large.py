@@ -539,10 +539,48 @@ def _current_operators(hi,g):
     return same,opp,same2,opp2
 
 
-def _mc_order_observables(vstate, g, nf, hi, current_ops):
-    """Evaluate CO and the historical LC channels on the current MCState."""
+def _mc_order_observables(
+    vstate, g, nf, hi, current_ops,
+    fast_hopping_data=None,
+):
+    """Evaluate CO and historical LC channels on the current MCState.
+
+    When fast_hopping_data is available, LC means and second moments come from
+    the exact local-current identity <J^2>=<|J_loc|^2>, avoiding explicit
+    squared-current operators.
+    """
+    import netket as nk
+    import jax.numpy as jnp
+
     samples=np.asarray(vstate.samples)
     out=_charge_structure_from_samples(g,samples,nf)
+
+    if fast_hopping_data is not None:
+        js_loc=jnp.asarray(fast_hopping_data["J_same_loc"])
+        jo_loc=jnp.asarray(fast_hopping_data["J_opposite_loc"])
+        js_stats=nk.stats.statistics(js_loc)
+        jo_stats=nk.stats.statistics(jo_loc)
+        ss_stats=nk.stats.statistics(jnp.abs(js_loc)**2)
+        os_stats=nk.stats.statistics(jnp.abs(jo_loc)**2)
+
+        j_same=float(np.real(js_stats.mean))
+        j_opp=float(np.real(jo_stats.mean))
+        s_same=float(np.real(ss_stats.mean))
+        s_opp=float(np.real(os_stats.mean))
+        out.update({
+            "J_same_mean":j_same,
+            "J_same_mean_error":stats_error(js_stats),
+            "J_opposite_mean":j_opp,
+            "J_opposite_mean_error":stats_error(jo_stats),
+            "S_LC_same":s_same,
+            "S_LC_same_error":stats_error(ss_stats),
+            "S_LC_opposite":s_opp,
+            "S_LC_opposite_error":stats_error(os_stats),
+            "S_LC_same_connected":float(s_same-j_same*j_same),
+            "S_LC_opposite_connected":float(s_opp-j_opp*j_opp),
+            "LC_estimator":"Woodbury J_loc and |J_loc|^2",
+        })
+        return out
 
     same,opp,same2,opp2=current_ops
     sm=vstate.expect(same)
@@ -565,8 +603,10 @@ def _mc_order_observables(vstate, g, nf, hi, current_ops):
         "S_LC_opposite_error":stats_error(os),
         "S_LC_same_connected":float(s_same-j_same*j_same),
         "S_LC_opposite_connected":float(s_opp-j_opp*j_opp),
+        "LC_estimator":"NetKet explicit current and squared-current operators",
     })
     return out
+
 
 
 
