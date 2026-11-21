@@ -355,7 +355,26 @@ def main():
             ),
             "--output",str(point_dir),
         ]
-        cmd.extend(_schedule_args(anchor,a))
+        if interrupted_stage:
+            # Optimisation already finished and final_params.npz was saved.
+            # Re-enter the Raw stage in eval-only mode so we only rebuild the
+            # final statistics/maps/summary instead of training again.
+            cmd.extend([
+                "--raw-iter","0",
+                "--raw-learning-rate",str(a.anchor_lr),
+                "--raw-learning-rate-final",str(a.anchor_lr_mid),
+                "--raw-learning-rate-refine",str(a.anchor_lr_refine),
+                "--raw-lr-switch-iter","1",
+                "--raw-refine-switch-iter","2",
+                "--train-samples-switch-iter","1",
+                "--train-samples-refine-switch-iter","2",
+                "--diag-shift",str(a.anchor_diag),
+                "--diag-shift-mid",str(a.anchor_diag_mid),
+                "--diag-shift-refine",str(a.anchor_diag_refine),
+            ])
+        else:
+            cmd.extend(_schedule_args(anchor,a))
+
         warmstart_stage=None
         if interrupted_stage:
             # Training parameters were already saved before a later
