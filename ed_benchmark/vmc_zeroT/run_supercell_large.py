@@ -561,7 +561,9 @@ def _mc_order_observables(vstate, g, nf, hi, current_ops):
 
 
 
-def _mc_site_bond_current(vstate,g,edge_chunk=12):
+def _mc_site_bond_current(
+    vstate,g,edge_chunk=12,log_chunk_size=None
+):
     """Estimate density, <c_i^dag c_j>, bond order and current from cached MC samples.
 
     Off-diagonal one-body density-matrix elements are evaluated from batched
@@ -569,12 +571,42 @@ def _mc_site_bond_current(vstate,g,edge_chunk=12):
     For rho_ij=<c_i^dag c_j>, sampled configurations with i occupied and j
     empty contribute the ratio psi(x with i->j)/psi(x), including the canonical
     fermionic parity between i and j.
+
+    log_value evaluations are explicitly chunked.  MCState.log_value() itself
+    does not use MCState.chunk_size, and evaluating tens of thousands of
+    backflow-Slater configurations at once can otherwise allocate very large
+    temporary Q_BF/Slater tensors during final map generation.
     """
     samples=np.asarray(vstate.samples)
     x=np.asarray(samples,float).reshape((-1,g.Ns))
     nsamp=len(x)
     density=np.mean(x,axis=0)
-    logx=np.asarray(vstate.log_value(x),np.complex128).reshape(-1)
+
+    if log_chunk_size is None:
+        log_chunk_size=(
+            int(vstate.chunk_size)
+            if getattr(vstate,"chunk_size",None) is not None
+            else 256
+        )
+    log_chunk_size=max(1,int(log_chunk_size))
+
+    def log_value_chunked(configs):
+        configs=np.asarray(configs,float)
+        vals=[]
+        for c0 in range(0,len(configs),log_chunk_size):
+            c1=min(len(configs),c0+log_chunk_size)
+            vals.append(
+                np.asarray(
+                    vstate.log_value(configs[c0:c1]),
+                    np.complex128,
+                ).reshape(-1)
+            )
+        return (
+            np.concatenate(vals)
+            if vals else np.empty((0,),np.complex128)
+        )
+
+    logx=log_value_chunked(x)
     rho=np.zeros(len(g.edges),np.complex128)
 
     for lo in range(0,len(g.edges),max(1,int(edge_chunk))):
@@ -600,7 +632,7 @@ def _mc_site_bond_current(vstate,g,edge_chunk=12):
         if not configs:
             continue
         joined=np.concatenate(configs,axis=0)
-        logp=np.asarray(vstate.log_value(joined),np.complex128).reshape(-1)
+        logp=log_value_chunked(joined)
         off=0
         for ie,valid,sign,nv in meta:
             vals=sign*np.exp(logp[off:off+nv]-logx[valid])
@@ -615,7 +647,9 @@ def _mc_site_bond_current(vstate,g,edge_chunk=12):
     return density,rho,bond,current
 
 
-def _save_mc_maps(directory,vstate,g,title,edge_chunk=12):
+def _save_mc_maps(
+    directory,vstate,g,title,edge_chunk=12,log_chunk_size=None
+):
     """Save site/bond/current CSVs and a single triptych for a large-system MC state."""
     from plot_saved_state_maps import (
         site_positions,edge_segments,export_site_csv,export_bond_csv,
@@ -624,7 +658,9 @@ def _save_mc_maps(directory,vstate,g,title,edge_chunk=12):
     directory=Path(directory)
     directory.mkdir(parents=True,exist_ok=True)
     density,rho,bond,current=_mc_site_bond_current(
-        vstate,g,edge_chunk=edge_chunk
+        vstate,g,
+        edge_chunk=edge_chunk,
+        log_chunk_size=log_chunk_size,
     )
 
     # Validate the batched fermionic hop/sign convention against NetKet on
@@ -2892,6 +2928,10 @@ def _stage(
                 f"{stage_name} | irrep={point_label}"
             ),
             edge_chunk=map_edge_chunk,
+            log_chunk_size=(
+                None if args.chunk_size is None
+                else int(args.chunk_size)
+            ),
         )
 
     def _scalar_stat(obj,name):
