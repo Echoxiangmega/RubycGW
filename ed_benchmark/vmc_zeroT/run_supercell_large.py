@@ -670,7 +670,8 @@ def _mc_fast_hopping_data(
         )
     chunk_size=max(1,int(chunk_size))
 
-    rho_sum=np.zeros(len(g.edges),np.complex128)
+    rho_forward_sum=np.zeros(len(g.edges),np.complex128)
+    rho_reverse_conj_sum=np.zeros(len(g.edges),np.complex128)
     j_same=np.empty(nsamp,np.complex128)
     j_opp=np.empty(nsamp,np.complex128)
     nchunks=(nsamp+chunk_size-1)//chunk_size
@@ -694,8 +695,13 @@ def _mc_fast_hopping_data(
         src=np.asarray(out[3],np.int32)
 
         forward=active & (src==edge_i[None,:])
-        rho_sum += np.sum(
+        reverse=active & ~forward
+        rho_forward_sum += np.sum(
             np.where(forward,ratio,0.0+0.0j),
+            axis=0,
+        )
+        rho_reverse_conj_sum += np.sum(
+            np.where(reverse,np.conjugate(ratio),0.0+0.0j),
             axis=0,
         )
 
@@ -723,7 +729,9 @@ def _mc_fast_hopping_data(
             )
 
     elapsed=time.perf_counter()-t0
-    rho=rho_sum/float(nsamp)
+    rho_forward=rho_forward_sum/float(nsamp)
+    rho_reverse_conj=rho_reverse_conj_sum/float(nsamp)
+    rho=0.5*(rho_forward+rho_reverse_conj)
 
     # Internal orientation/sign check: reconstruct the mean loop-current
     # channels from the one-body rho values and compare to the direct mean of
@@ -768,6 +776,8 @@ def _mc_fast_hopping_data(
     return {
         "density":density,
         "rho":rho,
+        "rho_forward":rho_forward,
+        "rho_reverse_conj":rho_reverse_conj,
         "J_same_loc":j_same.reshape(leading_shape),
         "J_opposite_loc":j_opp.reshape(leading_shape),
         "time_s":float(elapsed),
