@@ -781,6 +781,7 @@ def _save_mc_maps(
     )
     directory=Path(directory)
     directory.mkdir(parents=True,exist_ok=True)
+    t_map_est=time.perf_counter()
     if fast_map_kernel is not None:
         density,rho,bond,current=_mc_site_bond_current_fast(
             vstate,g,fast_map_kernel,
@@ -800,6 +801,7 @@ def _save_mc_maps(
         map_estimator=(
             "batched fermion-hop full-logpsi ratios on cached MC samples"
         )
+    map_estimator_s=time.perf_counter()-t_map_est
 
     # Validate the batched fermionic hop/sign convention against NetKet on
     # one representative edge using the exact same cached samples.
@@ -826,6 +828,7 @@ def _save_mc_maps(
             flush=True,
         )
 
+    t_map_export=time.perf_counter()
     xy,cells=site_positions(g)
     starts,ends,crossed=edge_segments(g,xy,cells)
     export_site_csv(directory/"site_density.csv",g,xy,density)
@@ -865,6 +868,10 @@ def _save_mc_maps(
         "max_abs_current":float(np.max(np.abs(current))),
         "n_samples":int(np.asarray(vstate.samples).reshape((-1,g.Ns)).shape[0]),
         "estimator":map_estimator,
+        "time_map_estimator_s":float(map_estimator_s),
+        "time_map_export_plot_s":float(
+            time.perf_counter()-t_map_export
+        ),
     }
     atomic_json(directory/"map_summary.json",meta)
     return meta
@@ -3247,6 +3254,17 @@ def _stage(
         "maps_saved":bool(make_maps),
         "map_max_abs_current":(
             None if map_meta is None else map_meta["max_abs_current"]
+        ),
+        "map_estimator":(
+            None if map_meta is None else map_meta.get("estimator")
+        ),
+        "time_map_estimator_s":(
+            None if map_meta is None
+            else map_meta.get("time_map_estimator_s")
+        ),
+        "time_map_export_plot_s":(
+            None if map_meta is None
+            else map_meta.get("time_map_export_plot_s")
         ),
         "CO_onepoint_rms":(
             None if map_meta is None else map_meta["CO_onepoint_rms"]
