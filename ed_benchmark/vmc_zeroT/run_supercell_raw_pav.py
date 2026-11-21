@@ -1337,15 +1337,24 @@ def main():
         _write_csv(out/"optimized_branch_summary.csv",optimized_rows)
 
     print("\n[raw branch characterization]")
+
+    def _fmt_num(value,spec=".4g",default=float("nan")):
+        try:
+            if value is None:
+                value=default
+            return format(float(value),spec)
+        except Exception:
+            return format(float(default),spec)
+
     for r in optimized_rows:
         print(
             f" seed={r['seed']:11s} stage={r['stage']:10s} "
             f"phase={r['phase_label']:28s} "
             f"E={r['mc_E']:+.8f} +/- {r['mc_E_error']:.2e} "
-            f"CO1={r.get('CO_onepoint_rms',0.0):.4g} "
-            f"B*={r.get('B_star_mean',0.0):+.4g} "
-            f"Jsame={r.get('J_same_mean',0.0):+.4g} "
-            f"Jopp={r.get('J_opposite_mean',0.0):+.4g}"
+            f"CO1={_fmt_num(r.get('CO_onepoint_rms'))} "
+            f"B*={_fmt_num(r.get('B_star_mean'),'+.4g')} "
+            f"Jsame={_fmt_num(r.get('J_same_mean'),'+.4g')} "
+            f"Jopp={_fmt_num(r.get('J_opposite_mean'),'+.4g')}"
         )
 
     if not a.skip_pav:
