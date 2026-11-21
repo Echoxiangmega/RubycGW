@@ -567,7 +567,18 @@ def _mc_order_observables(
         j_opp=float(np.real(jo_stats.mean))
         s_same=float(np.real(ss_stats.mean))
         s_opp=float(np.real(os_stats.mean))
+
+        # The same Woodbury pass already gives every nearest-neighbour
+        # one-body density-matrix element, so B_star is essentially free even
+        # when the expensive spatial map/plot is skipped.
+        from benchmark_observables import ruby_star_formfactor
+        rho=np.asarray(fast_hopping_data["rho"],np.complex128)
+        bond=2.0*np.real(rho)
+        fstar=np.asarray(ruby_star_formfactor(g),float)
+        bstar=float(np.dot(fstar,bond)/len(g.edges))
+
         out.update({
+            "B_star_mean":bstar,
             "J_same_mean":j_same,
             "J_same_mean_error":stats_error(js_stats),
             "J_opposite_mean":j_opp,
@@ -3471,7 +3482,12 @@ def _stage(
             None if map_meta is None else map_meta["density_rms_modulation"]
         ),
         "B_star_mean":(
-            None if map_meta is None else map_meta["B_star_mean"]
+            (
+                map_meta.get("B_star_mean")
+                if map_meta is not None
+                and map_meta.get("B_star_mean") is not None
+                else order_obs.get("B_star_mean")
+            )
         ),
         **_memory_estimates(vstate.n_parameters,args.n_samples),
     }
