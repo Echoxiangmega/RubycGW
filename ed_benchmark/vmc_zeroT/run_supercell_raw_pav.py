@@ -725,6 +725,12 @@ def parser():
     p.add_argument("--chunk-size",type=int,default=256)
     p.add_argument("--map-edge-chunk",type=int,default=12)
     p.add_argument(
+        "--raw-maps",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save full Raw site/bond/current CSVs and triptych. --no-raw-maps keeps energy/order summaries and final parameters but skips the expensive spatial bond/current map.",
+    )
+    p.add_argument(
         "--lanczos-samples",type=int,default=None,
         help="Samples from the parent-state batch used for 1-step Lanczos moments. Default=--pav-eval-samples; with --skip-pav these are taken directly from Raw.",
     )
@@ -1125,7 +1131,8 @@ def main():
                 train_sweep_size=(
                     a.sweep_size if a.sweep_size is not None else nf
                 ),
-                make_maps=True,map_edge_chunk=a.map_edge_chunk,
+                make_maps=bool(a.raw_maps),
+                map_edge_chunk=a.map_edge_chunk,
                 return_vstate=True,
             )
         else:
@@ -1143,7 +1150,8 @@ def main():
                 n_iter=a.raw_iter,learning_rate=a.raw_learning_rate,
                 args=a,rng_seed=base_seed+1,
                 train_schedule=raw_train_schedule,
-                make_maps=True,map_edge_chunk=a.map_edge_chunk,
+                make_maps=bool(a.raw_maps),
+                map_edge_chunk=a.map_edge_chunk,
                 return_vstate=True,
             )
         raw_row["branch_source"]="Raw"
