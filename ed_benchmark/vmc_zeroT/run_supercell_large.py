@@ -570,23 +570,57 @@ def _mc_order_observables(vstate, g, nf, hi, current_ops):
 
 
 
-def _mc_site_bond_current_fast(
-    vstate,g,fast_map_kernel,chunk_size=None
-):
-    """Fast bond/current map from the validated Woodbury hopping ratios.
+def _current_channel_edge_weights(g):
+    """Canonical-edge coefficients for the historical same/opposite LC channels.
 
-    For an edge e=(i,j), the local estimator of <c_i^dag c_j> on a root
-    configuration with i occupied and j empty is exactly the replacement-order
-    ratio returned by the fast local-energy kernel.  The fermionic operator
-    sign is already contained in that ratio.  Thus all edge observables are
-    accumulated from the original MC roots without constructing or evaluating
-    any hopped configurations with full logpsi.
+    For canonical edge e=(i,j), the returned real weights w satisfy
+        J_loc contribution = 1j * w[e] * dir * ratio[e],
+    where dir=+1 when the root occupied site (fast-kernel src) is e.i and
+    dir=-1 when it is e.j.  The ratio already contains the fermionic sign.
     """
-    samples=np.asarray(vstate.samples)
-    x=np.asarray(samples,float).reshape((-1,g.Ns))
+    nedge=len(g.edges)
+    index={
+        tuple(sorted((int(e.i),int(e.j)))):ie
+        for ie,e in enumerate(g.edges)
+    }
+    same=np.zeros(nedge,float)
+    opp=np.zeros(nedge,float)
+    triangles=[lp for lp in g.cycles() if len(lp)==3]
+    if len(triangles)!=2*g.num_cells:
+        raise RuntimeError(
+            f"Expected {2*g.num_cells} elementary triangles, got {len(triangles)}"
+        )
+    ntri=float(len(triangles))
+    for lp in triangles:
+        sign_ab=1.0 if lp[0]%6<3 else -1.0
+        for i,j in zip(lp,lp[1:]+lp[:1]):
+            e,sgn=g._directed_edge(i,j)
+            if e is None:
+                raise RuntimeError(f"Nonbond triangle edge {i}-{j}")
+            ie=index[tuple(sorted((int(e.i),int(e.j))))]
+            amp=float(g.t[e.kind])/float(len(lp))/ntri
+            same[ie]+=float(sgn)*amp
+            opp[ie]+=sign_ab*float(sgn)*amp
+    return same,opp
+
+
+def _mc_fast_hopping_data(
+    vstate,g,fast_map_kernel,chunk_size=None,show_progress=True
+):
+    """One Woodbury pass producing bond ratios and LC local estimators.
+
+    The same per-edge replacement ratios determine the one-body density matrix
+    and the local estimators of both loop-current channels.  For Hermitian J,
+        <J^2> = < |J_loc|^2 >,
+    so the expensive explicit squared-current operators are unnecessary.
+    """
+    samples_arr=np.asarray(vstate.samples)
+    leading_shape=samples_arr.shape[:-1]
+    x=np.asarray(samples_arr,float).reshape((-1,g.Ns))
     nsamp=len(x)
     density=np.mean(x,axis=0)
     edge_i=np.asarray([int(e.i) for e in g.edges],np.int32)
+    w_same,w_opp=_current_channel_edge_weights(g)
 
     if chunk_size is None:
         chunk_size=(
@@ -597,14 +631,17 @@ def _mc_site_bond_current_fast(
     chunk_size=max(1,int(chunk_size))
 
     rho_sum=np.zeros(len(g.edges),np.complex128)
+    j_same=np.empty(nsamp,np.complex128)
+    j_opp=np.empty(nsamp,np.complex128)
     nchunks=(nsamp+chunk_size-1)//chunk_size
     t0=time.perf_counter()
-    print(
-        "[maps] fast Woodbury bond/current estimator: "
-        f"samples={nsamp} edges={len(g.edges)} chunk={chunk_size} "
-        f"chunks={nchunks}",
-        flush=True,
-    )
+    if show_progress:
+        print(
+            "[hopping obs] fast Woodbury pass: "
+            f"samples={nsamp} edges={len(g.edges)} chunk={chunk_size} "
+            f"chunks={nchunks}",
+            flush=True,
+        )
 
     for ichunk,c0 in enumerate(range(0,nsamp,chunk_size),1):
         c1=min(nsamp,c0+chunk_size)
@@ -612,43 +649,76 @@ def _mc_site_bond_current_fast(
             vstate.parameters,
             np.asarray(x[c0:c1],dtype=np.float64),
         )
-        # diagnostic output:
-        # energy, replacement_ratio, active, src, dst
         ratio=np.asarray(out[1],np.complex128)
         active=np.asarray(out[2],bool)
         src=np.asarray(out[3],np.int32)
 
-        # Existing map convention for rho[e=(i,j)] estimates
-        # <c_i^dag c_j> from root states with i occupied, j empty.  In the
-        # fast kernel those are precisely active proposals with src==i.
         forward=active & (src==edge_i[None,:])
         rho_sum += np.sum(
             np.where(forward,ratio,0.0+0.0j),
             axis=0,
         )
 
-        if (
+        direction=np.where(
+            src==edge_i[None,:],1.0,-1.0
+        )
+        signed_ratio=np.where(
+            active,direction*ratio,0.0+0.0j
+        )
+        j_same[c0:c1]=1j*np.sum(
+            signed_ratio*w_same[None,:],axis=1
+        )
+        j_opp[c0:c1]=1j*np.sum(
+            signed_ratio*w_opp[None,:],axis=1
+        )
+
+        if show_progress and (
             ichunk==1
             or ichunk==nchunks
             or ichunk % max(1,nchunks//10)==0
         ):
             print(
-                f"[maps] fast ratio chunks {ichunk}/{nchunks}",
+                f"[hopping obs] chunks {ichunk}/{nchunks}",
                 flush=True,
             )
 
-    rho=rho_sum/float(nsamp)
+    elapsed=time.perf_counter()-t0
+    if show_progress:
+        print(
+            f"[hopping obs] fast Woodbury pass done in {elapsed:.2f}s",
+            flush=True,
+        )
+    return {
+        "density":density,
+        "rho":rho_sum/float(nsamp),
+        "J_same_loc":j_same.reshape(leading_shape),
+        "J_opposite_loc":j_opp.reshape(leading_shape),
+        "time_s":float(elapsed),
+        "n_samples":int(nsamp),
+        "chunk_size":int(chunk_size),
+    }
+
+
+def _mc_site_bond_current_fast(
+    vstate,g,fast_map_kernel,chunk_size=None,fast_hopping_data=None
+):
+    """Fast bond/current map from the shared Woodbury hopping data."""
+    data=(
+        fast_hopping_data
+        if fast_hopping_data is not None
+        else _mc_fast_hopping_data(
+            vstate,g,fast_map_kernel,chunk_size=chunk_size
+        )
+    )
+    density=np.asarray(data["density"],float)
+    rho=np.asarray(data["rho"],np.complex128)
     bond=2.0*np.real(rho)
     current=np.asarray([
         float((1j*float(g.t[e.kind])*(z-np.conjugate(z))).real)
         for e,z in zip(g.edges,rho)
     ])
-    print(
-        f"[maps] fast Woodbury estimator done in "
-        f"{time.perf_counter()-t0:.2f}s",
-        flush=True,
-    )
     return density,rho,bond,current
+
 
 
 def _mc_site_bond_current(
