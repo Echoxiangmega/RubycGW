@@ -883,6 +883,7 @@ def _mc_density_onepoint_meta(vstate,g):
 def _save_mc_maps(
     directory,vstate,g,title,edge_chunk=12,log_chunk_size=None,
     fast_map_kernel=None,fast_map_chunk_size=None,
+    fast_hopping_data=None,
 ):
     """Save site/bond/current CSVs and a single triptych for a large-system MC state."""
     from plot_saved_state_maps import (
@@ -896,6 +897,7 @@ def _save_mc_maps(
         density,rho,bond,current=_mc_site_bond_current_fast(
             vstate,g,fast_map_kernel,
             chunk_size=fast_map_chunk_size,
+            fast_hopping_data=fast_hopping_data,
         )
         map_estimator="rank-3 Woodbury ratios on cached MC roots"
     else:
