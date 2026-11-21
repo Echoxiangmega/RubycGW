@@ -203,6 +203,10 @@ def parser():
     p.add_argument("--train-samples-late",type=int,default=2048)
     p.add_argument("--train-samples-refine",type=int,default=4096)
     p.add_argument("--eval-samples",type=int,default=8192)
+    p.add_argument(
+        "--maps-every",type=int,default=1,
+        help="Save the expensive full Raw site/bond/current map every N scan points. 1=every V, 0=never. The final V is always mapped when N>0.",
+    )
     p.add_argument("--n-chains",type=int,default=32)
     p.add_argument("--n-discard",type=int,default=16)
     p.add_argument(
@@ -232,6 +236,8 @@ def main():
     values=_build_v_values(a)
     if not values:
         raise ValueError("No V values")
+    if int(a.maps_every)<0:
+        raise ValueError("--maps-every must be >= 0")
 
     nf=6*a.L1*a.L2  # fixed filling = Nf/Ns = 1/3
     ns=18*a.L1*a.L2
@@ -276,6 +282,13 @@ def main():
     rows=[]
     previous_stage=None
     for iv,V in enumerate(values):
+        maps_this_point=(
+            int(a.maps_every)>0
+            and (
+                iv % int(a.maps_every)==0
+                or iv==len(values)-1
+            )
+        )
         point_dir=branch_root/_vtag(V)
         stage_dir=_raw_stage_dir(
             point_dir,a.seed,a.correlator
@@ -294,6 +307,7 @@ def main():
                 "scan_index":iv,
                 "scan_V":float(V),
                 "scan_reused_existing":True,
+                "scan_maps_requested":bool(maps_this_point),
             })
             rows.append(row)
             previous_stage=stage_dir
@@ -347,6 +361,10 @@ def main():
             "--orbital-gauge-fix-interval","20",
             "--no-analytic-logderiv",
             "--no-shared-sr-check",
+            (
+                "--raw-maps"
+                if maps_this_point else "--no-raw-maps"
+            ),
             "--skip-pav","--skip-lanczos",
             "--rng-seed",str(
                 int(a.rng_seed)
@@ -397,6 +415,7 @@ def main():
             "[scan] "
             f"seed={a.seed} V={V:g} "
             f"mode={a.mode} direction={a.direction} "
+            f"maps={'yes' if maps_this_point else 'no'} "
             +(
                 "resume-saved-params"
                 if interrupted_stage
@@ -422,6 +441,7 @@ def main():
             "scan_index":iv,
             "scan_V":float(V),
             "scan_reused_existing":False,
+            "scan_maps_requested":bool(maps_this_point),
             "scan_warmstart_from":(
                 None if warmstart_stage is None
                 else str(warmstart_stage)
