@@ -2443,6 +2443,7 @@ def _stage(
     )
     fast_local_effective=False
     fast_local_error=None
+    fast_map_kernel=None
     H_stage=H_fast
     if fast_local_eligible:
         try:
@@ -2468,6 +2469,24 @@ def _stage(
                 return_diagnostics=False,
                 orthonormalize_orbitals=orbital_orthonormalize,
             )
+            if make_maps:
+                # Same exact rank-3 machinery, but retain the per-edge
+                # replacement ratios needed for <c_i^dag c_j>.
+                fast_map_kernel=make_fast_raw_local_energy_kernel(
+                    sc_coords=seed_data["sc_coords"],
+                    internal_sites=seed_data["internal_sites"],
+                    kpoints=seed_data["kpoints"],
+                    occupations_per_k=seed_data["occupations_per_k"],
+                    shell_matrices=shell_mats,
+                    backflow_matrices=bf_mats,
+                    edge_i=edge_i,
+                    edge_j=edge_j,
+                    edge_t=edge_t,
+                    edge_has_interaction=edge_v,
+                    interaction_V=V,
+                    return_diagnostics=True,
+                    orthonormalize_orbitals=orbital_orthonormalize,
+                )
             FastRawHamiltonian=_fast_raw_operator_class(nk)
             H_stage=FastRawHamiltonian(hi,fast_kernel)
             fast_local_effective=True
@@ -2530,6 +2549,7 @@ def _stage(
                     )
                     H_stage=H_fast
                     fast_local_effective=False
+                    fast_map_kernel=None
                     fast_local_error=msg
                 else:
                     _FAST_LOCAL_GRADIENT_VALIDATED=True
@@ -2539,6 +2559,7 @@ def _stage(
                 fast_local_error=f"gradient validation error: {exc}"
                 H_stage=H_fast
                 fast_local_effective=False
+                fast_map_kernel=None
                 print(
                     "[fast local] gradient validation raised "
                     f"{exc}; falling back to NetKet operator.",
@@ -3067,6 +3088,11 @@ def _stage(
             ),
             edge_chunk=map_edge_chunk,
             log_chunk_size=(
+                None if args.chunk_size is None
+                else int(args.chunk_size)
+            ),
+            fast_map_kernel=fast_map_kernel,
+            fast_map_chunk_size=(
                 None if args.chunk_size is None
                 else int(args.chunk_size)
             ),
