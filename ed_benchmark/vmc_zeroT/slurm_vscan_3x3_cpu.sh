@@ -84,6 +84,11 @@ TRAIN_SAMPLES_LATE="${TRAIN_SAMPLES_LATE:-2048}"
 TRAIN_SAMPLES_REFINE="${TRAIN_SAMPLES_REFINE:-4096}"
 EVAL_SAMPLES="${EVAL_SAMPLES:-8192}"
 
+# 1 = full site/bond/current map at every V.
+# 4 = every fourth scan point, plus the final V.
+# 0 = never generate the expensive full map during the scan.
+MAPS_EVERY="${MAPS_EVERY:-4}"
+
 NCHAINS="${NCHAINS:-32}"
 NDISCARD="${NDISCARD:-16}"
 
@@ -151,6 +156,7 @@ echo "seed              = $SEED"
 echo "L                 = ${L1} x ${L2}"
 echo "V scan            = $V_MIN : $V_STEP : $V_MAX"
 echo "mode/direction    = $MODE / $DIRECTION"
+echo "maps_every        = $MAPS_EVERY"
 echo "cpus_per_task     = ${SLURM_CPUS_PER_TASK:-unknown}"
 echo "conda_env         = $CONDA_ENV"
 echo "output            = $OUT"
@@ -201,6 +207,7 @@ CMD=(
   --train-samples-late "$TRAIN_SAMPLES_LATE"
   --train-samples-refine "$TRAIN_SAMPLES_REFINE"
   --eval-samples "$EVAL_SAMPLES"
+  --maps-every "$MAPS_EVERY"
   --n-chains "$NCHAINS"
   --n-discard "$NDISCARD"
   --sweep-size "$SWEEP_SIZE"
