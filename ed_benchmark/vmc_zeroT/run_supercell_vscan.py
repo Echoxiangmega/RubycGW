@@ -303,6 +303,11 @@ def main():
             )
             continue
 
+        interrupted_stage=(
+            (stage_dir/"final_params.npz").exists()
+            and not (stage_dir/"summary.json").exists()
+        )
+
         anchor=(
             a.mode=="independent"
             or previous_stage is None
@@ -351,20 +356,33 @@ def main():
             "--output",str(point_dir),
         ]
         cmd.extend(_schedule_args(anchor,a))
-        if (
+        warmstart_stage=None
+        if interrupted_stage:
+            # Training parameters were already saved before a later
+            # final-evaluation/map failure.  Reuse them instead of throwing
+            # away the completed optimisation.
+            warmstart_stage=stage_dir
+        elif (
             a.mode=="continuation"
             and previous_stage is not None
         ):
+            warmstart_stage=previous_stage
+
+        if warmstart_stage is not None:
             cmd.extend([
                 "--raw-warmstart-dir",
-                str(previous_stage),
+                str(warmstart_stage),
             ])
 
         print(
             "[scan] "
             f"seed={a.seed} V={V:g} "
             f"mode={a.mode} direction={a.direction} "
-            f"{'anchor' if anchor else 'warm-start'}",
+            +(
+                "resume-saved-params"
+                if interrupted_stage
+                else ("anchor" if anchor else "warm-start")
+            ),
             flush=True,
         )
         print(" ".join(cmd),flush=True)
@@ -386,7 +404,8 @@ def main():
             "scan_V":float(V),
             "scan_reused_existing":False,
             "scan_warmstart_from":(
-                None if anchor else str(previous_stage)
+                None if warmstart_stage is None
+                else str(warmstart_stage)
             ),
         })
         rows.append(row)
