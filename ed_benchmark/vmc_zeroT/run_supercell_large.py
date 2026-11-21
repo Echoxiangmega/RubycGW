@@ -971,13 +971,19 @@ def _save_mc_maps(
         ref_op=_as_fixed_number_fermion_operator(ref_op)
         ref=vstate.expect(ref_op)
         ref_mean=complex(np.asarray(ref.mean))
-        err=abs(rho[0]-ref_mean)
+        rho_check=(
+            complex(np.asarray(fast_hopping_data["rho_forward"])[0])
+            if fast_hopping_data is not None
+            and "rho_forward" in fast_hopping_data
+            else complex(rho[0])
+        )
+        err=abs(rho_check-ref_mean)
         scale=max(1.0,abs(ref_mean))
         if err>5e-7*scale:
             raise RuntimeError(
                 "MC map fermion-hop estimator disagrees with NetKet on the "
-                f"validation edge: rho_fast={rho[0]}, rho_netket={ref_mean}, "
-                f"|diff|={err:.3e}"
+                f"validation edge: rho_fast={rho_check}, "
+                f"rho_netket={ref_mean}, |diff|={err:.3e}"
             )
     except RuntimeError:
         raise
@@ -3195,6 +3201,24 @@ def _stage(
     final_stats=vstate.expect(H_stage)
     final_eval_s=time.perf_counter()-te
 
+    # Persist the completed optimisation before any optional diagnostics or
+    # map/order post-processing.  A later validation/OOM must never discard
+    # hours of converged VMC work.
+    params=extract_supercell_parameters(
+        vstate.parameters,
+        len(seed_data["kpoints"]),
+        occupations_per_k=seed_data["occupations_per_k"],
+    )
+    directory=Path(directory)
+    directory.mkdir(parents=True,exist_ok=True)
+    _save_params(directory/"final_params.npz",params,seed_data)
+    atomic_json(directory/"history.json",_history(log))
+    print(
+        f"[checkpoint] saved final_params.npz before post-processing: "
+        f"{directory}",
+        flush=True,
+    )
+
     if (
         bool(getattr(args,"fast_local_check",False))
         and maps is None
@@ -3247,17 +3271,6 @@ def _stage(
     else:
         order_obs={}
     observable_eval_s=time.perf_counter()-tobs
-
-    params=extract_supercell_parameters(
-        vstate.parameters,
-        len(seed_data["kpoints"]),
-        occupations_per_k=seed_data["occupations_per_k"],
-    )
-
-    directory=Path(directory)
-    directory.mkdir(parents=True,exist_ok=True)
-    _save_params(directory/"final_params.npz",params,seed_data)
-    atomic_json(directory/"history.json",_history(log))
 
     map_meta=None
     if make_maps:
