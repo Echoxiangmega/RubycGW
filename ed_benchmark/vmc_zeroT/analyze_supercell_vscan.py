@@ -165,6 +165,10 @@ def _write_csv(path,rows):
 
 
 def _phase_rows(size_rows,tie_sigma):
+    all_branches={
+        _s(r.get("branch_seed",r.get("seed")))
+        for r in size_rows
+    }
     by_v=defaultdict(list)
     for r in size_rows:
         by_v[round(_f(r.get("scan_V",r.get("V"))),12)].append(r)
@@ -193,6 +197,13 @@ def _phase_rows(size_rows,tie_sigma):
 
         best_seed=_s(best.get("branch_seed",best.get("seed")))
         best_phase=_s(best.get("phase_label"),"unknown")
+        present={
+            _s(r.get("branch_seed",r.get("seed")))
+            for r in candidates
+        }
+        missing=sorted(all_branches-present,key=_branch_sort_key)
+        incomplete=bool(missing)
+        uncertain=bool(uncertain or incomplete)
         out.append({
             "V":V,
             "winner_seed":best_seed,
@@ -206,6 +217,9 @@ def _phase_rows(size_rows,tie_sigma):
             "energy_gap_sigma":sgap,
             "gap_z":z,
             "uncertain":uncertain,
+            "incomplete":incomplete,
+            "n_candidates":len(candidates),
+            "missing_branches":";".join(missing),
             "_winner_row":best,
         })
     return out
