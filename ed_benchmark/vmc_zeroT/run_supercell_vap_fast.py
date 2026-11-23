@@ -422,11 +422,18 @@ def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
         interaction_V=opt.V,return_diagnostics=False,
         orthonormalize_orbitals=orthonormalize,
     )
-    projected_kernel=make_projected_fast_local_energy_kernel(
-        raw_model=base_stage,raw_local_energy_kernel=raw_kernel,
-        site_maps=maps,characters=chars,nf=nf,time_reversal_even=tr,
-        batch_strategy=opt.projected_batch,
-    )
+    fused_parameters=_fused_kwargs(opt,g,nf,seed_data,shells,bfmat,
+                                   maps,chars,tr,orthonormalize)
+    if opt.local_kernel=='fused':
+        training_fused=make_fused_projected_kernel(**fused_parameters,
+                                                 return_currents=False)
+        projected_kernel=training_fused
+    else:
+        projected_kernel=make_projected_fast_local_energy_kernel(
+            raw_model=base_stage,raw_local_energy_kernel=raw_kernel,
+            site_maps=maps,characters=chars,nf=nf,time_reversal_even=tr,
+            batch_strategy=opt.projected_batch,
+        )
     local_check={}
     Hrun=Hstandard
     fast_status='standard'
@@ -550,19 +557,53 @@ def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
         'sweep_size':int(stage_sweep),
         'eval_samples':int(opt.eval_samples),
         'fast_local_status':fast_status,'fast_local_check':local_check,
+        'local_kernel_family':opt.local_kernel,
+        'lc_estimator_requested':opt.lc_estimator,
         'sampler_status':sampler_status,'sampler_check':sampler_report,
         'trainer':trainer,'qr_free_orbitals':not orthonormalize,
         'raw_checkpoint':str(_find_raw_stage(opt)),
     }
+    observable_failure=None
     if opt.observables:
         try:
-            ops=old._current_operators(hi,g)
-            obs=old._mc_order_observables(vstate,g,nf,hi,ops)
+            if opt.lc_estimator=='onehop':
+                observable_kernel=make_fused_projected_kernel(
+                    **fused_parameters,return_currents=True)
+                if opt.check_currents:
+                    candidates=np.asarray(vstate.samples,np.float64).reshape((-1,g.Ns))[:max(8,opt.check_roots*8)]
+                    logs=np.asarray(stage_model.apply({'params':vstate.parameters},candidates))
+                    okay=np.isfinite(np.real(logs)) & (np.real(logs)>np.max(np.real(logs))-45.)
+                    test_roots=candidates[np.flatnonzero(okay)[:opt.check_roots]]
+                    if len(test_roots)<opt.check_roots:
+                        raise RuntimeError('Not enough non-nodal roots to validate LC estimator')
+                    import jax.numpy as jnp
+                    _,j_fast1,j_fast2=observable_kernel(vstate.parameters,jnp.asarray(test_roots))
+                    weights1,weights2=old._current_channel_edge_weights(g)
+                    j_direct=_direct_current_loc(stage_model,vstate.parameters,
+                                                 test_roots,g,weights1,weights2)
+                    currents_err=float(np.max(np.abs(np.column_stack(
+                        (np.asarray(j_fast1),np.asarray(j_fast2)))-j_direct)))
+                    summary['lc_direct_check_max_abs_error']=currents_err
+                    if currents_err>opt.current_tolerance:
+                        raise RuntimeError('Projected one-hop LC orientation/sign mismatch: '
+                                           f'{currents_err:.3e} > {opt.current_tolerance:.3e}')
+                obs=_measure_fused_observables(vstate,g,hi,nf,observable_kernel,
+                                               opt.observable_chunk)
+            else:
+                ops=old._current_operators(hi,g)
+                obs=old._mc_order_observables(vstate,g,nf,hi,ops)
             summary.update(obs)
+            for key in ('S_CO','S_CO_over_Ncell','S_LC_same','S_LC_opposite'):
+                if key not in summary or not np.isfinite(summary[key]):
+                    raise RuntimeError(f'Missing or invalid observable: {key}')
         except Exception as exc:
+            observable_failure=exc
             summary['observables_error']=str(exc)
             print(f'[{stage}/{irrep}] observables failure: {exc}',flush=True)
     _save_params_and_summary(out,result_params,seed_data,summary,old._history(log))
+    if observable_failure is not None and not opt.allow_missing_observables:
+        raise RuntimeError('VAP parameters were saved, but a required structure factor failed; '
+                           'see observables_error in summary.json') from observable_failure
     if progress_file.exists(): progress_file.unlink()
     if progress_params.exists(): progress_params.unlink()
     return summary,result_params
@@ -661,6 +702,8 @@ def parser():
     p.add_argument('--sampler',choices=['standard','projected-cache'],default='projected-cache')
     p.add_argument('--sampler-check-proposals',type=int,default=3)
     p.add_argument('--projected-batch',choices=['scan','flatten'],default='scan')
+    p.add_argument('--local-kernel',choices=['fused','legacy'],default='fused',
+                   help='Fused kernel assembles Q/W/C once; legacy retains old per-image Raw kernel')
     p.add_argument('--fast-local',action=argparse.BooleanOptionalAction,default=True)
     p.add_argument('--check-roots',type=int,default=2)
     p.add_argument('--check-gradient',action=argparse.BooleanOptionalAction,default=False)
@@ -670,6 +713,12 @@ def parser():
     p.add_argument('--qr-free-spatial',action='store_true')
     p.add_argument('--gauge-fix-interval',type=int,default=20)
     p.add_argument('--observables',action=argparse.BooleanOptionalAction,default=True)
+    p.add_argument('--lc-estimator',choices=['onehop','netket'],default='onehop')
+    p.add_argument('--observable-chunk',type=int,default=16)
+    p.add_argument('--check-currents',action=argparse.BooleanOptionalAction,default=True)
+    p.add_argument('--current-tolerance',type=float,default=3e-7)
+    p.add_argument('--allow-missing-observables',action='store_true',
+                   help='Allow missing S in summary; default raises but preserves checkpoint')
     p.add_argument('--resume',action=argparse.BooleanOptionalAction,default=True)
     p.add_argument('--random-seed',type=int,default=2026)
     p.add_argument('--dry-run',action='store_true',help='Validate checkpoint geometry and print plan without starting NetKet')
@@ -681,6 +730,8 @@ def main():
     opt=parser().parse_args()
     if opt.checkpoint_every<1:
         raise ValueError('--checkpoint-every must be >=1')
+    if opt.observable_chunk<1 or opt.check_roots<1:
+        raise ValueError('--observable-chunk and --check-roots must be positive')
     if 'tr' in opt.stages and not opt.restore_tr:
         opt.stages=[s for s in opt.stages if s!='tr']
     if opt.restore_tr and 'tr' in opt.stages and 'spatial' not in opt.stages:
