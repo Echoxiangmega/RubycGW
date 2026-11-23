@@ -664,6 +664,8 @@ def parser():
     p.add_argument('--t',type=float,default=1.0);p.add_argument('--t1',type=float,default=0.5)
     p.add_argument('--t2',type=float,default=-0.5);p.add_argument('--V',type=float,required=True)
     p.add_argument('--seed',required=True)
+    p.add_argument('--seed-amplitude',type=float,default=0.08,
+                   help='Use the same auxiliary seed amplitude as the Raw scan when reconstructing k-block occupation counts.')
     p.add_argument('--raw-stage',type=str,default=None)
     p.add_argument('--scan-root',type=str,default=None)
     p.add_argument('--mode',choices=['continuation','independent'],default='continuation')
@@ -747,7 +749,7 @@ def main():
     g=native_geometry.make_ring3_supercell(opt.L1,opt.L2,
                                             t=opt.t,t1=opt.t1,t2=opt.t2)
     nf=opt.nf or 6*opt.L1*opt.L2
-    seed_data=seed_bloch_blocks(g,nf,opt.L1,opt.L2,opt.seed,0.08,
+    seed_data=seed_bloch_blocks(g,nf,opt.L1,opt.L2,opt.seed,opt.seed_amplitude,
                                 random_seed=opt.random_seed)
     params=_check_checkpoint_compatibility(raw_dir,seed_data,g,nf,opt)
     if np.linalg.norm(np.asarray(seed_data['total_supercell_momentum'])
