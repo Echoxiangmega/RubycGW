@@ -144,7 +144,7 @@ def parse_args(argv: list[str] | None = None):
         "--L1", "--L2", "--nf", "--V", "--V-values", "--V-min",
         "--V-max", "--V-step", "--t", "--t1", "--t2",
         "--raw-stage", "--scan-root", "--output", "--output-root",
-        "--mode", "--direction", "--random-seed", "--dry-run",
+        "--mode", "--direction", "--dry-run",
     }
     for arg in passthrough:
         if arg.split("=", 1)[0] in reserved:
