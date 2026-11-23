@@ -553,10 +553,24 @@ def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
     out.mkdir(parents=True,exist_ok=True)
     old._save_params(out/'final_params.npz',result_params,seed_data)
     print(f'[{stage}/{irrep}] saved checkpoint {out/"final_params.npz"}',flush=True)
+    eval_started=time.perf_counter()
+    print(f'[{stage}/{irrep}] final eval: samples={opt.eval_samples} '
+          f'sampler={sampler_status} local={fast_status} '
+          f'lc_estimator={opt.lc_estimator}',flush=True)
     vstate.n_samples=opt.eval_samples
     vstate.sample()
+    # JAX dispatch is asynchronous; wait so sampling and energy timings
+    # represent real elapsed time instead of just launch overhead.
+    np.asarray(vstate.samples)
+    sampling_elapsed=time.perf_counter()-eval_started
+    print(f'[{stage}/{irrep}] eval sampling done: {sampling_elapsed:.2f}s',flush=True)
+    energy_started=time.perf_counter()
     stat=vstate.expect(Hrun)
+    np.asarray(stat.mean)
+    energy_elapsed=time.perf_counter()-energy_started
+    print(f'[{stage}/{irrep}] eval energy done: {energy_elapsed:.2f}s',flush=True)
     summary={
+
         'stage':stage,'seed':opt.seed,'irrep':irrep,'Ns':g.Ns,'Nf':nf,
         'L1':opt.L1,'L2':opt.L2,'V':opt.V,'t':opt.t,'t1':opt.t1,'t2':opt.t2,
         'n_images':len(maps),'time_reversal_restored':tr,
@@ -575,6 +589,8 @@ def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
         'samples_per_iter':int(opt.samples if stage=='tint' else opt.spatial_samples),
         'sweep_size':int(stage_sweep),
         'eval_samples':int(opt.eval_samples),
+        'time_eval_sampling_s':float(sampling_elapsed),
+        'time_eval_energy_s':float(energy_elapsed),
         'fast_local_status':fast_status,'fast_local_check':local_check,
         'local_kernel_family':opt.local_kernel,
         'lc_estimator_requested':opt.lc_estimator,
@@ -583,7 +599,12 @@ def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
         'raw_checkpoint':str(_find_raw_stage(opt)),
     }
     observable_failure=None
+    obs_started=time.perf_counter()
     if opt.observables:
+        print(f'[{stage}/{irrep}] observable evaluation starts '
+              f'(LC one-hop={opt.lc_estimator=="onehop"}, '
+              f'direct-check={opt.check_currents and opt.lc_estimator=="onehop"})',
+              flush=True)
         try:
             if opt.lc_estimator=='onehop':
                 observable_kernel=make_fused_projected_kernel(
@@ -626,6 +647,15 @@ def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
             observable_failure=exc
             summary['observables_error']=str(exc)
             print(f'[{stage}/{irrep}] observables failure: {exc}',flush=True)
+    obs_elapsed=time.perf_counter()-obs_started
+    eval_elapsed=time.perf_counter()-eval_started
+    summary['time_eval_observables_s']=float(obs_elapsed)
+    summary['time_eval_total_s']=float(eval_elapsed)
+    print(f'[{stage}/{irrep}] eval profile: '
+          f'sampling={sampling_elapsed:.2f}s '
+          f'energy={energy_elapsed:.2f}s '
+          f'obs_including_checks={obs_elapsed:.2f}s '
+          f'total={eval_elapsed:.2f}s',flush=True)
     _save_params_and_summary(out,result_params,seed_data,summary,old._history(log))
     if progress_file.exists(): progress_file.unlink()
     if progress_params.exists(): progress_params.unlink()
