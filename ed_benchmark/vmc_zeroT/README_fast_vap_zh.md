@@ -26,11 +26,11 @@ python ed_benchmark/vmc_zeroT/run_supercell_vap_fast.py \
   --tint-iter 50 --spatial-iter 30 --tr-iter 30 \
   --samples 2048 --spatial-samples 512 --eval-samples 8192 \
   --sampler projected-cache --trainer shared_sr \
-  --fast-local --check-roots 3 --check-gradient \
+  --fast-local --check-woodbury --check-roots 3 --check-gradient \
   --checkpoint-every 10 --strict
 ```
 
-这是**严格验证首轮**（`--strict` 使检查失败时直接报错，不会悄悄使用错误内核）。跑通后如需自动回退到标准 sampler/standard local energy，可去掉 `--strict`。梯度检查很贵，验证通过后，后续扫描可省略 `--check-gradient`（保留默认的 direct-local-energy 根检查）。
+这是**严格验证首轮**（`--strict` 使检查失败时直接报错，不会悄悄使用错误内核）。跑通后如需自动回退到标准 sampler/standard local energy，可去掉 `--strict`。梯度与直接 Woodbury 根检查都比较耗时。验证通过后批量扫描可省略 `--check-gradient` 和 `--check-woodbury`；两者现在默认关闭，不影响 fused Woodbury 加速的使用。
 
 如果所有 Raw 扫描点都在同一个根目录，还可以使用 `--scan-root /scratch/vscan` 代替 `--raw-stage`，脚本按原 `run_supercell_vscan.py` 的目录名自动定位：
 
@@ -68,11 +68,11 @@ python ed_benchmark/vmc_zeroT/run_supercell_vap_fast.py \
 | Shared-SR | 调用已有 `run_supercell_large._make_shared_sr_driver` | 与先前 Raw 扫描的 shared Jacobian 思路一致 |
 | QR | 默认仍按原 VAP 使用 QR，减少数值风险 | `--qr-free-spatial` 为可选实验项，TR 始终使用 QR |
 | TR | 先得到 18 个空间 image 的振幅和 HΨ，再用复共轭组合 | **不重复做另外 18 个 determinants** |
-| 失败处理 | 比较投影高速 local-energy 与完全重新计算 determinant 的标准结果；采样器比较累计 log 概率比值 | 默认回退标准实现；`--strict` 则报错 |
+| 失败处理 | 比较投影高速 local-energy 与完全重新计算 determinant 的标准结果；采样器比较累计 log 概率比值 | 只有启用 `--check-woodbury` 时才做直接能量对照并在失败时回退标准实现；`--strict` 则报错。默认跳过这项验证 |
 
 `projected_batch=scan`（默认）按 image 累加，避免把很大的 `18×batch` 木桶式分配全部摊开。如果显存足够，可尝试 `--projected-batch flatten`，两种路径均在自带测试中验证数学等价。
 
-**验收标准**：首轮 `--strict --check-gradient` 应通过；检查 `summary.json` 的 `fast_local_check.passed=true` 和 `sampler_check.passed=true`，对比旧 VAP 在同一参数、相同 seed 与 MC samples 下的 `mc_E`、结构因子及 `time_per_iteration_s`。正式比较速度时，需要扣除首次 JIT 编译、初始化和最终观测量统计时间。不能根据 18 images 就预设加速倍数。
+**验收标准**：首轮 `--strict --check-woodbury --check-gradient` 应通过；仅在实际启用相应校验时才检查 `summary.json` 的 `fast_local_check.passed=true` 和 `sampler_check.passed=true`，对比旧 VAP 在同一参数、相同 seed 与 MC samples 下的 `mc_E`、结构因子及 `time_per_iteration_s`。正式比较速度时，需要扣除首次 JIT 编译、初始化和最终观测量统计时间。不能根据 18 images 就预设加速倍数。
 
 ## 4. 结果目录
 
@@ -188,8 +188,8 @@ legacy，不可直接用错误的结构因子绘制相图。
 
 默认 --check-currents 仍为 True，现已改为批量而不是每 hopping
 一个 model.apply；可调 --current-check-batch 8。完成代表性计算的
-直接校验后，批量 V 扫描可考虑 --no-check-currents，同时保留
-能量内核的 direct-check（--strict）。
+直接校验后，批量 V 扫描可使用 --no-check-currents，且默认不进行
+Woodbury direct-check。需要重新验证时加 --check-woodbury --strict。
 
 对于 3x3 的多 irrep 扫描，新增：
 
@@ -280,3 +280,28 @@ python ed_benchmark/vmc_zeroT/run_supercell_vap_vscan.py \
 
 纯 Python 逻辑回归测试：
     python ed_benchmark/vmc_zeroT/test_supercell_vap_vscan.py
+
+## 12. 关于对称投影后能量比 Raw 高
+
+令 P 是选定的内部 Gamma/点群 irrep 投影算符。由于 [H,P]=0，
+Raw 波函数分解到不同对称子空间后，其能量是各个投影子空间能量的
+范数平方加权平均。某个被选定的子空间的能量可以比未投影 Raw 高，
+也可以更低，并不违反变分原理。
+
+完整 VAP 对固定 irrep 应比较：
+
+- Raw 的 mc_E、mc_E_error（Hamiltonian、V、尺寸必须一致）；
+- 当前 irrep 的 initial_mc_E（本阶段训练前的投影态能量）；
+- 本阶段优化后的 mc_E、mc_E_error、history.json 能量曲线；
+- A1、A2、E 三个 irrep 各自的结果，以及 TR 前后结果。
+
+不要期望每个 irrep 或每个 TR 投影都单调降低能量。对固定投影 irrep，
+充分优化的最低可能能量不会高于其同一 irrep 的初始投影态能量；
+但是有限步随机 SR 迭代和 MC 误差不保证每次观察到的能量下降。
+若某一扇区明显比 Raw 高很多，可能因为选定的 irrep 与低能态不匹配，
+也可能是投影权重小、采样混合不充分、优化步数不足、学习率不稳定等。
+
+实际结构因子统计必须来自相同的投影态。关闭 Woodbury check 仅节省
+每阶段的 full-determinant 对照，不改变优化波函数和理论能量；
+但也失去每个阶段实时发现内核错误的保险。因此建议在少量代表性
+V/seed/irrep 上保留 --check-woodbury，然后批量扫描关闭。
