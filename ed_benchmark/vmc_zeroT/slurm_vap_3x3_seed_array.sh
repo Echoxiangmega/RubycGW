@@ -72,6 +72,12 @@ NDISCARD="${NDISCARD:-16}"
 TINT_SWEEP="${TINT_SWEEP:-54}"
 SPATIAL_SWEEP="${SPATIAL_SWEEP:-27}"
 SAMPLER_CHECK="${SAMPLER_CHECK:-3}"
+# none: run all irreps; raw: project saved Raw; tint: project Tint-VAP parameters.
+# best: only lowest initial PAV energy; confidence: keep statistical ties.
+IRREP_SCREEN="${IRREP_SCREEN:-none}"
+IRREP_SELECTION="${IRREP_SELECTION:-confidence}"
+SCREEN_SAMPLES="${SCREEN_SAMPLES:-512}"
+SCREEN_KEEP_SIGMA="${SCREEN_KEEP_SIGMA:-3.0}"
 TINT_SAMPLES="${TINT_SAMPLES:-1024}"
 SPATIAL_SAMPLES="${SPATIAL_SAMPLES:-512}"
 EVAL_INTERMEDIATE="${EVAL_INTERMEDIATE:-512}"
@@ -112,6 +118,7 @@ echo "Raw=$RAW_ROOT"
 echo "VAP=$VAP_ROOT"
 echo "sampler=$SAMPLER sweep(Tint/Spatial)=$TINT_SWEEP/$SPATIAL_SWEEP"
 echo "samples(Tint/Spatial)=$TINT_SAMPLES/$SPATIAL_SAMPLES"
+echo "irrep screen=$IRREP_SCREEN selection=$IRREP_SELECTION samples=$SCREEN_SAMPLES keep_sigma=$SCREEN_KEEP_SIGMA"
 echo "iterations(Tint/Spatial/TR)=$TINT_ITER/$SPATIAL_ITER/$TR_ITER"
 echo "================================================================="
 
@@ -127,7 +134,7 @@ CMD=(
   --seed-amplitude "$SEED_AMPLITUDE"
   --random-seed "$RNG_SEED"
   --jastrow-shells "$JASTROW_SHELLS"
-  --irreps A1 A2 E --no-screen-irreps
+  --irreps A1 A2 E
   --restore-tr --stages tint spatial tr
   --tint-iter "$TINT_ITER" --spatial-iter "$SPATIAL_ITER" --tr-iter "$TR_ITER"
   --tint-lr "$TINT_LR" --spatial-lr "$SPATIAL_LR" --tr-lr "$TR_LR"
@@ -146,6 +153,25 @@ CMD=(
   --no-check-woodbury --no-check-gradient --no-check-currents
   --checkpoint-every 5 --resume --strict
 )
+
+case "$IRREP_SCREEN" in
+  none)
+    CMD+=(--no-screen-irreps)
+    ;;
+  raw|tint)
+    CMD+=(
+      --screen-irreps
+      --screen-source "$IRREP_SCREEN"
+      --screen-selection "$IRREP_SELECTION"
+      --screen-samples "$SCREEN_SAMPLES"
+      --screen-keep-sigma "$SCREEN_KEEP_SIGMA"
+    )
+    ;;
+  *)
+    echo "ERROR: IRREP_SCREEN must be none, raw or tint (got $IRREP_SCREEN)" >&2
+    exit 2
+    ;;
+esac
 
 echo "[command]"
 printf ' %q' "${CMD[@]}"
