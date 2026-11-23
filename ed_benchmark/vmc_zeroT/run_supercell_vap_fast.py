@@ -678,25 +678,58 @@ def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
 
 
 
-def _screen_irreps(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,params_tint,output):
-    """Optional PAV energy check per C3v sector (heuristic, not rigorous)."""
+def _screen_irreps(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,params_screen,output,
+                   source='tint'):
+    """PAV screening from the *fixed* Raw or Tint parameters, without SR updates.
+
+    Initial PAV ordering is only a heuristic for final VAP ordering.  The
+    screen_selection='best' option is intentionally an explicit opt-in.
+    """
+    import hashlib
     import jax
     jax.config.update('jax_enable_x64',True)
     import netket as nk
-    path=output/'irrep_pav_screen.json'
+    if source not in ('raw','tint'):
+        raise ValueError(f'Invalid PAV screen source {source}')
+    path=output/('irrep_pav_screen_raw.json' if source=='raw'
+                 else 'irrep_pav_screen.json')
+
+    # Avoid silently reusing a screen computed with different Raw/Tint
+    # parameters, samples, geometry, or selection rules.
+    digest=hashlib.sha256()
+    for block in params_screen['blocks']:
+        data=np.ascontiguousarray(np.asarray(block,dtype=np.complex128))
+        digest.update(str(data.shape).encode('ascii'))
+        digest.update(data.tobytes())
+    for name,dtype in (('v',np.float64),('eta',np.complex128)):
+        data=np.ascontiguousarray(np.asarray(params_screen[name],dtype=dtype))
+        digest.update(name.encode('ascii'))
+        digest.update(data.tobytes())
+    signature={
+        'source':source,'seed':opt.seed,
+        'V':float(opt.V),'L1':int(opt.L1),'L2':int(opt.L2),'nf':int(nf),
+        'irreps_requested':list(opt.irreps),
+        'screen_samples':int(opt.screen_samples),
+        'screen_keep_sigma':float(opt.screen_keep_sigma),
+        'screen_selection':str(opt.screen_selection),
+        'params_sha256':digest.hexdigest(),
+    }
     if opt.resume and path.exists():
         saved=json.loads(path.read_text(encoding='utf-8'))
-        if saved.get('irreps_requested')==opt.irreps:
-            print(f'[resume] loaded irrep PAV screening {path}',flush=True)
+        if all(saved.get(k)==v for k,v in signature.items()):
+            print(f'[resume] loaded {source} PAV screening {path}: '
+                  f'{saved["selected"]}',flush=True)
             return saved['selected']
+    print(f'[PAV screen] source={source} selection={opt.screen_selection} '
+          f'samples={opt.screen_samples} irreps={opt.irreps}',flush=True)
     entries=[]
     for ix,irrep in enumerate(opt.irreps):
         maps,chars=_make_group(g,'spatial',irrep)
         model=build_supercell_netket_model(
-            params_tint['blocks'],seed_data['sc_coords'],
+            params_screen['blocks'],seed_data['sc_coords'],
             seed_data['internal_sites'],seed_data['kpoints'],shells,
             use_jastrow=True,backflow_matrices=bfmat,
-            initial_v=params_tint['v'],initial_eta=params_tint['eta'],
+            initial_v=params_screen['v'],initial_eta=params_screen['eta'],
             point_site_maps=maps,point_characters=chars,
             sparse_correlators=True,packed_orbitals=True,
             orthonormalize_orbitals=True,
@@ -714,14 +747,29 @@ def _screen_irreps(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,params_tin
                         'error':float(stats_error(stat))})
         print('[PAV screen]',entries[-1],flush=True)
     best=min(entries,key=lambda row:row['E'])
-    selected=[]
     for e in entries:
-        combined=np.hypot(e['error'],best['error'])
-        if e['irrep']==best['irrep'] or e['E']-best['E']<=opt.screen_keep_sigma*combined:
-            selected.append(e['irrep'])
-    atomic_json(path,{'irreps_requested':opt.irreps,'entries':entries,
-                      'selected':selected,'screen_keep_sigma':opt.screen_keep_sigma})
-    print(f'[PAV screen] chosen irrep(s) {selected}',flush=True)
+        sigma=float(np.hypot(e['error'],best['error']))
+        e['gap_to_best']=float(e['E']-best['E'])
+        e['gap_in_combined_sigma']=(
+            float((e['E']-best['E'])/sigma) if sigma>0 else None
+        )
+    if opt.screen_selection=='best':
+        selected=[best['irrep']]
+    else:
+        selected=[
+            e['irrep'] for e in entries
+            if e['irrep']==best['irrep']
+            or e['gap_to_best']<=opt.screen_keep_sigma*np.hypot(e['error'],best['error'])
+        ]
+    atomic_json(path,{**signature,'entries':entries,'selected':selected,
+                      'best_initial_irrep':best['irrep'],
+                      'best_initial_E':float(best['E']),
+                      'warning':('Initial PAV is not a proof of the optimal VAP irrep; '
+                                 'near-degenerate or weak-overlap sectors can reorder '
+                                 'after variational optimization.')})
+    print(f'[PAV screen] source={source} initial best={best["irrep"]} '
+          f'E={best["E"]:.6f} +/- {best["error"]:.3g}; '
+          f'selected VAP sector(s)={selected}',flush=True)
     return selected
 
 
@@ -745,6 +793,12 @@ def parser():
     p.add_argument('--screen-irreps',action=argparse.BooleanOptionalAction,default=False,
                    help='Optional PAV pre-screen of selected irreps; may miss sectors that improve under VAP. Disable for final phase diagrams.')
     p.add_argument('--screen-samples',type=int,default=512)
+    p.add_argument('--screen-source',choices=['raw','tint'],default='tint',
+                   help='Use fixed Raw checkpoint or Tint-optimized parameters for PAV irrep screening')
+    p.add_argument('--screen-selection',choices=['confidence','best'],default='confidence',
+                   help='confidence retains statistical ties; best keeps only lowest initial PAV energy')
+    p.add_argument('--screen-only',action='store_true',
+                   help='Evaluate Raw PAV irrep energies, write irrep_pav_screen_raw.json and exit without VAP')
     p.add_argument('--screen-keep-sigma',type=float,default=2.0,
                    help='Retain sectors statistically tied to the best PAV energy')
     p.add_argument('--restore-tr',action='store_true')
@@ -808,6 +862,8 @@ def main():
     opt=parser().parse_args()
     if opt.checkpoint_every<1:
         raise ValueError('--checkpoint-every must be >=1')
+    if opt.screen_only and (not opt.screen_irreps or opt.screen_source!='raw'):
+        raise ValueError('--screen-only requires --screen-irreps --screen-source raw')
     if opt.observable_chunk<1 or opt.check_roots<1 or opt.current_check_batch<1:
         raise ValueError('--observable-chunk, --check-roots and --current-check-batch must be positive')
     if 'tr' in opt.stages and not opt.restore_tr:
@@ -864,6 +920,16 @@ def main():
           'note':'TR-restored structure factors, not one-point phase order, classify finite-size correlations.'}
     atomic_json(output/'run_config.json',meta)
     results=[]
+    raw_screened=None
+    if opt.screen_irreps and opt.screen_source=='raw':
+        raw_screened=_screen_irreps(
+            opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
+            params,output,source='raw',
+        )
+        if opt.screen_only:
+            print('[PAV screen] raw-only screen finished; no VAP training was run.',
+                  flush=True)
+            return
     def load_or_run(stage, irrep, parent, niter, out, offset):
         saved_params=out/'final_params.npz'
         saved_summary=out/'summary.json'
@@ -893,8 +959,10 @@ def main():
             raise FileNotFoundError('Need finished Tint stage to skip --stages tint')
         params_tint=old._load_params_file(tint_dir)
     selected_irreps=(
-        _screen_irreps(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,params_tint,output)
-        if opt.screen_irreps and 'spatial' in opt.stages and len(opt.irreps)>1
+        raw_screened if raw_screened is not None
+        else _screen_irreps(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
+                            params_tint,output,source='tint')
+        if opt.screen_irreps and len(opt.irreps)>1
         else list(opt.irreps)
     )
     for i,ir in enumerate(selected_irreps):
