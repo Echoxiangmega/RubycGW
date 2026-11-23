@@ -553,11 +553,14 @@ def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
     out.mkdir(parents=True,exist_ok=True)
     old._save_params(out/'final_params.npz',result_params,seed_data)
     print(f'[{stage}/{irrep}] saved checkpoint {out/"final_params.npz"}',flush=True)
+    eval_count=int(opt.eval_samples)
+    if stage!='tr' and opt.eval_samples_intermediate is not None:
+        eval_count=int(opt.eval_samples_intermediate)
     eval_started=time.perf_counter()
-    print(f'[{stage}/{irrep}] final eval: samples={opt.eval_samples} '
+    print(f'[{stage}/{irrep}] final eval: samples={eval_count} '
           f'sampler={sampler_status} local={fast_status} '
           f'lc_estimator={opt.lc_estimator}',flush=True)
-    vstate.n_samples=opt.eval_samples
+    vstate.n_samples=eval_count
     vstate.sample()
     # JAX dispatch is asynchronous; wait so sampling and energy timings
     # represent real elapsed time instead of just launch overhead.
@@ -588,7 +591,7 @@ def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
         ),
         'samples_per_iter':int(opt.samples if stage=='tint' else opt.spatial_samples),
         'sweep_size':int(stage_sweep),
-        'eval_samples':int(opt.eval_samples),
+        'eval_samples':int(eval_count),
         'time_eval_sampling_s':float(sampling_elapsed),
         'time_eval_energy_s':float(energy_elapsed),
         'fast_local_status':fast_status,'fast_local_check':local_check,
@@ -746,6 +749,8 @@ def parser():
     p.add_argument('--samples',type=int,default=2048)
     p.add_argument('--spatial-samples',type=int,default=512)
     p.add_argument('--eval-samples',type=int,default=8192)
+    p.add_argument('--eval-samples-intermediate',type=int,default=None,
+                   help='Optional smaller final-eval sample count for Tint/Spatial; TR still uses --eval-samples. All stages use --eval-samples by default.')
     p.add_argument('--n-chains',type=int,default=32)
     p.add_argument('--n-discard',type=int,default=8)
     p.add_argument('--sweep-size',type=int,default=None,help='Tint sweep; default Nf')
@@ -803,6 +808,8 @@ def main():
         opt.spatial_sweep_size=max(2,(6*opt.L1*opt.L2)//4)
     if opt.eval_samples<opt.n_chains or opt.spatial_samples<opt.n_chains:
         raise ValueError('Samples must exceed number of chains')
+    if opt.eval_samples_intermediate is not None and opt.eval_samples_intermediate<opt.n_chains:
+        raise ValueError('--eval-samples-intermediate must be >= --n-chains')
     raw_dir=_find_raw_stage(opt)
     g=native_geometry.make_ring3_supercell(opt.L1,opt.L2,
                                             t=opt.t,t1=opt.t1,t2=opt.t2)
