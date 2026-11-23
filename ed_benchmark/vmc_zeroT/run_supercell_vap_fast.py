@@ -458,11 +458,19 @@ def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
     fast_status='standard'
     if opt.fast_local:
         try:
-            local_check=_test_local_fast(vstate,projected_kernel,g,opt.V,nf,
-                                          nroots=opt.check_roots)
-            print(f'[{stage}/{irrep}] projected Woodbury check: {local_check}',flush=True)
-            if not local_check['passed']:
-                raise RuntimeError('projected local energy != direct determinant recomputation')
+            if opt.check_woodbury:
+                local_check=_test_local_fast(vstate,projected_kernel,g,opt.V,nf,
+                                              nroots=opt.check_roots)
+                local_check['performed']=True
+                print(f'[{stage}/{irrep}] projected Woodbury check: {local_check}',flush=True)
+                if not local_check['passed']:
+                    raise RuntimeError('projected local energy != direct determinant recomputation')
+            else:
+                # Keep the optimized operator, skip only the expensive
+                # direct-determinant recomputation used for validation.
+                local_check={'performed':False,'status':'skipped'}
+                print(f'[{stage}/{irrep}] projected Woodbury direct check skipped '
+                      '(enable with --check-woodbury)',flush=True)
             Hcustom=old._fast_raw_operator_class(nk)
             Hrun=Hcustom(hi,projected_kernel)
             fast_status='projected-woodbury'
@@ -595,6 +603,7 @@ def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
         'time_eval_sampling_s':float(sampling_elapsed),
         'time_eval_energy_s':float(energy_elapsed),
         'fast_local_status':fast_status,'fast_local_check':local_check,
+        'woodbury_check_requested':bool(opt.check_woodbury),
         'local_kernel_family':opt.local_kernel,
         'lc_estimator_requested':opt.lc_estimator,
         'sampler_status':sampler_status,'sampler_check':sampler_report,
@@ -768,6 +777,10 @@ def parser():
     p.add_argument('--local-kernel',choices=['fused','legacy'],default='fused',
                    help='Fused kernel assembles Q/W/C once; legacy retains old per-image Raw kernel')
     p.add_argument('--fast-local',action=argparse.BooleanOptionalAction,default=True)
+    p.add_argument('--check-woodbury',action=argparse.BooleanOptionalAction,
+                   default=False,
+                   help='Verify projected local energy against full determinant recomputation; '
+                        'off by default for production scans, fast Woodbury kernel remains enabled.')
     p.add_argument('--check-roots',type=int,default=2)
     p.add_argument('--check-gradient',action=argparse.BooleanOptionalAction,default=False)
     p.add_argument('--strict',action='store_true',help='Raise instead of fallback if fast path check fails')
