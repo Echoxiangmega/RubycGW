@@ -171,6 +171,14 @@ def _write_csv(path,rows):
 
 
 def _phase_rows(size_rows,tie_sigma):
+    """Assign phases by comparing distinct final physical phases, not seeds.
+
+    Several continuation seeds can converge to the same physical phase.  Such
+    seed-to-seed near-degeneracy is evidence for optimisation consistency, not
+    phase uncertainty.  At each V we therefore first keep only the
+    lowest-energy representative of every final phase_label, and then compare
+    the best and second-best *distinct phases*.
+    """
     all_branches={
         _s(r.get("branch_seed",r.get("seed")))
         for r in size_rows
@@ -182,15 +190,31 @@ def _phase_rows(size_rows,tie_sigma):
     out=[]
     for V in sorted(by_v):
         candidates=sorted(by_v[V],key=lambda r:_f(r.get("mc_E")))
-        best=candidates[0]
-        second=candidates[1] if len(candidates)>1 else None
+
+        by_phase=defaultdict(list)
+        for r in candidates:
+            ph=_s(r.get("phase_label"),"unknown")
+            by_phase[ph].append(r)
+        phase_best={
+            ph:min(rr,key=lambda r:_f(r.get("mc_E")))
+            for ph,rr in by_phase.items()
+        }
+        phase_candidates=sorted(
+            phase_best.values(),key=lambda r:_f(r.get("mc_E"))
+        )
+
+        best=phase_candidates[0]
+        second=phase_candidates[1] if len(phase_candidates)>1 else None
         e1=_f(best.get("mc_E"))
         s1=_f(best.get("mc_E_error"))
+
         if second is None:
             e2=gap=sgap=z=np.nan
             second_seed=""
             second_phase=""
-            uncertain=False
+            # With all expected branches present, seeing only one physical
+            # phase is a definite phase assignment, not a tie.
+            phase_uncertain=False
         else:
             e2=_f(second.get("mc_E"))
             s2=_f(second.get("mc_E_error"))
@@ -199,7 +223,9 @@ def _phase_rows(size_rows,tie_sigma):
             z=gap/sgap if sgap>0 else np.inf
             second_seed=_s(second.get("branch_seed",second.get("seed")))
             second_phase=_s(second.get("phase_label"),"unknown")
-            uncertain=bool(np.isfinite(z) and z<float(tie_sigma))
+            phase_uncertain=bool(
+                np.isfinite(z) and z<float(tie_sigma)
+            )
 
         best_seed=_s(best.get("branch_seed",best.get("seed")))
         best_phase=_s(best.get("phase_label"),"unknown")
@@ -209,7 +235,8 @@ def _phase_rows(size_rows,tie_sigma):
         }
         missing=sorted(all_branches-present,key=_branch_sort_key)
         incomplete=bool(missing)
-        uncertain=bool(uncertain or incomplete)
+        uncertain=bool(phase_uncertain or incomplete)
+
         out.append({
             "V":V,
             "winner_seed":best_seed,
@@ -223,13 +250,14 @@ def _phase_rows(size_rows,tie_sigma):
             "energy_gap_sigma":sgap,
             "gap_z":z,
             "uncertain":uncertain,
+            "phase_uncertain":phase_uncertain,
             "incomplete":incomplete,
             "n_candidates":len(candidates),
+            "n_phases":len(phase_candidates),
             "missing_branches":";".join(missing),
             "_winner_row":best,
         })
     return out
-
 
 def _energy_plot(size_rows,outdir,L1,L2):
     fig,ax=plt.subplots(figsize=(8.5,5.8))
@@ -405,12 +433,21 @@ def _phase_envelope_plot(size_rows,outdir,L1,L2):
             ph:min(rr,key=lambda x:_f(x.get("mc_E")))
             for ph,rr in by_phase.items()
         }
-        emin=min(_f(r.get("mc_E")) for r in phase_best.values())
+        all_best=list(phase_best.values())
+        ref=min(all_best,key=lambda r:_f(r.get("mc_E")))
+        emin=_f(ref.get("mc_E"))
+        sref=_f(ref.get("mc_E_error"))
         for ph,r in phase_best.items():
+            de=_f(r.get("mc_E"))-emin
+            if r is ref:
+                de_err=0.0
+            else:
+                sr=_f(r.get("mc_E_error"))
+                de_err=math.sqrt(max(0.0,sr*sr+sref*sref))
             phase_data[ph].append((
                 V,
-                _f(r.get("mc_E"))-emin,
-                _f(r.get("mc_E_error")),
+                de,
+                de_err,
                 _s(r.get("branch_seed",r.get("seed"))),
             ))
 
