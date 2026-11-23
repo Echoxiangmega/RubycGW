@@ -143,7 +143,7 @@ CMD=(
   --chunk-size "$CHUNK_SIZE" --qgt-chunk "$QGT_CHUNK"
   --observable-chunk "$OBS_CHUNK"
   --fast-local --local-kernel fused --lc-estimator onehop --observables
-  --no-check-gradient --no-check-currents
+  --no-check-woodbury --no-check-gradient --no-check-currents
   --checkpoint-every 5 --resume --strict
 )
 
