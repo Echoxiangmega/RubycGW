@@ -513,12 +513,12 @@ def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
                               'iterations':int(nseg),
                               'seconds':float(segment_seconds),
                               'seconds_per_iteration':float(segment_seconds/nseg)})
-        partial=extract_supercell_parameters(
+        checkpoint_params=extract_supercell_parameters(
             vstate.parameters,len(seed_data['kpoints']),
             occupations_per_k=seed_data['occupations_per_k'],
         )
         out.mkdir(parents=True,exist_ok=True)
-        old._save_params(progress_params,partial,seed_data)
+        old._save_params(progress_params,checkpoint_params,seed_data)
         atomic_json(progress_file,{
             'stage':stage,'irrep':irrep,'L1':opt.L1,'L2':opt.L2,
             'nf':nf,'V':opt.V,'t':opt.t,'t1':opt.t1,'t2':opt.t2,
