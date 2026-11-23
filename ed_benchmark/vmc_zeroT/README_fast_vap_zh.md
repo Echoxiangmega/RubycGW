@@ -168,3 +168,42 @@ symmetry images 下的 hopping 方向；局域能量和 LC local estimator 相�
 实际加速比及大体系数值稳定性仍需在超算节点验证。若接近投影节点或
 单个 image 的 Slater 矩阵严重病态，务必使用严格的数值检查；失败时切回
 legacy，不可直接用错误的结构因子绘制相图。
+
+
+## 10. 3x3 CPU 性能：区分训练和 eval 耗时
+
+训练进度条中的秒/步 **不包含** 最终 Monte Carlo 重新采样与 S 的计算。
+如果采用标准 Metropolis sampler，VAP eval 每个提议需要对投影波函数重新求值；
+这没有获得 Raw 的专用 cached Woodbury sampler 加速。--fast-local 和
+--local-kernel fused 只加速局域能量计算；--lc-estimator onehop 加速 S_LC，
+但不会自动加速标准 sampler。
+
+现在每个阶段会实时打印并写入 summary.json：
+
+- time_eval_sampling_s：vstate.sample() 的真实等待时间；
+- time_eval_energy_s：vstate.expect(Hrun) 的时间（fused Woodbury 或 fallback）；
+- time_current_direct_check_s：独立完全重算 LC 的耗时（若开启检查）；
+- time_eval_observables_s：包含 current check、S_CO、S_LC 的时间；
+- time_eval_total_s：上述 eval 总耗时。
+
+默认 --check-currents 仍为 True，现已改为批量而不是每 hopping
+一个 model.apply；可调 --current-check-batch 8。完成代表性计算的
+直接校验后，批量 V 扫描可考虑 --no-check-currents，同时保留
+能量内核的 direct-check（--strict）。
+
+对于 3x3 的多 irrep 扫描，新增：
+
+    --eval-samples-intermediate 512 --eval-samples 4096
+
+这样 Tint 和 Spatial 阶段只用 512 个最终评估样本，TR 阶段仍用
+4096 个。若不设置 --eval-samples-intermediate，则保持原有行为：
+每个阶段都使用 --eval-samples。粗采样适合筛选、排障，不适合用
+低统计量做最终 S 的有限尺寸外推。
+
+第一次验证 sampler 时使用 --sampler standard；
+确认 projected-cache 的概率比值检查及统计结果后再选择
+--sampler projected-cache。--check-gradient 也可在单个代表性
+参数点充分验证后于整个 scan 中关闭，避免对每个 stage 都做昂贵的
+标准 NetKet 梯度对照。两项检查都是可选诊断，关闭不会改变波函数。
+
+现有正在运行的 Python 进程不会因为修改磁盘代码而自动采用这些改动。
