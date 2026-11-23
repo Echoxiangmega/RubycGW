@@ -16,4 +16,5 @@ python ed_benchmark/vmc_zeroT/run_supercell_vap_fast.py \
   --tint-iter 50 --spatial-iter 30 --tr-iter 30 \
   --samples 2048 --spatial-samples 512 --eval-samples 8192 \
   --checkpoint-every 10 --sampler projected-cache --fast-local \
-  --trainer shared_sr --strict --check-gradient
+  --local-kernel fused --lc-estimator onehop --observable-chunk 16 \
+  --check-currents --trainer shared_sr --strict --check-gradient
