@@ -63,6 +63,7 @@ from projected_fast_kernels import (
     make_projected_fast_local_energy_kernel,
     make_projected_cached_sampler,
 )
+from projected_fused_kernels import make_fused_projected_kernel
 
 
 def _vtag(value):
@@ -231,6 +232,95 @@ def _read_progress_parameters(path):
             'tr_phase':(float(np.asarray(z['variational_tr_phase']))
                         if 'variational_tr_phase' in z.files else None),
         }
+
+
+def _fused_kwargs(opt, g, nf, seed_data, shells, bfmat, maps, chars, tr,
+                  orthonormalize):
+    """Build a single source of truth for energy and LC channel orientation."""
+    w_same, w_opp = old._current_channel_edge_weights(g)
+    return dict(
+        seed_data=seed_data,
+        shell_matrices=shells,
+        backflow_matrices=bfmat,
+        edge_i=np.asarray([e.i for e in g.edges], np.int32),
+        edge_j=np.asarray([e.j for e in g.edges], np.int32),
+        edge_t=np.asarray([g.t[e.kind] for e in g.edges], np.float64),
+        edge_has_interaction=np.asarray([e.kind == 't' for e in g.edges], np.float64),
+        interaction_V=opt.V,
+        site_maps=maps, characters=chars, w_same=w_same, w_opposite=w_opp,
+        time_reversal_even=tr, orthonormalize_orbitals=orthonormalize,
+    )
+
+
+def _direct_current_loc(model, pars, roots, g, w_same, w_opp):
+    """Independent brute-force one-hop current reference (small test batches)."""
+    roots=np.asarray(roots, np.float64)
+    edge_i=np.asarray([e.i for e in g.edges], dtype=int)
+    edge_j=np.asarray([e.j for e in g.edges], dtype=int)
+    # The local estimator of a Hermitian current is generally complex.
+    out=np.empty((len(roots),2), np.complex128)
+    for ib,x in enumerate(roots):
+        log0=complex(np.asarray(model.apply({'params':pars}, x[None,:])).reshape(-1)[0])
+        js=0j;jo=0j
+        for ie,(i,j) in enumerate(zip(edge_i,edge_j)):
+            if x[i]==x[j]:continue
+            src=i if x[i]>0.5 else j
+            sign_dir=1.0 if src==i else -1.0
+            xx=x.copy();xx[i],xx[j]=xx[j],xx[i]
+            log1=complex(np.asarray(model.apply({'params':pars},xx[None,:])).reshape(-1)[0])
+            parity=(-1.0)**int(np.sum(x[min(i,j)+1:max(i,j)]))
+            r=parity*np.exp(log1-log0)
+            js+=1j*w_same[ie]*sign_dir*r
+            jo+=1j*w_opp[ie]*sign_dir*r
+        out[ib,0]=js;out[ib,1]=jo
+    return out
+
+
+def _measure_fused_observables(vstate,g,hi,nf,kernel,chunk):
+    """Evaluate charge S and both LC S via exact one-hop current identity.
+
+    j_loc(x) = <x|J|psi>/<x|psi>. Hermiticity gives:
+       <J^2> = < |j_loc|^2 >_{|psi|^2}
+    with no two-hop NetKet J@J operator and no approximation.
+    """
+    import jax.numpy as jnp
+    import netket as nk
+    samples=np.asarray(vstate.samples)
+    shape=samples.shape[:-1]
+    roots=np.asarray(samples,np.float64).reshape((-1,g.Ns))
+    chunk=max(1,int(chunk))
+    js=np.empty(len(roots),np.complex128)
+    jo=np.empty(len(roots),np.complex128)
+    # Fixed batch shapes prevent repeated JAX compilation for a short tail.
+    for start in range(0,len(roots),chunk):
+        part=roots[start:start+chunk]
+        length=len(part)
+        if length<chunk:
+            part=np.concatenate((part,np.repeat(part[-1:],chunk-length,axis=0)),axis=0)
+        _,x,y=kernel(vstate.parameters,jnp.asarray(part))
+        js[start:start+length]=np.asarray(x)[:length]
+        jo[start:start+length]=np.asarray(y)[:length]
+    sj=nk.stats.statistics(jnp.asarray(js.reshape(shape)))
+    oj=nk.stats.statistics(jnp.asarray(jo.reshape(shape)))
+    sj2=nk.stats.statistics(jnp.asarray((np.abs(js)**2).reshape(shape)))
+    oj2=nk.stats.statistics(jnp.asarray((np.abs(jo)**2).reshape(shape)))
+    a=float(np.real(sj.mean));b=float(np.real(oj.mean))
+    sa=float(np.real(sj2.mean));sb=float(np.real(oj2.mean))
+    out=old._charge_structure_from_samples(g,samples,nf)
+    out.update({
+        'J_same_mean':a,'J_same_mean_error':stats_error(sj),
+        'J_opposite_mean':b,'J_opposite_mean_error':stats_error(oj),
+        'S_LC_same':sa,'S_LC_same_error':stats_error(sj2),
+        'S_LC_opposite':sb,'S_LC_opposite_error':stats_error(oj2),
+        'S_LC_same_connected':float(sa-a*a),
+        'S_LC_opposite_connected':float(sb-b*b),
+        'LC_estimator':'fused-projector one-hop local currents; E[abs(Jloc)^2]',
+        'LC_observable_chunk':int(chunk),
+    })
+    needed=('S_CO','S_CO_over_Ncell','S_LC_same','S_LC_opposite')
+    if not all(np.isfinite(out[k]) for k in needed):
+        raise RuntimeError('Nonfinite structure factor in fused estimator')
+    return out
 
 
 def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
