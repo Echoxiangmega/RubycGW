@@ -334,7 +334,7 @@ def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
     already_done=0
     progress_file=out/'progress.json'
     progress_params=out/'progress_params.npz'
-    if opt.resume and progress_file.exists() and progress_params.exists():
+    if opt.resume and int(n_iter)>0 and progress_file.exists() and progress_params.exists():
         progress=json.loads(progress_file.read_text(encoding='utf-8'))
         signature={'stage':stage,'irrep':irrep,'L1':opt.L1,'L2':opt.L2,
                    'nf':nf,'V':opt.V,'t':opt.t,'t1':opt.t1,'t2':opt.t2}
@@ -601,11 +601,11 @@ def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
             summary['observables_error']=str(exc)
             print(f'[{stage}/{irrep}] observables failure: {exc}',flush=True)
     _save_params_and_summary(out,result_params,seed_data,summary,old._history(log))
+    if progress_file.exists(): progress_file.unlink()
+    if progress_params.exists(): progress_params.unlink()
     if observable_failure is not None and not opt.allow_missing_observables:
         raise RuntimeError('VAP parameters were saved, but a required structure factor failed; '
                            'see observables_error in summary.json') from observable_failure
-    if progress_file.exists(): progress_file.unlink()
-    if progress_params.exists(): progress_params.unlink()
     return summary,result_params
 
 
@@ -785,9 +785,22 @@ def main():
     atomic_json(output/'run_config.json',meta)
     results=[]
     def load_or_run(stage, irrep, parent, niter, out, offset):
-        if opt.resume and (out/'final_params.npz').exists() and (out/'summary.json').exists():
-            print(f'[resume] {stage}/{irrep} from {out}',flush=True)
-            return json.loads((out/'summary.json').read_text(encoding='utf-8')),old._load_params_file(out)
+        saved_params=out/'final_params.npz'
+        saved_summary=out/'summary.json'
+        if opt.resume and saved_params.exists():
+            recovered=old._load_params_file(out)
+            if saved_summary.exists():
+                summary=json.loads(saved_summary.read_text(encoding='utf-8'))
+                needed=('S_CO','S_CO_over_Ncell','S_LC_same','S_LC_opposite')
+                if not opt.observables or (
+                    'observables_error' not in summary
+                    and all(k in summary and np.isfinite(summary[k]) for k in needed)
+                ):
+                    print(f'[resume] {stage}/{irrep} from {out}',flush=True)
+                    return summary,recovered
+            print(f'[resume] {stage}/{irrep} missing observables; evaluating saved parameters without retraining',flush=True)
+            return _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
+                              recovered,stage,irrep,out,opt.random_seed+offset,0)
         return _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
                           parent,stage,irrep,out,opt.random_seed+offset,niter)
 
