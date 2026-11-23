@@ -134,3 +134,37 @@ OPENBLAS_NUM_THREADS=1 python test_projected_kernels.py
 **限制**：本程序的 `Tint` 使用 3 个内部平移的 Γ character `(+1,+1,+1)`。所以即使 `A1 A2 E` 全扫，也并未包括 K/K′ 等非 Γ 平移 character，也没有枚举不同 supercell 总动量。若基态发生不同动量扇区的能级交叉，当前最低 Γ 能量只能作为**受限变分上界**。需要针对非 Γ 建立平移/小群的适当投影及 TR 伴随扇区，不能套用 Γ 下的 A1/A2/E 字符。
 
 此外，`--screen-irreps` 的 PAV 初筛依赖一个固定初始变分态，可能将尚未优化就偏高的 E 等扇区误筛，因此生产级相界附近推荐关闭；少量起始参考态也可能对某一扇区投影权重极低，此时应改换或扰动 Raw 参考态，而不是认定扇区物理上缺失。
+
+## 9. v2 融合 Woodbury 和 LC structure factor
+
+新版额外依赖同目录的 projected_fused_kernels.py。以下参数现在是默认值：
+
+- --local-kernel fused：只构造一次 Bloch orbitals、backflow W 和 Jastrow C，再依次计算每个 symmetry image 的 rank-3 hopping ratios；原有波函数形式不变。
+- --lc-estimator onehop：利用同一批 one-hop ratios 计算复数 J_same_loc 和 J_opposite_loc，再以 <J^2> = <|J_loc|^2> 计算 S_LC；无需构造 J@J。
+- --observable-chunk 16：限制最终 S 计算的 batch；可在 8/16/32 中比较。
+- --check-currents：选取实际采样构型逐个 hopping 重算整个投影波函数，验证 one-hop 电流方向和 TR 奇偶性。
+- --local-kernel legacy 和 --lc-estimator netket：保留以前的两种计算路径，用于公平对照。
+- --allow-missing-observables：仅调试使用，正式相图不要启用。若缺失 S，默认保存最终 checkpoint 和错误诊断后报错；下一次运行从保存参数重新测量 S，不会重复全部优化。
+
+首次运行建议先选 72-site Raw checkpoint，分别使用 5+5+5 步的 Tint、Spatial 和 TR，并启用：
+
+    --irreps A1 A2 E --no-screen-irreps --restore-tr
+    --local-kernel fused --lc-estimator onehop
+    --sampler standard --trainer shared_sr --check-gradient --strict
+
+验证后再测试 --sampler projected-cache。若想比较旧路径，从同一个 Raw checkpoint 在**不同输出目录**重新运行：
+
+    --local-kernel legacy --lc-estimator netket --sampler standard
+
+每阶段 summary.json 和 fast_vap_summary.csv 保存 S_CO、S_CO_over_Ncell、
+S_LC_same、S_LC_opposite、connected 版本、一阶电流及统计误差，以及
+LC_estimator、lc_direct_check_max_abs_error、local_kernel_family、
+time_per_iteration_s、steady_time_per_iteration_s、fast_local_check、sampler_status。
+中途 progress_params.npz 只保存参数与进度，不执行昂贵的 S 测量。
+
+无 NetKet 的纯 JAX 代数测试覆盖 A1/A2/E、TR on/off、多 k blocks、不同
+symmetry images 下的 hopping 方向；局域能量和 LC local estimator 相对
+直接构型求和的最大绝对误差约 3.3e-14。完整 NetKet + SR 的端到端运行、
+实际加速比及大体系数值稳定性仍需在超算节点验证。若接近投影节点或
+单个 image 的 Slater 矩阵严重病态，务必使用严格的数值检查；失败时切回
+legacy，不可直接用错误的结构因子绘制相图。
