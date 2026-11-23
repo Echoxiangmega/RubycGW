@@ -207,3 +207,76 @@ legacy，不可直接用错误的结构因子绘制相图。
 标准 NetKet 梯度对照。两项检查都是可选诊断，关闭不会改变波函数。
 
 现有正在运行的 Python 进程不会因为修改磁盘代码而自动采用这些改动。
+
+
+## 11. 多 seed、多 V：Slurm array 并行运行 Fast-VAP
+
+run_supercell_vap_vscan.py 是**调度程序**，不改变单点 Fast-VAP 的物理求解器。
+slurm_vap_3x3_seed_array.sh 复制之前的 CPU 分区 C064M0256G、Conda 初始化
+和 8 个 seed 的 Slurm 数组提交方式。
+
+**每项 Slurm task 只负责一个 seed**。同一 task 内依次处理各个 V，
+每个 V 都从自己原来的 Raw checkpoint 启动；VAP 参数不会自动跨 V warm-start，
+与原始 Raw continuation 的机制不同。
+
+先更新：
+
+    cd "$HOME/RubycGW"
+    git pull --ff-only origin main
+
+默认脚本 SEEDS 包含 8 个名字，Slurm array 为 0-7。
+测试 4 个 seed、一个 V 时，无需修改脚本：
+
+~~~bash
+cd "$HOME/RubycGW"
+mkdir -p logs
+sbatch --array=0-3 \
+  --export=ALL,VAP_SEEDS="sd isd lc_same lc_opposite",V_MIN=3.6,V_MAX=3.6 \
+  ed_benchmark/vmc_zeroT/slurm_vap_3x3_seed_array.sh
+~~~
+
+原 Raw 扫描的整个 V 区间（大量任务，确认分区时间与资源后再提交）：
+
+~~~bash
+sbatch --array=0-7 \
+  --export=ALL,V_MIN=0.8,V_MAX=4.0,V_STEP=0.1 \
+  ed_benchmark/vmc_zeroT/slurm_vap_3x3_seed_array.sh
+~~~
+
+可通过环境变量修改 sampler、sweep 和优化设置：
+SAMPLER=standard/projected-cache, TINT_SWEEP, SPATIAL_SWEEP,
+TINT_SAMPLES, SPATIAL_SAMPLES, EVAL_INTERMEDIATE, EVAL_SAMPLES,
+TINT_ITER, SPATIAL_ITER, TR_ITER, CHUNK_SIZE, QGT_CHUNK 等。
+
+先检查源文件和生成命令，不启动 NetKet：
+
+~~~bash
+python ed_benchmark/vmc_zeroT/run_supercell_vap_vscan.py \
+  --L1 3 --L2 3 --nf 54 --t 1 --t1 -0.5 --t2 -0.5 \
+  --V-values 3.6 --seeds sd isd lc_same lc_opposite --array-index 0 \
+  --scan-root "$HOME/RubycGW/results/vscan_3x3_down" \
+  --output-root "$HOME/RubycGW/results/vap_3x3_down_array" \
+  --seed-amplitude 0.09 --dry-run
+~~~
+
+输出目录隔离为：
+
+    results/vap_3x3_down_array/
+      L3x3/seed_sd/continuation_down/V_p3p6/
+        fast_tint__Gamma/summary.json
+        fast_spatial__A1/summary.json
+        fast_tr__A1/summary.json
+        ...
+        fast_vap_summary.csv
+
+每个 seed 分支目录保存 vap_scan_settings.json 与 vap_scan_status.csv，
+包括各 V 的 completed、failed 和 missing_raw 状态。
+缺少 Raw checkpoint 默认跳过，若该 seed 没有任何可用 checkpoint，
+则该 task 返回非零；可改用 --missing-raw error 强制立刻终止。
+--keep-going 在某个 VAP 失败后继续其他 V，但最终仍返回非零状态。
+已有阶段的复用由 Fast-VAP 的 --resume 实现。
+注意已完成的结果不会因为增加 --tint-iter 等参数而自动继续训练；
+若要比较不同 sampler/sweep，请使用不同 --output-root。
+
+纯 Python 逻辑回归测试：
+    python ed_benchmark/vmc_zeroT/test_supercell_vap_vscan.py
