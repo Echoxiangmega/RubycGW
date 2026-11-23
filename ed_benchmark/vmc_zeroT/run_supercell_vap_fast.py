@@ -1,0 +1,687 @@
+#!/usr/bin/env python3
+"""Checkpoint-resuming, projected-Woodbury VAP for Ruby 18-site supercells.
+
+Copy BOTH this file and projected_fast_kernels.py into
+RubycGW/ed_benchmark/vmc_zeroT, next to run_supercell_large.py.
+
+Reads EXISTING run_supercell_vscan.py Raw final_params.npz; does not modify it.
+Trains independent Tint, Tint*C3v and optional TR stages and saves compatible
+final_params.npz / summary.json / history.json after EVERY stage.
+
+The projected fast-local energy uses the exact rank-3 Raw Woodbury kernel for
+all symmetry images. Optionally the experimental projected inverse-cache
+sampler shares the same 18 image inverses between accepted Metropolis hops.
+Both optimizations are validated against direct, non-Woodbury amplitudes;
+any failed validation automatically falls back to the standard implementation,
+or raises with --strict.
+
+Example (after copying the files into ed_benchmark/vmc_zeroT):
+  python ed_benchmark/vmc_zeroT/run_supercell_vap_fast.py \\
+    --L1 2 --L2 2 --nf 24 --V 5.5 \\
+    --seed lc_opposite \\
+    --raw-stage /scratch/vscan/L2x2/seed_lc_opposite/continuation_up/V_p5p5/large_raw_backflow__lc_opposite \\
+    --irreps A1 A2 --restore-tr --tint-iter 50 --spatial-iter 30 --tr-iter 30 \\
+    --output /scratch/fast_vap/L2x2/V_p5p5/seed_lc_opposite
+
+Requirements: the SAME original RubycGW checkout and NetKet/JAX environment
+as the Raw scan, SciPy, NumPy, and (for Shared-SR) Optax.
+"""
+from __future__ import annotations
+import argparse
+import csv
+import json
+import sys
+import time
+from functools import partial
+from pathlib import Path
+
+import numpy as np
+
+HERE=Path(__file__).resolve().parent
+REPO=HERE.parents[1]
+NATIVE=REPO/'ed_benchmark'/'native_ed'
+if not NATIVE.is_dir():
+    raise RuntimeError('Place this script at RubycGW/ed_benchmark/vmc_zeroT/')
+sys.path.insert(0,str(NATIVE))
+
+import geometry as native_geometry
+from run_benchmark import atomic_json,make_netket_hamiltonian,stats_error
+from vmc_ansatz import bond_backflow_channels,jastrow_channels
+from supercell_ansatz import (
+    seed_bloch_blocks,build_supercell_netket_model,
+    make_fast_raw_local_energy_kernel,extract_supercell_parameters,
+)
+from symmetry_projection import (
+    internal_translation_site_maps,
+    internal_c3v_space_group_site_maps,
+    internal_gamma_c3v_characters,
+    c3v_irrep_characters,
+)
+import run_supercell_large as old
+from projected_fast_kernels import (
+    check_spatial_maps,
+    make_projected_fast_local_energy_kernel,
+    make_projected_cached_sampler,
+)
+
+
+def _vtag(value):
+    sign='m' if value<0 else 'p'
+    return 'V_'+sign+f'{abs(float(value)):.8f}'.rstrip('0').rstrip('.').replace('.','p')
+
+
+def _find_raw_stage(opt):
+    if opt.raw_stage:
+        p=Path(opt.raw_stage).expanduser().resolve()
+    elif opt.scan_root:
+        p=(Path(opt.scan_root).expanduser().resolve()
+           /f'L{opt.L1}x{opt.L2}'/f'seed_{opt.seed}'
+           /f'{opt.mode}_{opt.direction}'/_vtag(opt.V)
+           /f'large_raw_backflow__{opt.seed}')
+    else:
+        raise ValueError('Provide --raw-stage or --scan-root')
+    if not (p/'final_params.npz').is_file():
+        raise FileNotFoundError(f'Raw checkpoint not found: {p/"final_params.npz"}')
+    return p
+
+
+def _check_checkpoint_compatibility(path,seed_data,g,nf,opt):
+    with np.load(path/'final_params.npz',allow_pickle=False) as z:
+        count=np.asarray(z['occupations_per_k'],int)
+        k=np.asarray(z['kpoints'],float)
+        expected=np.asarray(seed_data['occupations_per_k'],int)
+        if not np.array_equal(count,expected):
+            raise ValueError(f'Occupations per k differ: checkpoint={count}, now={expected}. '
+                             'Do not mix different Bloch sectors or fillings.')
+        if not np.allclose(k,np.asarray(seed_data['kpoints']),atol=1e-13):
+            raise ValueError('Bloch k-point convention differs from saved Raw checkpoint.')
+        for ik,n in enumerate(count):
+            if z[f'variational_M_{ik}'].shape!=(18,int(n)):
+                raise ValueError(f'M_{ik} shape mismatch')
+    # If original summary exists, reject mismatched parameters instead of
+    # silently projecting a state with a different Hamiltonian.
+    meta=path/'summary.json'
+    if meta.exists():
+        d=json.loads(meta.read_text(encoding='utf-8'))
+        for key,expected in [('V',opt.V),('Ns',g.Ns),('Nf',nf)]:
+            if key in d and d[key] is not None and abs(float(d[key])-expected)>1e-10:
+                raise ValueError(f'Raw summary {key}={d[key]} != expected {expected}')
+    return old._load_params_file(path)
+
+
+def _random_fixed_states(ns,nf,n,seed=51):
+    rng=np.random.default_rng(seed)
+    samples=np.zeros((n,ns),np.float64)
+    for row in samples:
+        row[rng.choice(ns,size=nf,replace=False)]=1.0
+    return samples
+
+
+def _direct_local_energy(model,pars,samples,g,V,chunk_size=16):
+    """Independent reference using full recomputed projected logPsi per hop."""
+    states=np.asarray(samples,np.float64)
+    big=[]
+    sizes=[]
+    for x in states:
+        connected=[]
+        for e in g.edges:
+            i,j=int(e.i),int(e.j)
+            if x[i]==x[j]:
+                continue
+            new=x.copy();new[i],new[j]=new[j],new[i]
+            parity=int(np.sum(x[min(i,j)+1:max(i,j)]))%2
+            connected.append((new,float(g.t[e.kind])*(-1.0 if parity else 1.0)))
+        sizes.append(connected)
+    def batch_logs(x):
+        out=[]
+        for pos in range(0,len(x),chunk_size):
+            part=np.asarray(x[pos:pos+chunk_size],np.float64)
+            res=model.apply({'params':pars},part)
+            out.append(np.asarray(res,np.complex128).reshape(-1))
+        return np.concatenate(out)
+    roots=batch_logs(states)
+    ans=[]
+    for row,(x,edges) in enumerate(zip(states,sizes)):
+        diag=sum(V*x[e.i]*x[e.j] for e in g.edges if e.kind=='t')
+        if not edges:
+            ans.append(complex(diag));continue
+        newlog=batch_logs([a for a,b in edges])
+        val=diag+np.sum([amp*np.exp(l-roots[row]) for l,(cfg,amp) in zip(newlog,edges)])
+        ans.append(val)
+    return np.asarray(ans,dtype=np.complex128)
+
+
+def _test_local_fast(vstate,fast_kernel,g,V,nf,*,nroots=3,atol=3e-7,rtol=3e-7):
+    # Reject exact symmetry-projected nodes: local energy is undefined there.
+    candidates=_random_fixed_states(g.Ns,nf,max(8,nroots*8))
+    logs=np.asarray(vstate.model.apply({'params':vstate.parameters},candidates),complex)
+    good=np.isfinite(np.real(logs)) & (np.real(logs)>np.max(np.real(logs))-45.)
+    x=candidates[np.flatnonzero(good)[:nroots]]
+    if len(x)<nroots:
+        raise RuntimeError('Insufficient non-nodal samples for projected local-energy check')
+    t=time.perf_counter()
+    fast=np.asarray(fast_kernel(vstate.parameters,x),np.complex128)
+    direct=_direct_local_energy(vstate.model,vstate.parameters,x,g,V)
+    abs_err=np.abs(fast-direct)
+    rel_err=abs_err/np.maximum(1.,np.abs(direct))
+    report={
+        'max_abs_error':float(abs_err.max()),
+        'max_relative_error':float(rel_err.max()),
+        'nroots':int(nroots),
+        'elapsed_s':time.perf_counter()-t,
+        'passed':bool(np.allclose(fast,direct,atol=atol,rtol=rtol)),
+    }
+    return report
+
+
+def _test_sampler_cache(sampler,vstate,g,nf,*,nprop=3,atol=2e-7):
+    import jax.numpy as jnp
+    rng=np.random.default_rng(917)
+    candidates=_random_fixed_states(g.Ns,nf,32)
+    params=vstate.parameters
+    logs=np.asarray(vstate.model.apply({'params':params},candidates),complex)
+    good=np.isfinite(np.real(logs)) & (np.real(logs)>np.max(np.real(logs))-45.)
+    roots=candidates[np.flatnonzero(good)[:4]]
+    if len(roots)<4:
+        raise RuntimeError('Insufficient non-nodal samples for projected sampler check')
+    cache=sampler._init_fun(params,jnp.asarray(roots))
+    up=jnp.asarray(rng.random((len(roots),nprop)))
+    ua=jnp.asarray(rng.random((len(roots),nprop)))
+    cache1,dlogp,_=sampler._advance_fun(cache,up,ua)
+    final=np.asarray(cache1['x'],np.float64)
+    orig_l=np.asarray(vstate.model.apply({'params':params},roots),complex)
+    final_l=np.asarray(vstate.model.apply({'params':params},final),complex)
+    ref=2*(np.real(final_l)-np.real(orig_l))
+    err=float(np.max(np.abs(np.asarray(dlogp)-ref)))
+    return {'max_log_probability_delta_error':err,'passed':bool(err<atol)}
+
+
+def _make_group(g,stage,irrep):
+    if stage=='tint':
+        ops=internal_translation_site_maps(g)
+        maps=np.asarray([p for _,p in ops],np.int32)
+        chars=np.ones(len(maps),np.complex128)
+    else:
+        ops=internal_c3v_space_group_site_maps(g)
+        maps=np.asarray([p for _,p in ops],np.int32)
+        # E is a two-dimensional C3v irrep.  Its central character projector
+        # selects the entire E *subspace*; it does not choose a particular
+        # component of the doublet.  The common d_E/|G| normalization cancels.
+        if irrep=='E':
+            chars=np.tile(c3v_irrep_characters('E'),3).astype(np.complex128)
+        else:
+            chars=np.asarray(internal_gamma_c3v_characters(irrep),np.complex128)
+    return check_spatial_maps(g,maps,chars,tr_even=(stage=='tr'))
+
+
+def _save_params_and_summary(out,params,seed_data,summary,history):
+    out.mkdir(parents=True,exist_ok=True)
+    old._save_params(out/'final_params.npz',params,seed_data)
+    atomic_json(out/'summary.json',summary)
+    atomic_json(out/'history.json',history)
+
+
+def _read_progress_parameters(path):
+    with np.load(path,allow_pickle=False) as z:
+        counts=np.asarray(z['occupations_per_k'],int)
+        return {
+            'blocks':[np.asarray(z[f'variational_M_{k}'],complex) for k in range(len(counts))],
+            'v':np.asarray(z['variational_v'],float),
+            'eta':np.asarray(z['variational_eta'],complex),
+            'tr_phase':(float(np.asarray(z['variational_tr_phase']))
+                        if 'variational_tr_phase' in z.files else None),
+        }
+
+
+def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
+               initial,stage,irrep,out,rng_seed,n_iter):
+    import jax
+    import jax.numpy as jnp
+    import netket as nk
+    jax.config.update('jax_enable_x64',True)
+    maps,chars=_make_group(g,stage,irrep)
+    tr=(stage=='tr')
+    already_done=0
+    progress_file=out/'progress.json'
+    progress_params=out/'progress_params.npz'
+    if opt.resume and progress_file.exists() and progress_params.exists():
+        progress=json.loads(progress_file.read_text(encoding='utf-8'))
+        signature={'stage':stage,'irrep':irrep,'L1':opt.L1,'L2':opt.L2,
+                   'nf':nf,'V':opt.V,'t':opt.t,'t1':opt.t1,'t2':opt.t2}
+        if any(progress.get(k)!=v for k,v in signature.items()):
+            raise RuntimeError(f'Incomplete checkpoint configuration mismatch: {progress_file}')
+        already_done=int(progress['completed_iterations'])
+        if already_done>int(n_iter):
+            raise RuntimeError('Saved iterations exceed requested target; increase --*-iter')
+        initial=_read_progress_parameters(progress_params)
+        print(f'[resume partial] {stage}/{irrep} start at iteration {already_done}/{n_iter}',flush=True)
+    orthonormalize=(not opt.qr_free_spatial or tr)
+    base_stage=build_supercell_netket_model(
+        initial['blocks'],seed_data['sc_coords'],seed_data['internal_sites'],
+        seed_data['kpoints'],shells,use_jastrow=True,backflow_matrices=bfmat,
+        initial_v=initial.get('v'),initial_eta=initial.get('eta'),
+        sparse_correlators=True,packed_orbitals=True,
+        orthonormalize_orbitals=orthonormalize,
+    )
+    stage_model=build_supercell_netket_model(
+        initial['blocks'],seed_data['sc_coords'],seed_data['internal_sites'],
+        seed_data['kpoints'],shells,use_jastrow=True,backflow_matrices=bfmat,
+        initial_v=initial.get('v'),initial_eta=initial.get('eta'),
+        point_site_maps=maps,point_characters=chars,
+        time_reversal_even=tr,
+        initial_tr_phase=float(initial.get('tr_phase') or 0.0),
+        sparse_correlators=True,packed_orbitals=True,
+        orthonormalize_orbitals=orthonormalize,
+    )
+    clusters=np.asarray([(int(e.i),int(e.j)) for e in g.edges],np.int32)
+    stage_sweep=(opt.sweep_size if stage=='tint' else opt.spatial_sweep_size)
+    sampler_status='standard'
+    sampler_report={}
+    sampler=nk.sampler.MetropolisFermionHop(
+        hi,graph=graph,n_chains=opt.n_chains,sweep_size=stage_sweep,
+    )
+    if opt.sampler=='projected-cache':
+        try:
+            candidate=make_projected_cached_sampler(
+                nk,jax,hilbert=hi,seed_data=seed_data,
+                shell_matrices=shells,backflow_matrices=bfmat,
+                clusters=clusters,site_maps=maps,characters=chars,
+                time_reversal_even=tr,n_chains=opt.n_chains,
+                sweep_size=stage_sweep,chunk_size=None,
+                orthonormalize_orbitals=orthonormalize,
+            )
+            # Validate sampler without trusting its MC samples.
+            probe=nk.vqs.MCState(
+                sampler,stage_model,n_samples=max(32,opt.n_chains),
+                n_discard_per_chain=opt.n_discard,
+                chunk_size=opt.chunk_size,seed=rng_seed,
+                sampler_seed=rng_seed+104729,
+            )
+            sampler_report=_test_sampler_cache(candidate,probe,g,nf,
+                                               nprop=opt.sampler_check_proposals)
+            print(f'[{stage}/{irrep}] projected-cache sampler check: {sampler_report}',flush=True)
+            if not sampler_report['passed']:
+                raise RuntimeError('projected-cache probability-ratio validation failed')
+            sampler=candidate
+            sampler_status='projected-cache'
+            del probe
+        except Exception as exc:
+            if opt.strict:
+                raise
+            sampler_report={'passed':False,'error':str(exc)}
+            print(f'[{stage}/{irrep}] sampler fallback to standard: {exc}',flush=True)
+            sampler=nk.sampler.MetropolisFermionHop(
+                hi,graph=graph,n_chains=opt.n_chains,sweep_size=stage_sweep,
+            )
+
+    vstate=nk.vqs.MCState(
+        sampler,stage_model,n_samples=opt.samples if stage=='tint' else opt.spatial_samples,
+        n_discard_per_chain=opt.n_discard,chunk_size=opt.chunk_size,
+        seed=rng_seed,sampler_seed=rng_seed+104729,
+    )
+    raw_kernel=make_fast_raw_local_energy_kernel(
+        sc_coords=seed_data['sc_coords'],
+        internal_sites=seed_data['internal_sites'],
+        kpoints=seed_data['kpoints'],
+        occupations_per_k=seed_data['occupations_per_k'],
+        shell_matrices=shells,backflow_matrices=bfmat,
+        edge_i=np.asarray([e.i for e in g.edges],np.int32),
+        edge_j=np.asarray([e.j for e in g.edges],np.int32),
+        edge_t=np.asarray([g.t[e.kind] for e in g.edges],float),
+        edge_has_interaction=np.asarray([e.kind=='t' for e in g.edges],float),
+        interaction_V=opt.V,return_diagnostics=False,
+        orthonormalize_orbitals=orthonormalize,
+    )
+    projected_kernel=make_projected_fast_local_energy_kernel(
+        raw_model=base_stage,raw_local_energy_kernel=raw_kernel,
+        site_maps=maps,characters=chars,nf=nf,time_reversal_even=tr,
+        batch_strategy=opt.projected_batch,
+    )
+    local_check={}
+    Hrun=Hstandard
+    fast_status='standard'
+    if opt.fast_local:
+        try:
+            local_check=_test_local_fast(vstate,projected_kernel,g,opt.V,nf,
+                                          nroots=opt.check_roots)
+            print(f'[{stage}/{irrep}] projected Woodbury check: {local_check}',flush=True)
+            if not local_check['passed']:
+                raise RuntimeError('projected local energy != direct determinant recomputation')
+            Hcustom=old._fast_raw_operator_class(nk)
+            Hrun=Hcustom(hi,projected_kernel)
+            fast_status='projected-woodbury'
+        except Exception as exc:
+            if opt.strict:
+                raise
+            local_check={'passed':False,'error':str(exc)}
+            print(f'[{stage}/{irrep}] local-energy fallback to standard: {exc}',flush=True)
+            Hrun=Hstandard
+
+    warm=vstate.expect(Hrun)
+    eval_start=float(np.real(warm.mean))
+    if opt.check_gradient and fast_status=='projected-woodbury':
+        try:
+            check=old._validate_fast_raw_gradient(
+                vstate=vstate,H_reference=Hstandard,
+                H_fast_custom=Hrun,jax=jax,
+            )
+            if check['relative_l2_error']>1e-6 or check['energy_abs_error']>1e-6:
+                raise RuntimeError(f'Projected gradient mismatch: {check}')
+            local_check['gradient']=check
+        except Exception as exc:
+            if opt.strict:
+                raise
+            print(f'[{stage}/{irrep}] gradient test failed; fallback: {exc}',flush=True)
+            Hrun=Hstandard
+            fast_status='standard'
+            local_check['gradient_error']=str(exc)
+
+    optimizer=nk.optimizer.Sgd(learning_rate=float(opt.tint_lr if stage=='tint' else opt.spatial_lr if stage=='spatial' else opt.tr_lr))
+    # This is the same Shared-SR implementation as the Raw scan, now operating
+    # on the projected wavefunction and projected fast-local-energy operator.
+    solver=partial(jax.scipy.sparse.linalg.cg,tol=opt.cg_tol,atol=0.0,maxiter=opt.cg_maxiter)
+    trainer='shared_sr'
+    if opt.trainer=='shared_sr':
+        try:
+            driver=old._make_shared_sr_driver(
+                nk,jax,H=Hrun,optimizer=optimizer,vstate=vstate,
+                diag_shift=opt.diag_shift,solver=solver,
+                chunk_size=opt.qgt_chunk,
+            )
+        except Exception as exc:
+            if opt.strict:raise
+            print(f'[{stage}/{irrep}] Shared-SR failed to initialise: {exc}; legacy SR.',flush=True)
+            trainer='legacy'
+    else:
+        trainer='legacy'
+    if trainer=='legacy':
+        qgt=partial(nk.optimizer.qgt.QGTJacobianPyTree,
+                    mode='complex',chunk_size=opt.qgt_chunk)
+        sr=nk.optimizer.SR(qgt=qgt,solver=solver,diag_shift=opt.diag_shift)
+        driver=nk.driver.VMC(Hrun,optimizer,variational_state=vstate,preconditioner=sr)
+    callback=(old._make_orbital_gauge_fix_callback(
+        nk,seed_data['occupations_per_k'],opt.gauge_fix_interval
+    ) if not orthonormalize else None)
+    log=nk.logging.RuntimeLog()
+    start=time.perf_counter()
+    segment_times=[]
+    done=already_done
+    while done<int(n_iter):
+        nseg=min(int(opt.checkpoint_every),int(n_iter)-done)
+        step_started=time.perf_counter()
+        driver.run(n_iter=nseg,out=log,show_progress=True,callback=callback)
+        segment_seconds=time.perf_counter()-step_started
+        done+=nseg
+        segment_times.append({'end_iteration':int(done),
+                              'iterations':int(nseg),
+                              'seconds':float(segment_seconds),
+                              'seconds_per_iteration':float(segment_seconds/nseg)})
+        partial=extract_supercell_parameters(
+            vstate.parameters,len(seed_data['kpoints']),
+            occupations_per_k=seed_data['occupations_per_k'],
+        )
+        out.mkdir(parents=True,exist_ok=True)
+        old._save_params(progress_params,partial,seed_data)
+        atomic_json(progress_file,{
+            'stage':stage,'irrep':irrep,'L1':opt.L1,'L2':opt.L2,
+            'nf':nf,'V':opt.V,'t':opt.t,'t1':opt.t1,'t2':opt.t2,
+            'completed_iterations':int(done),'target_iterations':int(n_iter),
+        })
+        print(f'[checkpoint] {stage}/{irrep} iterations={done}/{n_iter}',flush=True)
+    elapsed=time.perf_counter()-start
+    # Save BEFORE slow final observable evaluation and maps.
+    result_params=extract_supercell_parameters(
+        vstate.parameters,len(seed_data['kpoints']),
+        occupations_per_k=seed_data['occupations_per_k'],
+    )
+    out.mkdir(parents=True,exist_ok=True)
+    old._save_params(out/'final_params.npz',result_params,seed_data)
+    print(f'[{stage}/{irrep}] saved checkpoint {out/"final_params.npz"}',flush=True)
+    vstate.n_samples=opt.eval_samples
+    vstate.sample()
+    stat=vstate.expect(Hrun)
+    summary={
+        'stage':stage,'seed':opt.seed,'irrep':irrep,'Ns':g.Ns,'Nf':nf,
+        'L1':opt.L1,'L2':opt.L2,'V':opt.V,'t':opt.t,'t1':opt.t1,'t2':opt.t2,
+        'n_images':len(maps),'time_reversal_restored':tr,
+        'mc_E':float(np.real(stat.mean)),
+        'mc_E_error':float(stats_error(stat)),
+        'initial_mc_E':eval_start,
+        'iterations':int(n_iter),
+        'resumed_iterations':int(already_done),
+        'time_training_s':elapsed,
+        'time_per_iteration_s':elapsed/max(int(n_iter)-int(already_done),1),
+        'training_segments':segment_times,
+        'steady_time_per_iteration_s':(
+            float(np.mean([x['seconds_per_iteration'] for x in segment_times[1:]]))
+            if len(segment_times)>1 else None
+        ),
+        'samples_per_iter':int(opt.samples if stage=='tint' else opt.spatial_samples),
+        'sweep_size':int(stage_sweep),
+        'eval_samples':int(opt.eval_samples),
+        'fast_local_status':fast_status,'fast_local_check':local_check,
+        'sampler_status':sampler_status,'sampler_check':sampler_report,
+        'trainer':trainer,'qr_free_orbitals':not orthonormalize,
+        'raw_checkpoint':str(_find_raw_stage(opt)),
+    }
+    if opt.observables:
+        try:
+            ops=old._current_operators(hi,g)
+            obs=old._mc_order_observables(vstate,g,nf,hi,ops)
+            summary.update(obs)
+        except Exception as exc:
+            summary['observables_error']=str(exc)
+            print(f'[{stage}/{irrep}] observables failure: {exc}',flush=True)
+    _save_params_and_summary(out,result_params,seed_data,summary,old._history(log))
+    if progress_file.exists(): progress_file.unlink()
+    if progress_params.exists(): progress_params.unlink()
+    return summary,result_params
+
+
+
+def _screen_irreps(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,params_tint,output):
+    """Optional PAV energy check per C3v sector (heuristic, not rigorous)."""
+    import jax
+    jax.config.update('jax_enable_x64',True)
+    import netket as nk
+    path=output/'irrep_pav_screen.json'
+    if opt.resume and path.exists():
+        saved=json.loads(path.read_text(encoding='utf-8'))
+        if saved.get('irreps_requested')==opt.irreps:
+            print(f'[resume] loaded irrep PAV screening {path}',flush=True)
+            return saved['selected']
+    entries=[]
+    for ix,irrep in enumerate(opt.irreps):
+        maps,chars=_make_group(g,'spatial',irrep)
+        model=build_supercell_netket_model(
+            params_tint['blocks'],seed_data['sc_coords'],
+            seed_data['internal_sites'],seed_data['kpoints'],shells,
+            use_jastrow=True,backflow_matrices=bfmat,
+            initial_v=params_tint['v'],initial_eta=params_tint['eta'],
+            point_site_maps=maps,point_characters=chars,
+            sparse_correlators=True,packed_orbitals=True,
+            orthonormalize_orbitals=True,
+        )
+        sampler=nk.sampler.MetropolisFermionHop(
+            hi,graph=graph,n_chains=opt.n_chains,sweep_size=opt.spatial_sweep_size)
+        vstate=nk.vqs.MCState(
+            sampler,model,n_samples=opt.screen_samples,
+            n_discard_per_chain=opt.n_discard,
+            chunk_size=opt.chunk_size,seed=opt.random_seed+580+ix,
+            sampler_seed=opt.random_seed+104729+580+ix,
+        )
+        stat=vstate.expect(Hstandard)
+        entries.append({'irrep':irrep,'E':float(np.real(stat.mean)),
+                        'error':float(stats_error(stat))})
+        print('[PAV screen]',entries[-1],flush=True)
+    best=min(entries,key=lambda row:row['E'])
+    selected=[]
+    for e in entries:
+        combined=np.hypot(e['error'],best['error'])
+        if e['irrep']==best['irrep'] or e['E']-best['E']<=opt.screen_keep_sigma*combined:
+            selected.append(e['irrep'])
+    atomic_json(path,{'irreps_requested':opt.irreps,'entries':entries,
+                      'selected':selected,'screen_keep_sigma':opt.screen_keep_sigma})
+    print(f'[PAV screen] chosen irrep(s) {selected}',flush=True)
+    return selected
+
+
+def parser():
+    p=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    p.add_argument('--L1',type=int,required=True);p.add_argument('--L2',type=int,required=True)
+    p.add_argument('--nf',type=int,default=None)
+    p.add_argument('--t',type=float,default=1.0);p.add_argument('--t1',type=float,default=0.5)
+    p.add_argument('--t2',type=float,default=-0.5);p.add_argument('--V',type=float,required=True)
+    p.add_argument('--seed',required=True)
+    p.add_argument('--raw-stage',type=str,default=None)
+    p.add_argument('--scan-root',type=str,default=None)
+    p.add_argument('--mode',choices=['continuation','independent'],default='continuation')
+    p.add_argument('--direction',choices=['up','down'],default='up')
+    p.add_argument('--output',type=str,required=True)
+    p.add_argument('--irreps',nargs='+',choices=['A1','A2','E'],
+                   default=['A1','A2','E'],
+                   help='All ordinary C3v irreps at internal Gamma. Does NOT scan finite-momentum sectors.')
+    p.add_argument('--screen-irreps',action=argparse.BooleanOptionalAction,default=False,
+                   help='Optional PAV pre-screen of selected irreps; may miss sectors that improve under VAP. Disable for final phase diagrams.')
+    p.add_argument('--screen-samples',type=int,default=512)
+    p.add_argument('--screen-keep-sigma',type=float,default=2.0,
+                   help='Retain sectors statistically tied to the best PAV energy')
+    p.add_argument('--restore-tr',action='store_true')
+    p.add_argument('--stages',nargs='+',choices=['tint','spatial','tr'],default=['tint','spatial','tr'])
+    p.add_argument('--tint-iter',type=int,default=50)
+    p.add_argument('--spatial-iter',type=int,default=30)
+    p.add_argument('--tr-iter',type=int,default=30)
+    p.add_argument('--tint-lr',type=float,default=0.01)
+    p.add_argument('--spatial-lr',type=float,default=0.01)
+    p.add_argument('--tr-lr',type=float,default=0.01)
+    p.add_argument('--samples',type=int,default=2048)
+    p.add_argument('--spatial-samples',type=int,default=512)
+    p.add_argument('--eval-samples',type=int,default=8192)
+    p.add_argument('--n-chains',type=int,default=32)
+    p.add_argument('--n-discard',type=int,default=8)
+    p.add_argument('--sweep-size',type=int,default=None,help='Tint sweep; default Nf')
+    p.add_argument('--spatial-sweep-size',type=int,default=None,help='Spatial/TR sweep; default Nf//4')
+    p.add_argument('--chunk-size',type=int,default=32,
+                   help='Keep small for projected Woodbury intermediates')
+    p.add_argument('--qgt-chunk',type=int,default=64)
+    p.add_argument('--cg-tol',type=float,default=1e-5)
+    p.add_argument('--cg-maxiter',type=int,default=100)
+    p.add_argument('--diag-shift',type=float,default=0.05)
+    p.add_argument('--trainer',choices=['shared_sr','legacy'],default='shared_sr')
+    p.add_argument('--sampler',choices=['standard','projected-cache'],default='projected-cache')
+    p.add_argument('--sampler-check-proposals',type=int,default=3)
+    p.add_argument('--projected-batch',choices=['scan','flatten'],default='scan')
+    p.add_argument('--fast-local',action=argparse.BooleanOptionalAction,default=True)
+    p.add_argument('--check-roots',type=int,default=2)
+    p.add_argument('--check-gradient',action=argparse.BooleanOptionalAction,default=False)
+    p.add_argument('--strict',action='store_true',help='Raise instead of fallback if fast path check fails')
+    p.add_argument('--checkpoint-every',type=int,default=10,
+                   help='Save per-stage progress after this many VAP iterations')
+    p.add_argument('--qr-free-spatial',action='store_true')
+    p.add_argument('--gauge-fix-interval',type=int,default=20)
+    p.add_argument('--observables',action=argparse.BooleanOptionalAction,default=True)
+    p.add_argument('--resume',action=argparse.BooleanOptionalAction,default=True)
+    p.add_argument('--random-seed',type=int,default=2026)
+    p.add_argument('--dry-run',action='store_true',help='Validate checkpoint geometry and print plan without starting NetKet')
+    p.add_argument('--jastrow-shells',type=int,default=4)
+    return p
+
+
+def main():
+    opt=parser().parse_args()
+    if opt.checkpoint_every<1:
+        raise ValueError('--checkpoint-every must be >=1')
+    if 'tr' in opt.stages and not opt.restore_tr:
+        opt.stages=[s for s in opt.stages if s!='tr']
+    if opt.restore_tr and 'tr' in opt.stages and 'spatial' not in opt.stages:
+        # Allowed only if spatial checkpoint already exists, checked below.
+        pass
+    if opt.sweep_size is None:
+        opt.sweep_size=6*opt.L1*opt.L2
+    if opt.spatial_sweep_size is None:
+        opt.spatial_sweep_size=max(2,(6*opt.L1*opt.L2)//4)
+    if opt.eval_samples<opt.n_chains or opt.spatial_samples<opt.n_chains:
+        raise ValueError('Samples must exceed number of chains')
+    raw_dir=_find_raw_stage(opt)
+    g=native_geometry.make_ring3_supercell(opt.L1,opt.L2,
+                                            t=opt.t,t1=opt.t1,t2=opt.t2)
+    nf=opt.nf or 6*opt.L1*opt.L2
+    seed_data=seed_bloch_blocks(g,nf,opt.L1,opt.L2,opt.seed,0.08,
+                                random_seed=opt.random_seed)
+    params=_check_checkpoint_compatibility(raw_dir,seed_data,g,nf,opt)
+    if np.linalg.norm(np.asarray(seed_data['total_supercell_momentum'])
+                      -np.rint(seed_data['total_supercell_momentum']))>1e-9:
+        raise ValueError('Selected k occupation has non-Gamma total supercell momentum; this Γ-sector projector cannot be used.')
+    print('[symmetry] Screening Gamma internal-translation sector in C3v irreps '+','.join(opt.irreps)+'.',
+          'Finite-momentum sectors are NOT included in this run.',flush=True)
+    if opt.dry_run:
+        print(json.dumps({
+            'raw_checkpoint':str(raw_dir/'final_params.npz'),
+            'output':str(Path(opt.output).expanduser().resolve()),
+            'Ns':int(g.Ns),'Nf':int(nf),
+            'occupations_per_k':np.asarray(seed_data['occupations_per_k'],int).tolist(),
+            'V':float(opt.V),
+            'tint_iter':int(opt.tint_iter),'spatial_iter':int(opt.spatial_iter),
+            'tr_iter':int(opt.tr_iter) if opt.restore_tr else 0,
+            'irreps':list(opt.irreps),
+            'irrep_screening':bool(opt.screen_irreps),
+        },indent=2,ensure_ascii=False))
+        return
+    import jax
+    jax.config.update('jax_enable_x64',True)
+    hi,_,Hstandard,graph=make_netket_hamiltonian(g,nf,opt.V)
+    _,_,shells,_=jastrow_channels(g,mode='bond_aware',n_shells=opt.jastrow_shells)
+    _,bfmat,_=bond_backflow_channels(g)
+    if len(params['v'])!=len(shells):
+        raise ValueError(f'Jastrow channel mismatch {len(params["v"])} vs {len(shells)}')
+    if len(params['eta'])!=len(bfmat):
+        raise ValueError(f'Backflow channel mismatch {len(params["eta"])} vs {len(bfmat)}')
+    output=Path(opt.output).expanduser().resolve()
+    output.mkdir(parents=True,exist_ok=True)
+    meta={'raw_dir':str(raw_dir),'args':vars(opt),
+          'geometry':g.metadata(),
+          'note':'TR-restored structure factors, not one-point phase order, classify finite-size correlations.'}
+    atomic_json(output/'run_config.json',meta)
+    results=[]
+    def load_or_run(stage, irrep, parent, niter, out, offset):
+        if opt.resume and (out/'final_params.npz').exists() and (out/'summary.json').exists():
+            print(f'[resume] {stage}/{irrep} from {out}',flush=True)
+            return json.loads((out/'summary.json').read_text(encoding='utf-8')),old._load_params_file(out)
+        return _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
+                          parent,stage,irrep,out,opt.random_seed+offset,niter)
+
+    tint_dir=output/'fast_tint__Gamma'
+    if 'tint' in opt.stages:
+        row,params_tint=load_or_run('tint','Gamma',params,opt.tint_iter,tint_dir,11)
+        results.append(row)
+    else:
+        if not (tint_dir/'final_params.npz').is_file():
+            raise FileNotFoundError('Need finished Tint stage to skip --stages tint')
+        params_tint=old._load_params_file(tint_dir)
+    selected_irreps=(
+        _screen_irreps(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,params_tint,output)
+        if opt.screen_irreps and 'spatial' in opt.stages and len(opt.irreps)>1
+        else list(opt.irreps)
+    )
+    for i,ir in enumerate(selected_irreps):
+        spatial_dir=output/f'fast_spatial__{ir}'
+        if 'spatial' in opt.stages:
+            row,par_spatial=load_or_run('spatial',ir,params_tint,opt.spatial_iter,spatial_dir,100+17*i)
+            results.append(row)
+        else:
+            if not (spatial_dir/'final_params.npz').is_file():
+                raise FileNotFoundError(f'Need completed Spatial stage for irrep {ir}: {spatial_dir}')
+            par_spatial=old._load_params_file(spatial_dir)
+        if opt.restore_tr and 'tr' in opt.stages:
+            tr_dir=output/f'fast_tr__{ir}'
+            row,_=load_or_run('tr',ir,par_spatial,opt.tr_iter,tr_dir,300+17*i)
+            results.append(row)
+    if results:
+        keys=list(dict.fromkeys(k for item in results for k in item))
+        with (output/'fast_vap_summary.csv').open('w',newline='',encoding='utf-8') as f:
+            writer=csv.DictWriter(f,fieldnames=keys,extrasaction='ignore')
+            writer.writeheader();writer.writerows(results)
+    print('Saved:',output,flush=True)
+
+if __name__=='__main__':
+    main()
