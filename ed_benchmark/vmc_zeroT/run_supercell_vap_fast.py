@@ -710,6 +710,7 @@ def _screen_irreps(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,params_scr
         'V':float(opt.V),'L1':int(opt.L1),'L2':int(opt.L2),'nf':int(nf),
         'irreps_requested':list(opt.irreps),
         'screen_samples':int(opt.screen_samples),
+        'screen_kernel':str(opt.screen_kernel),
         'screen_keep_sigma':float(opt.screen_keep_sigma),
         'screen_selection':str(opt.screen_selection),
         'params_sha256':digest.hexdigest(),
@@ -742,7 +743,26 @@ def _screen_irreps(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,params_scr
             chunk_size=opt.chunk_size,seed=opt.random_seed+580+ix,
             sampler_seed=opt.random_seed+104729+580+ix,
         )
-        stat=vstate.expect(Hstandard)
+        Hscreen=Hstandard
+        if opt.screen_kernel=='fused':
+            kwargs=_fused_kwargs(
+                opt,g,nf,seed_data,shells,bfmat,maps,chars,
+                False,True,
+            )
+            screening_kernel=make_fused_projected_kernel(
+                **kwargs,return_currents=False,
+            )
+            if opt.check_woodbury:
+                check=_test_local_fast(
+                    vstate,screening_kernel,g,opt.V,nf,
+                    nroots=opt.check_roots,
+                )
+                print(f'[PAV screen] {irrep} fused Woodbury validation {check}',
+                      flush=True)
+                if not check['passed']:
+                    raise RuntimeError(f'PAV screening Woodbury failed for {irrep}')
+            Hscreen=old._fast_raw_operator_class(nk)(hi,screening_kernel)
+        stat=vstate.expect(Hscreen)
         energy=float(np.real(stat.mean))
         error=float(stats_error(stat))
         def optional_float(value):
@@ -824,6 +844,8 @@ def parser():
     p.add_argument('--screen-irreps',action=argparse.BooleanOptionalAction,default=False,
                    help='Optional PAV pre-screen of selected irreps; may miss sectors that improve under VAP. Disable for final phase diagrams.')
     p.add_argument('--screen-samples',type=int,default=512)
+    p.add_argument('--screen-kernel',choices=['fused','netket'],default='fused',
+                   help='PAV screening local-energy backend; fused uses fast rank-3 Woodbury')
     p.add_argument('--screen-source',choices=['raw','tint'],default='tint',
                    help='Use fixed Raw checkpoint or Tint-optimized parameters for PAV irrep screening')
     p.add_argument('--screen-selection',choices=['confidence','best'],default='confidence',
