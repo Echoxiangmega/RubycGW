@@ -466,7 +466,18 @@ def cluster_gw_self_energy(
     V_cluster: np.ndarray,
     grid: MatsubaraGrid,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Total local GW self-energy used for SEET-like double counting."""
+    """V-only cluster weak self-energy used for the ED double counting.
+
+    Returns Sigma_H^C + Sigma_F^C + Sigma_corr^C, P_C and W_C. The
+    interaction matrix must contain exactly the six intra-triangle V bonds
+    used by the ED impurity. Here Sigma_F^C_ab = -V_C,ba * rho_C,ab
+    and Sigma_corr^C = -G_C * (W_C - V_C) in the chosen GW convention.
+
+    The lattice Hartree remains separately stored in Sigma_H; subtracting
+    this *total* local weak self-energy and adding the *total* ED self-energy
+    avoids counting the cluster Hartree/Fock diagrams twice. This function
+    is not the projection of the full lattice GW self-energy.
+    """
     Gc = np.asarray(G_cluster, dtype=complex)
     rho = np.asarray(rho_cluster, dtype=complex)
     Vc = np.asarray(V_cluster, dtype=complex)
@@ -485,6 +496,53 @@ def cluster_gw_self_energy(
     sigma_c = compute_sigma_gw_matrix(G5, Wc, cg, backend="direct")[:, 0, 0]
     total = sigma_h[None, ...] + sigma_f[None, ...] + sigma_c
     return total, P[:, 0, 0], W[:, 0, 0]
+
+
+
+def audit_cluster_gw_decomposition(
+    G_cluster: np.ndarray,
+    rho_cluster: np.ndarray,
+    V_cluster: np.ndarray,
+    grid: MatsubaraGrid,
+) -> dict[str, np.ndarray | float]:
+    """Independently audit Hartree/Fock/(W-V) contributions of cluster DC.
+
+    This diagnostic does not enter the production fixed-point map. For the
+    V-only Ruby Hamiltonian, V_cluster is real, symmetric and nonzero only
+    on the six intra-triangle bonds. In this case the Fock reference is
+    exactly -V_cluster.T * rho_cluster (elementwise). A nonzero mismatch
+    signals a density-index or GW bare-interaction bookkeeping error.
+    """
+    rho = np.asarray(rho_cluster, dtype=complex)
+    Vc = np.asarray(V_cluster, dtype=complex)
+    total, P, W = cluster_gw_self_energy(G_cluster, rho, Vc, grid)
+    n = rho.shape[0]
+    if rho.shape != (n, n) or Vc.shape != (n, n):
+        raise ValueError("rho_cluster and V_cluster must be square with matching size")
+    if not np.allclose(Vc, Vc.conj().T):
+        raise ValueError("V_cluster must be Hermitian")
+    cg = MatsubaraGrid(nk1=1, nk2=1, nw=grid.nw, nOmega=grid.nOmega, T=grid.T)
+    sigma_h = hartree_self_energy_matrix(np.real(np.diag(rho)), Vc)
+    sigma_f = compute_static_fock_matrix(
+        rho[None, None], Vc[None, None], cg, backend="direct"
+    )[0, 0]
+    sigma_f_reference = -rho * Vc.T
+    Wc = W[:, None, None] - Vc[None, None, None]
+    sigma_corr = compute_sigma_gw_matrix(
+        np.asarray(G_cluster)[:, None, None], Wc, cg, backend="direct"
+    )[:, 0, 0]
+    reconstruction = sigma_h[None] + sigma_f[None] + sigma_corr
+    return {
+        "hartree": sigma_h,
+        "fock": sigma_f,
+        "fock_reference": sigma_f_reference,
+        "correlation": sigma_corr,
+        "total": total,
+        "fock_error": float(np.max(np.abs(sigma_f - sigma_f_reference))),
+        "reconstruction_error": float(np.max(np.abs(total - reconstruction))),
+        "P": P,
+        "W": W,
+    }
 
 
 def _relative_error(a: np.ndarray, b: np.ndarray) -> float:
@@ -781,5 +839,6 @@ __all__ = [
     "split_static_hybridization",
     "build_impurity_one_body",
     "cluster_gw_self_energy",
+    "audit_cluster_gw_decomposition",
     "solve_cluster_ed_gw",
 ]
