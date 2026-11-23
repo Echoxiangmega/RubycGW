@@ -9,6 +9,12 @@ supercell size:
       All seed/continuation branches E(V) on one axis with MC error bars.
   * energy_relative.png
       E_branch(V)-min_branch E(V), useful for locating crossings.
+  * energy_reference_per_site.png
+      Small branch splittings relative to one fixed reference, in milli-energy/site.
+  * energy_reference_zscore.png
+      The same splittings divided by their combined MC error.
+  * energy_phase_envelopes.png
+      Lowest energy of each final physical phase after merging seed duplicates.
   * phase_diagram.png
       Phase assignment from the lowest-energy optimized branch.  Points where
       the lowest and second-lowest branches differ by less than --tie-sigma
@@ -293,6 +299,142 @@ def _relative_energy_plot(size_rows,outdir,L1,L2):
     fig.savefig(outdir/"energy_relative.png",dpi=220)
     plt.close(fig)
 
+
+
+def _reference_energy_plots(size_rows,outdir,L1,L2,reference="normal"):
+    """Plot branch energy differences to one fixed reference branch.
+
+    Error bars are propagated for the difference assuming independent final
+    MC evaluations.  A companion z-score plot shows whether differences are
+    statistically resolved.
+    """
+    by_branch_v=defaultdict(dict)
+    for r in size_rows:
+        b=_s(r.get("branch_seed",r.get("seed")))
+        V=round(_f(r.get("scan_V",r.get("V"))),12)
+        by_branch_v[b][V]=r
+
+    if reference not in by_branch_v:
+        branches=sorted(by_branch_v,key=_branch_sort_key)
+        if not branches:
+            return
+        reference=branches[0]
+
+    branches=sorted(by_branch_v,key=_branch_sort_key)
+    fig,ax=plt.subplots(figsize=(8.8,5.9))
+    figz,axz=plt.subplots(figsize=(8.8,5.9))
+
+    ns=18*int(L1)*int(L2)
+    for branch in branches:
+        if branch==reference:
+            continue
+        xs=[]; dys=[]; errs=[]; zs=[]
+        for V,r in sorted(by_branch_v[branch].items()):
+            ref=by_branch_v[reference].get(V)
+            if ref is None:
+                continue
+            e=_f(r.get("mc_E"))
+            er=_f(r.get("mc_E_error"))
+            e0=_f(ref.get("mc_E"))
+            er0=_f(ref.get("mc_E_error"))
+            if not all(np.isfinite(x) for x in (e,er,e0,er0)):
+                continue
+            de=e-e0
+            se=math.sqrt(max(0.0,er*er+er0*er0))
+            xs.append(V)
+            # milli-energy per site makes small total-energy splittings legible.
+            dys.append(1.0e3*de/ns)
+            errs.append(1.0e3*se/ns)
+            zs.append(de/se if se>0 else np.nan)
+
+        if xs:
+            label=BRANCH_LABELS.get(branch,branch)
+            ax.errorbar(
+                xs,dys,yerr=errs,marker="o",markersize=3.5,
+                linewidth=1.2,capsize=2.5,label=label,
+            )
+            axz.plot(xs,zs,marker="o",markersize=3.5,
+                     linewidth=1.2,label=label)
+
+    ax.axhline(0.0,linewidth=1.0)
+    ax.set_xlabel("V")
+    ax.set_ylabel(r"$10^3(E_b-E_{ref})/N_s$")
+    ax.set_title(
+        f"Branch splittings relative to {BRANCH_LABELS.get(reference,reference)}, "
+        f"{L1}x{L2}"
+    )
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=8,ncol=2)
+    fig.tight_layout()
+    fig.savefig(outdir/"energy_reference_per_site.png",dpi=220)
+    plt.close(fig)
+
+    axz.axhline(0.0,linewidth=1.0)
+    axz.axhline(+2.0,linestyle="--",linewidth=0.9)
+    axz.axhline(-2.0,linestyle="--",linewidth=0.9)
+    axz.set_xlabel("V")
+    axz.set_ylabel(r"$(E_b-E_{ref})/\sqrt{\sigma_b^2+\sigma_{ref}^2}$")
+    axz.set_title(
+        f"Statistical significance of branch splittings, {L1}x{L2}"
+    )
+    axz.grid(alpha=0.25)
+    axz.legend(fontsize=8,ncol=2)
+    figz.tight_layout()
+    figz.savefig(outdir/"energy_reference_zscore.png",dpi=220)
+    plt.close(figz)
+
+
+def _phase_envelope_plot(size_rows,outdir,L1,L2):
+    """Plot the lowest branch belonging to each final physical phase.
+
+    This removes seed-to-seed duplication: several initial seeds that converge
+    to the same phase contribute only the lowest-energy representative at each V.
+    """
+    by_v=defaultdict(list)
+    for r in size_rows:
+        V=round(_f(r.get("scan_V",r.get("V"))),12)
+        by_v[V].append(r)
+
+    phase_data=defaultdict(list)
+    for V,rows in sorted(by_v.items()):
+        by_phase=defaultdict(list)
+        for r in rows:
+            ph=_s(r.get("phase_label"),"unknown")
+            by_phase[ph].append(r)
+        phase_best={
+            ph:min(rr,key=lambda x:_f(x.get("mc_E")))
+            for ph,rr in by_phase.items()
+        }
+        emin=min(_f(r.get("mc_E")) for r in phase_best.values())
+        for ph,r in phase_best.items():
+            phase_data[ph].append((
+                V,
+                _f(r.get("mc_E"))-emin,
+                _f(r.get("mc_E_error")),
+                _s(r.get("branch_seed",r.get("seed"))),
+            ))
+
+    fig,ax=plt.subplots(figsize=(8.8,5.9))
+    for ph,vals in sorted(phase_data.items()):
+        x=np.asarray([v[0] for v in vals],float)
+        y=np.asarray([v[1] for v in vals],float)
+        e=np.asarray([v[2] for v in vals],float)
+        ax.errorbar(
+            x,y,yerr=e,marker="o",markersize=4,
+            linewidth=1.25,capsize=2.5,label=ph,
+        )
+    ax.axhline(0.0,linewidth=1.0)
+    ax.set_xlabel("V")
+    ax.set_ylabel(r"$E_{phase}^{min}-E_{all}^{min}$")
+    ax.set_title(
+        f"Physical-phase energy envelopes, {L1}x{L2}\n"
+        "seeds converging to the same final phase are merged"
+    )
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=8,ncol=2)
+    fig.tight_layout()
+    fig.savefig(outdir/"energy_phase_envelopes.png",dpi=220)
+    plt.close(fig)
 
 def _phase_plot(phase_rows,outdir,L1,L2,tie_sigma):
     if not phase_rows:
@@ -582,6 +724,8 @@ def main():
                    choices=["up","down","any"])
     p.add_argument("--tie-sigma",type=float,default=2.0,
                    help="Below this combined-error z-score, mark the phase assignment uncertain.")
+    p.add_argument("--energy-reference",default="normal",
+                   help="Fixed branch used for energy-difference and z-score plots.")
     p.add_argument("--fss-v",nargs="*",type=float,default=None,
                    help="V values for finite-size scaling; nearest common scan values are used.")
     a=p.parse_args()
@@ -623,6 +767,10 @@ def main():
 
         _energy_plot(rr,outdir,L1,L2)
         _relative_energy_plot(rr,outdir,L1,L2)
+        _reference_energy_plots(
+            rr,outdir,L1,L2,reference=a.energy_reference
+        )
+        _phase_envelope_plot(rr,outdir,L1,L2)
         _phase_plot(phase,outdir,L1,L2,a.tie_sigma)
         _error_plot(rr,outdir,L1,L2)
         _lro_plot(phase,outdir,L1,L2)
