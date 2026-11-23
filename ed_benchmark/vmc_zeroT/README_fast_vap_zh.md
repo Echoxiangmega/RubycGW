@@ -317,6 +317,7 @@ V/seed/irrep 上保留 --check-woodbury，然后批量扫描关闭。
 - --screen-selection confidence：保留与最低 PAV 能量在
   --screen-keep-sigma N 个 combined 标准误差以内的全部扇区；
 - --screen-samples 1024：调整 PAV 能量粗筛所用 MC samples；
+- --screen-kernel fused/netket：PAV 阶段使用融合 Woodbury（默认）或标准 NetKet 局域能量；
 - --screen-only：Raw-PAV 计算完三个 irrep 的能量后立即退出，
   不做 Tint/Spatial/TR 优化；
 - --screen-source tint：保留原来的先 Tint-VAP 再 PAV 筛选方式，
