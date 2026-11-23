@@ -743,9 +743,31 @@ def _screen_irreps(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,params_scr
             sampler_seed=opt.random_seed+104729+580+ix,
         )
         stat=vstate.expect(Hstandard)
-        entries.append({'irrep':irrep,'E':float(np.real(stat.mean)),
-                        'error':float(stats_error(stat))})
-        print('[PAV screen]',entries[-1],flush=True)
+        energy=float(np.real(stat.mean))
+        error=float(stats_error(stat))
+        def optional_float(value):
+            try:
+                result=float(np.asarray(value).mean())
+                return result if np.isfinite(result) else None
+            except (ValueError,TypeError,AttributeError):
+                return None
+        try:
+            acceptance=optional_float(vstate.sampler_state.acceptance)
+        except (ValueError,TypeError,AttributeError):
+            acceptance=None
+        entry={'irrep':irrep,'E':energy,'error':error,
+               'R_hat':optional_float(getattr(stat,'R_hat',None)),
+               'tau_corr':optional_float(getattr(stat,'tau_corr',None)),
+               'sampler_acceptance':acceptance}
+        if not np.isfinite(energy) or not np.isfinite(error):
+            raise RuntimeError(
+                f'PAV {source}/{irrep} returned a non-finite energy or error. '
+                'The projected sector may have near-zero Raw overlap or the '
+                'sampler may be mixing poorly; do not select a single irrep '
+                'from this screening result.'
+            )
+        entries.append(entry)
+        print('[PAV screen]',entry,flush=True)
     best=min(entries,key=lambda row:row['E'])
     for e in entries:
         sigma=float(np.hypot(e['error'],best['error']))
@@ -755,6 +777,15 @@ def _screen_irreps(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,params_scr
         )
     if opt.screen_selection=='best':
         selected=[best['irrep']]
+        runners=sorted(entries,key=lambda item:item['E'])
+        if len(runners)>1 and (
+            runners[1]['gap_in_combined_sigma'] is None
+            or runners[1]['gap_in_combined_sigma']<3.
+        ):
+            print('[PAV screen] WARNING: best-only selection has a '
+                  'statistically close competing irrep. Initial PAV rankings '
+                  'can reverse after VAP or time-reversal restoration; '
+                  'consider --screen-selection confidence.',flush=True)
     else:
         selected=[
             e['irrep'] for e in entries
