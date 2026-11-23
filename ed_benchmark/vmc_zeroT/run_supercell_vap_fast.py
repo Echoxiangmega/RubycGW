@@ -252,27 +252,46 @@ def _fused_kwargs(opt, g, nf, seed_data, shells, bfmat, maps, chars, tr,
     )
 
 
-def _direct_current_loc(model, pars, roots, g, w_same, w_opp):
-    """Independent brute-force one-hop current reference (small test batches)."""
-    roots=np.asarray(roots, np.float64)
-    edge_i=np.asarray([e.i for e in g.edges], dtype=int)
-    edge_j=np.asarray([e.j for e in g.edges], dtype=int)
-    # The local estimator of a Hermitian current is generally complex.
-    out=np.empty((len(roots),2), np.complex128)
+def _direct_current_loc(model, pars, roots, g, w_same, w_opp, batch_size=8):
+    """Independent brute-force reference, batching all one-hop configurations.
+
+    This still recomputes the full projected wavefunction, but avoids one
+    Python/JAX model.apply() launch PER hopping.  Fixed-size padded batches
+    prevent one extra XLA compilation for the final short batch.
+    """
+    roots=np.asarray(roots,np.float64)
+    batch_size=max(1,int(batch_size))
+    edge_i=np.asarray([e.i for e in g.edges],dtype=int)
+    edge_j=np.asarray([e.j for e in g.edges],dtype=int)
+    out=np.zeros((len(roots),2),np.complex128)
+    root_logs=np.asarray(model.apply({'params':pars},roots),np.complex128).reshape(-1)
+    configs=[]
+    terms=[]
     for ib,x in enumerate(roots):
-        log0=complex(np.asarray(model.apply({'params':pars}, x[None,:])).reshape(-1)[0])
-        js=0j;jo=0j
         for ie,(i,j) in enumerate(zip(edge_i,edge_j)):
-            if x[i]==x[j]:continue
+            if x[i]==x[j]:
+                continue
             src=i if x[i]>0.5 else j
             sign_dir=1.0 if src==i else -1.0
-            xx=x.copy();xx[i],xx[j]=xx[j],xx[i]
-            log1=complex(np.asarray(model.apply({'params':pars},xx[None,:])).reshape(-1)[0])
+            y=x.copy()
+            y[i],y[j]=y[j],y[i]
             parity=(-1.0)**int(np.sum(x[min(i,j)+1:max(i,j)]))
-            r=parity*np.exp(log1-log0)
-            js+=1j*w_same[ie]*sign_dir*r
-            jo+=1j*w_opp[ie]*sign_dir*r
-        out[ib,0]=js;out[ib,1]=jo
+            configs.append(y)
+            terms.append((ib,ie,sign_dir*parity))
+    if not configs:
+        return out
+    log_hops=np.empty(len(configs),dtype=np.complex128)
+    for pos in range(0,len(configs),batch_size):
+        part=np.asarray(configs[pos:pos+batch_size],np.float64)
+        n=len(part)
+        if n<batch_size:
+            part=np.concatenate((part,np.repeat(part[-1:],batch_size-n,axis=0)),axis=0)
+        values=np.asarray(model.apply({'params':pars},part),np.complex128).reshape(-1)
+        log_hops[pos:pos+n]=values[:n]
+    for log1,(ib,ie,sgn) in zip(log_hops,terms):
+        ratio=sgn*np.exp(log1-root_logs[ib])
+        out[ib,0]+=1j*w_same[ie]*ratio
+        out[ib,1]+=1j*w_opp[ie]*ratio
     return out
 
 
@@ -579,8 +598,15 @@ def _run_stage(opt,g,nf,hi,Hstandard,graph,seed_data,shells,bfmat,
                     import jax.numpy as jnp
                     _,j_fast1,j_fast2=observable_kernel(vstate.parameters,jnp.asarray(test_roots))
                     weights1,weights2=old._current_channel_edge_weights(g)
+                    current_direct_started=time.perf_counter()
                     j_direct=_direct_current_loc(stage_model,vstate.parameters,
-                                                 test_roots,g,weights1,weights2)
+                                                 test_roots,g,weights1,weights2,
+                                                 batch_size=opt.current_check_batch)
+                    current_direct_seconds=time.perf_counter()-current_direct_started
+                    summary['time_current_direct_check_s']=float(current_direct_seconds)
+                    print(f'[{stage}/{irrep}] direct LC check: '
+                          f'{current_direct_seconds:.2f}s in batches of {opt.current_check_batch}',
+                          flush=True)
                     currents_err=float(np.max(np.abs(np.column_stack(
                         (np.asarray(j_fast1),np.asarray(j_fast2)))-j_direct)))
                     summary['lc_direct_check_max_abs_error']=currents_err
@@ -718,6 +744,8 @@ def parser():
     p.add_argument('--lc-estimator',choices=['onehop','netket'],default='onehop')
     p.add_argument('--observable-chunk',type=int,default=16)
     p.add_argument('--check-currents',action=argparse.BooleanOptionalAction,default=True)
+    p.add_argument('--current-check-batch',type=int,default=8,
+                   help='Batch full projected amplitudes for one-hop current validation')
     p.add_argument('--current-tolerance',type=float,default=3e-7)
     p.add_argument('--allow-missing-observables',action='store_true',
                    help='Allow missing S in summary; default raises but preserves checkpoint')
@@ -732,8 +760,8 @@ def main():
     opt=parser().parse_args()
     if opt.checkpoint_every<1:
         raise ValueError('--checkpoint-every must be >=1')
-    if opt.observable_chunk<1 or opt.check_roots<1:
-        raise ValueError('--observable-chunk and --check-roots must be positive')
+    if opt.observable_chunk<1 or opt.check_roots<1 or opt.current_check_batch<1:
+        raise ValueError('--observable-chunk, --check-roots and --current-check-batch must be positive')
     if 'tr' in opt.stages and not opt.restore_tr:
         opt.stages=[s for s in opt.stages if s!='tr']
     if opt.restore_tr and 'tr' in opt.stages and 'spatial' not in opt.stages:
