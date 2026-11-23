@@ -305,3 +305,62 @@ Raw 波函数分解到不同对称子空间后，其能量是各个投影子空�
 每阶段的 full-determinant 对照，不改变优化波函数和理论能量；
 但也失去每个阶段实时发现内核错误的保险。因此建议在少量代表性
 V/seed/irrep 上保留 --check-woodbury，然后批量扫描关闭。
+
+
+## 13. 先从保存的 Raw 波函数做 PAV，按扇区初始能量筛选 VAP
+
+新增 Raw-PAV 选择：
+- --screen-irreps --screen-source raw：不优化参数，先将 Raw 直接投影
+  到内部 Gamma 的 C3v A1/A2/E，并分别评估初始能量和统计误差；
+- --screen-selection best：只在最低初始 PAV 能量的一个 irrep 上继续
+  Spatial/TR VAP（**启发式，不保证优化后的真实最低扇区**）；
+- --screen-selection confidence：保留与最低 PAV 能量在
+  --screen-keep-sigma N 个 combined 标准误差以内的全部扇区；
+- --screen-samples 1024：调整 PAV 能量粗筛所用 MC samples；
+- --screen-only：Raw-PAV 计算完三个 irrep 的能量后立即退出，
+  不做 Tint/Spatial/TR 优化；
+- --screen-source tint：保留原来的先 Tint-VAP 再 PAV 筛选方式，
+  通常比从 Raw 直接筛选更可靠，但筛选发生得稍晚。
+
+单个 V、单个 seed 的纯 Raw-PAV 测试：
+
+~~~bash
+python ed_benchmark/vmc_zeroT/run_supercell_vap_fast.py \
+  --L1 3 --L2 3 --nf 54 \
+  --t 1 --t1 -0.5 --t2 -0.5 --V 3.6 \
+  --seed lc_opposite --seed-amplitude 0.09 \
+  --scan-root "$HOME/RubycGW/results/vscan_3x3_down" \
+  --mode continuation --direction down \
+  --output "$HOME/RubycGW/results/vap_pav_probe/V_p3p6_lco" \
+  --irreps A1 A2 E \
+  --screen-irreps --screen-source raw --screen-selection confidence \
+  --screen-samples 1024 --screen-keep-sigma 3.0 --screen-only
+~~~
+
+输出 irrep_pav_screen_raw.json，包含：
+A1/A2/E 的 E、error、R_hat、tau_corr、sampler_acceptance、
+与最低扇区的能量差 gap_to_best、gap_in_combined_sigma、
+best_initial_irrep、selected。
+Raw-PAV 仅评估能量，**没有重新训练参数**，也不输出结构因子。
+
+多 seed Slurm array 可直接使用：
+
+~~~bash
+sbatch --array=0-3 \
+  --export=ALL,VAP_SEEDS="sd isd lc_same lc_opposite",V_MIN=3.6,V_MAX=3.6,IRREP_SCREEN=raw,IRREP_SELECTION=confidence,SCREEN_SAMPLES=1024,SCREEN_KEEP_SIGMA=3 \
+  ed_benchmark/vmc_zeroT/slurm_vap_3x3_seed_array.sh
+~~~
+
+如果你已经检验筛选足够稳定、且只想优化最低初始 PAV 扇区，
+可改为 IRREP_SELECTION=best。此时仍然会做 Tint-VAP，
+但后续只运行选中 irrep 的 Spatial-VAP 和可选 TR-VAP。
+如果原来输出根目录下已有 A1/A2/E 完整阶段 checkpoint，
+--resume 会沿用那些结果；若想准确比较加速效果，
+请使用新的 VAP_ROOT。
+
+**重要限制：** 从一个 Raw seed 的初始 PAV 排序，不是最终 ground-state
+irrep 的严格判定。若某 irrep 的 Raw 投影范数很小，其能量和 MC 混合
+都可能不可靠；TR 恢复和充分 VAP 优化也可能改变相对顺序。
+在相界附近或者能量差小于 3–5 倍 combined error 时，
+推荐 confidence 而不是 best，并在代表性的 V 与其他 seeds 上复核。
+A1/A2/E 仍只覆盖当前内部 Gamma 动量扇区，未枚举非零动量扇区。
