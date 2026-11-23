@@ -37,16 +37,22 @@ V_STEP="${V_STEP:-0.1}"
 MODE="${MODE:-continuation}"
 DIRECTION="${DIRECTION:-down}"
 
-SEEDS=(
-  normal
-  sd
-  isd
-  lc_same
-  lc_opposite
-  random
-  ps_co
-  mix_co_lc_opposite
-)
+# Optional override, e.g. VAP_SEEDS='sd isd lc_same lc_opposite'.
+# With an override, submit --array=0-(number of selected seeds - 1).
+if [[ -n "${VAP_SEEDS:-}" ]]; then
+    read -r -a SEEDS <<< "$VAP_SEEDS"
+else
+    SEEDS=(
+      normal
+      sd
+      isd
+      lc_same
+      lc_opposite
+      random
+      ps_co
+      mix_co_lc_opposite
+    )
+fi
 TASK_ID="${SLURM_ARRAY_TASK_ID:?SLURM array index required}"
 if (( TASK_ID < 0 || TASK_ID >= ${#SEEDS[@]} )); then
     echo "ERROR: array index $TASK_ID outside seed list" >&2
