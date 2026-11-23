@@ -104,9 +104,35 @@ def _check_checkpoint_compatibility(path,seed_data,g,nf,opt):
     meta=path/'summary.json'
     if meta.exists():
         d=json.loads(meta.read_text(encoding='utf-8'))
-        for key,expected in [('V',opt.V),('Ns',g.Ns),('Nf',nf)]:
+        for key,expected in [('V',opt.V),('Ns',g.Ns),('Nf',nf),
+                             ('t',opt.t),('t1',opt.t1),('t2',opt.t2)]:
             if key in d and d[key] is not None and abs(float(d[key])-expected)>1e-10:
                 raise ValueError(f'Raw summary {key}={d[key]} != expected {expected}')
+
+    # The standard Raw V-scan stage summary does not always save t/t1/t2.
+    # Its per-seed scan_settings.json does: do not let a changed hopping
+    # Hamiltonian silently reuse a variational wavefunction from the same
+    # filling and interaction V.  Locate settings relative to the Raw
+    # checkpoint, not the current working directory.
+    scan_settings=path.parent.parent/'scan_settings.json'
+    if scan_settings.is_file():
+        d=json.loads(scan_settings.read_text(encoding='utf-8'))
+        for key,expected in [('L1',opt.L1),('L2',opt.L2),
+                             ('t',opt.t),('t1',opt.t1),('t2',opt.t2),
+                             ('seed_amplitude',opt.seed_amplitude)]:
+            if key in d and d[key] is not None:
+                actual=float(d[key])
+                if not np.isfinite(actual) or abs(actual-float(expected))>1e-10:
+                    raise ValueError(
+                        f'Raw scan settings mismatch: {key}={d[key]!r} '
+                        f'but VAP requested {expected!r} ({scan_settings}). '
+                        'Use the Hamiltonian and seed settings of the '
+                        'original Raw V-scan; this is not safe to ignore.'
+                    )
+    else:
+        print('[checkpoint] WARNING: no scan_settings.json found at '
+              f'{scan_settings}; could not verify Raw hopping t/t1/t2 '
+              'against current VAP arguments.',flush=True)
     return old._load_params_file(path)
 
 
