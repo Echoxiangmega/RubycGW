@@ -735,18 +735,32 @@ def _coexistence_scatter(phase_rows,outdir,L1,L2):
         )
 
     certain=~uncertain
+    vmin=float(np.nanmin(V))
+    vmax=float(np.nanmax(V))
+    if abs(vmax-vmin)<1e-14:
+        vmax=vmin+1.0
+    vnorm=plt.Normalize(vmin=vmin,vmax=vmax)
+
+    # A faint trajectory makes the evolution with V visible without using
+    # labels on every point.
+    order=np.argsort(V)
+    ax.plot(
+        x[order],y[order],color="0.72",linewidth=0.8,
+        alpha=0.7,zorder=0,
+    )
+
     sc=None
     if np.any(certain):
         sc=ax.scatter(
             x[certain],y[certain],c=V[certain],
-            cmap="viridis",s=56,marker="o",
+            cmap="viridis",norm=vnorm,s=56,marker="o",
             edgecolors="black",linewidths=0.35,zorder=3,
             label="energy-resolved winner",
         )
     if np.any(uncertain):
         scu=ax.scatter(
             x[uncertain],y[uncertain],c=V[uncertain],
-            cmap="viridis",s=72,marker="X",
+            cmap="viridis",norm=vnorm,s=72,marker="X",
             edgecolors="black",linewidths=0.55,zorder=4,
             label="uncertain energy assignment",
         )
