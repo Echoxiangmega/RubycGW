@@ -19,6 +19,7 @@ import argparse
 import csv
 import json
 import math
+from fractions import Fraction
 from pathlib import Path
 import subprocess
 import sys
@@ -31,6 +32,16 @@ DEFAULT_SEEDS=[
     "normal","sd","isd","lc_same","lc_opposite","random",
     "ps_co","mix_co_lc_opposite",
 ]
+
+
+def _parse_filling(value):
+    """Accept decimal or rational CLI fillings, e.g. 0.2222 or 2/9."""
+    try:
+        return float(Fraction(str(value)))
+    except (ValueError,ZeroDivisionError) as exc:
+        raise argparse.ArgumentTypeError(
+            f"Invalid filling {value!r}; use a decimal or fraction such as 2/9"
+        ) from exc
 
 
 def _vtag(v: float) -> str:
@@ -169,7 +180,7 @@ def parser():
         ),
     )
     filling_group.add_argument(
-        "--filling",type=float,default=None,
+        "--filling",type=_parse_filling,default=None,
         help=(
             "Requested particle filling Nf/Ns. It must correspond to an "
             "integer particle number for the selected L1,L2 supercell."
@@ -306,6 +317,23 @@ def main():
         /f"seed_{a.seed}"
         /f"{a.mode}_{a.direction}"
     )
+
+    # The historical directory layout did not encode filling.  Never allow a
+    # new filling to silently resume checkpoints created in a different
+    # particle-number sector.  Users can keep several fillings by choosing
+    # separate --output roots.
+    old_settings_path=branch_root/"scan_settings.json"
+    if old_settings_path.exists():
+        old=json.loads(old_settings_path.read_text(encoding="utf-8"))
+        old_nf=old.get("Nf")
+        if old_nf is not None and int(old_nf)!=nf:
+            raise ValueError(
+                f"Existing scan at {branch_root} has Nf={old_nf}, but this "
+                f"run requests Nf={nf} (filling={filling_effective:.12g}). "
+                "Use a different --output root for a different filling; "
+                "refusing to reuse incompatible checkpoints."
+            )
+
     branch_root.mkdir(parents=True,exist_ok=True)
 
     settings={
@@ -360,6 +388,9 @@ def main():
                 "scan_V":float(V),
                 "scan_reused_existing":True,
                 "scan_maps_requested":bool(maps_this_point),
+                "scan_Nf":nf,
+                "scan_Ns":ns,
+                "scan_filling":filling_effective,
             })
             rows.append(row)
             previous_stage=stage_dir
@@ -494,6 +525,9 @@ def main():
             "scan_V":float(V),
             "scan_reused_existing":False,
             "scan_maps_requested":bool(maps_this_point),
+            "scan_Nf":nf,
+            "scan_Ns":ns,
+            "scan_filling":filling_effective,
             "scan_warmstart_from":(
                 None if warmstart_stage is None
                 else str(warmstart_stage)
