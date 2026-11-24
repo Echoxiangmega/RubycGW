@@ -366,9 +366,21 @@ def parser():
     p.add_argument(
         "--iter",type=int,default=230,
         help=(
-            "Raw optimization iterations for each fixed-V size task. Because "
-            "each task contains a single V point, this maps to --anchor-iter."
+            "Backward-compatible total Raw optimization iterations. Ignored "
+            "when --early-iter/--late-iter/--refine-iter are all supplied."
         ),
+    )
+    p.add_argument(
+        "--early-iter",type=int,default=None,
+        help="Number of optimization iterations in the early stage.",
+    )
+    p.add_argument(
+        "--late-iter",type=int,default=None,
+        help="Number of optimization iterations in the late stage.",
+    )
+    p.add_argument(
+        "--refine-iter",type=int,default=None,
+        help="Number of optimization iterations in the refine stage.",
     )
     p.add_argument("--train-samples-early",type=int,default=1024)
     p.add_argument("--train-samples-late",type=int,default=2048)
@@ -427,6 +439,30 @@ def main():
     filling=a.filling
     resource_rows=_print_resource_table(shapes,filling)
 
+    stage_iters=[a.early_iter,a.late_iter,a.refine_iter]
+    if any(x is not None for x in stage_iters):
+        if not all(x is not None for x in stage_iters):
+            raise ValueError(
+                "When setting stage-specific iterations, provide all of "
+                "--early-iter, --late-iter and --refine-iter."
+            )
+        early_iter=int(a.early_iter)
+        late_iter=int(a.late_iter)
+        refine_iter=int(a.refine_iter)
+        if min(early_iter,late_iter,refine_iter)<0:
+            raise ValueError("stage iteration counts must be nonnegative")
+        iter_effective=early_iter+late_iter+refine_iter
+        switch1_effective=early_iter
+        switch2_effective=early_iter+late_iter
+    else:
+        iter_effective=int(a.iter)
+        # Preserve the historical anchor schedule used by run_supercell_vscan.py.
+        switch1_effective=min(80,iter_effective)
+        switch2_effective=min(180,iter_effective)
+        early_iter=switch1_effective
+        late_iter=max(0,switch2_effective-switch1_effective)
+        refine_iter=max(0,iter_effective-switch2_effective)
+
     root=Path(a.output).expanduser().resolve()
     root.mkdir(parents=True,exist_ok=True)
     reuse_root=(
@@ -441,7 +477,12 @@ def main():
         "seed":a.seed,
         "sampler":a.sampler,
         "sampler_chunk_size":a.sampler_chunk_size,
-        "iter":int(a.iter),
+        "iter":int(iter_effective),
+        "early_iter":int(early_iter),
+        "late_iter":int(late_iter),
+        "refine_iter":int(refine_iter),
+        "anchor_switch1":int(switch1_effective),
+        "anchor_switch2":int(switch2_effective),
         "train_samples_early":int(a.train_samples_early),
         "train_samples_late":int(a.train_samples_late),
         "train_samples_refine":int(a.train_samples_refine),
@@ -491,7 +532,9 @@ def main():
                 "--filling",str(filling),
                 "--seed",a.seed,
                 "--sampler",a.sampler,
-                "--anchor-iter",str(int(a.iter)),
+                "--anchor-iter",str(int(iter_effective)),
+                "--anchor-switch1",str(int(switch1_effective)),
+                "--anchor-switch2",str(int(switch2_effective)),
                 "--train-samples-early",str(int(a.train_samples_early)),
                 "--train-samples-late",str(int(a.train_samples_late)),
                 "--train-samples-refine",str(int(a.train_samples_refine)),
