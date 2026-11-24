@@ -26,6 +26,12 @@ supercell size:
       branch at each V.
   * ground_state_orders.png
       One-point CO/BOW/LC order amplitudes of the lowest-energy branch.
+  * coexistence_scatter.png
+      Two-dimensional winner-branch coexistence diagnostic with
+      CO_onepoint_rms on x and |J_opposite_mean| on y.  Classification
+      thresholds are shown as vertical/horizontal lines and V is color coded.
+  * coexistence_scatter.csv
+      Numerical values used in coexistence_scatter.png.
   * phase_table.csv
       Numerical winner, runner-up, gap, combined error, z-score and phase.
 
@@ -652,6 +658,157 @@ def _orders_plot(phase_rows,outdir,L1,L2):
     plt.close(fig)
 
 
+def _coexistence_scatter(phase_rows,outdir,L1,L2):
+    """Plot winner-branch CO versus LC-opposite one-point amplitudes.
+
+    This is a Raw-state coexistence diagnostic, not a two-point structure
+    factor plot.  Each point is the lowest-energy physical phase selected by
+    _phase_rows at one V.  Filled circles are statistically resolved phase
+    assignments; X markers denote points already flagged uncertain by the
+    energy comparison.
+    """
+    rows=[]
+    for p in phase_rows:
+        r=p["_winner_row"]
+        co=_f(r.get("CO_onepoint_rms"))
+        jo=_f(r.get("J_opposite_mean"))
+        jo_err=_f(r.get("J_opposite_mean_error"))
+        co_thr=_f(r.get("classification_CO_threshold"),0.03)
+        lc_thr=_f(r.get("classification_current_threshold"),0.05)
+        if not (np.isfinite(co) and np.isfinite(jo)):
+            continue
+        lc=abs(jo)
+        rows.append({
+            "V":float(p["V"]),
+            "winner_seed":p["winner_seed"],
+            "winner_phase":p["winner_phase"],
+            "uncertain":bool(p["uncertain"]),
+            "CO_onepoint_rms":float(co),
+            "J_opposite_mean":float(jo),
+            "J_opposite_abs":float(lc),
+            "J_opposite_mean_error":(
+                float(jo_err) if np.isfinite(jo_err) else np.nan
+            ),
+            "CO_threshold":float(co_thr),
+            "LC_opposite_threshold":float(lc_thr),
+            "CO_over_threshold":(
+                float(co/co_thr)
+                if np.isfinite(co_thr) and co_thr>0 else np.nan
+            ),
+            "LC_opposite_over_threshold":(
+                float(lc/lc_thr)
+                if np.isfinite(lc_thr) and lc_thr>0 else np.nan
+            ),
+        })
+
+    if not rows:
+        return
+
+    _write_csv(outdir/"coexistence_scatter.csv",rows)
+
+    x=np.asarray([r["CO_onepoint_rms"] for r in rows],float)
+    y=np.asarray([r["J_opposite_abs"] for r in rows],float)
+    V=np.asarray([r["V"] for r in rows],float)
+    yerr=np.asarray([r["J_opposite_mean_error"] for r in rows],float)
+    uncertain=np.asarray([bool(r["uncertain"]) for r in rows],bool)
+    co_thr=np.asarray([r["CO_threshold"] for r in rows],float)
+    lc_thr=np.asarray([r["LC_opposite_threshold"] for r in rows],float)
+
+    # The scan normally uses one global threshold.  If old scan rows contain
+    # mixed settings, draw the median and report the range in the title.
+    xthr=float(np.nanmedian(co_thr))
+    ythr=float(np.nanmedian(lc_thr))
+    xthr_span=float(np.nanmax(co_thr)-np.nanmin(co_thr))
+    ythr_span=float(np.nanmax(lc_thr)-np.nanmin(lc_thr))
+
+    fig,ax=plt.subplots(figsize=(7.2,6.2))
+
+    # Error bars are meaningful for the current estimator.  CO_onepoint_rms
+    # currently has no stored block error, so x-error bars are intentionally
+    # omitted rather than invented.
+    good_err=np.isfinite(yerr) & (yerr>0)
+    if np.any(good_err):
+        ax.errorbar(
+            x[good_err],y[good_err],yerr=yerr[good_err],
+            fmt="none",ecolor="0.55",elinewidth=0.9,
+            capsize=2.0,alpha=0.65,zorder=1,
+        )
+
+    certain=~uncertain
+    sc=None
+    if np.any(certain):
+        sc=ax.scatter(
+            x[certain],y[certain],c=V[certain],
+            cmap="viridis",s=56,marker="o",
+            edgecolors="black",linewidths=0.35,zorder=3,
+            label="energy-resolved winner",
+        )
+    if np.any(uncertain):
+        scu=ax.scatter(
+            x[uncertain],y[uncertain],c=V[uncertain],
+            cmap="viridis",s=72,marker="X",
+            edgecolors="black",linewidths=0.55,zorder=4,
+            label="uncertain energy assignment",
+        )
+        if sc is None:
+            sc=scu
+
+    ax.axvline(
+        xthr,color="black",linestyle="--",linewidth=1.2,
+        label=rf"CO threshold = {xthr:g}",
+    )
+    ax.axhline(
+        ythr,color="black",linestyle=":",linewidth=1.2,
+        label=rf"LC opposite threshold = {ythr:g}",
+    )
+
+    # Light quadrant labels make the physical interpretation immediate while
+    # keeping the actual data unobscured.
+    xmax=max(float(np.nanmax(x))*1.08,xthr*1.8,1e-6)
+    ymax=max(float(np.nanmax(y))*1.08,ythr*1.8,1e-6)
+    ax.set_xlim(left=0.0,right=xmax)
+    ax.set_ylim(bottom=0.0,top=ymax)
+    ax.text(
+        0.02*xmax,0.04*ymax,"neither",
+        fontsize=9,color="0.35",ha="left",va="bottom",
+    )
+    ax.text(
+        0.98*xmax,0.04*ymax,"CO",
+        fontsize=9,color="0.35",ha="right",va="bottom",
+    )
+    ax.text(
+        0.02*xmax,0.96*ymax,"LC opposite",
+        fontsize=9,color="0.35",ha="left",va="top",
+    )
+    ax.text(
+        0.98*xmax,0.96*ymax,"CO + LC opposite",
+        fontsize=9,color="0.35",ha="right",va="top",
+    )
+
+    if sc is not None:
+        cb=fig.colorbar(sc,ax=ax,pad=0.02)
+        cb.set_label("V")
+
+    ax.set_xlabel(r"$m_{CO}$ = CO_onepoint_rms")
+    ax.set_ylabel(r"$|m_{LC,opp}|=|J_{opposite}|$")
+    extra=""
+    if xthr_span>1e-12 or ythr_span>1e-12:
+        extra=(
+            f"\nthresholds vary across rows: "
+            f"CO range={np.nanmin(co_thr):g}-{np.nanmax(co_thr):g}, "
+            f"LC range={np.nanmin(lc_thr):g}-{np.nanmax(lc_thr):g}"
+        )
+    ax.set_title(
+        f"Raw winner-state CO/LC coexistence diagnostic, {L1}x{L2}"+extra
+    )
+    ax.grid(alpha=0.22)
+    ax.legend(fontsize=8,loc="best")
+    fig.tight_layout()
+    fig.savefig(outdir/"coexistence_scatter.png",dpi=240)
+    fig.savefig(outdir/"coexistence_scatter.svg")
+    plt.close(fig)
+
+
 def _phase_table_public(phase_rows):
     out=[]
     for r in phase_rows:
@@ -812,6 +969,7 @@ def main():
         _error_plot(rr,outdir,L1,L2)
         _lro_plot(phase,outdir,L1,L2)
         _orders_plot(phase,outdir,L1,L2)
+        _coexistence_scatter(phase,outdir,L1,L2)
         _write_csv(outdir/"phase_table.csv",_phase_table_public(phase))
 
         n_uncertain=sum(bool(x["uncertain"]) for x in phase)
