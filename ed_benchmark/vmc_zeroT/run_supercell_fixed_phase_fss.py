@@ -70,12 +70,13 @@ def _f(x,default=np.nan):
         return float(default)
 
 
-def _resource_row(L,filling,eval_samples=16384,train_samples=4096,ref_L=3):
-    ns=18*L*L
+def _resource_row(L1,L2,filling,eval_samples=16384,train_samples=4096,ref_shape=(3,3)):
+    area=int(L1)*int(L2)
+    ns=18*area
     nf_exact=filling*ns
     if nf_exact.denominator!=1:
         return {
-            "L":L,"Ns":ns,"Nf":None,
+            "L1":int(L1),"L2":int(L2),"Ns":ns,"Nf":None,
             "representable":False,
         }
     nf=int(nf_exact)
@@ -88,7 +89,7 @@ def _resource_row(L,filling,eval_samples=16384,train_samples=4096,ref_L=3):
     jac_train=train_samples*p*16.0/2**30
     jac_eval=eval_samples*p*16.0/2**30
 
-    ref_nf=int(filling*(18*ref_L*ref_L))
+    ref_nf=int(filling*(18*int(ref_shape[0])*int(ref_shape[1])))
     r2=(nf/ref_nf)**2
     r3=(nf/ref_nf)**3
 
@@ -102,7 +103,9 @@ def _resource_row(L,filling,eval_samples=16384,train_samples=4096,ref_L=3):
         chunk,qchunk=32,32
 
     return {
-        "L":L,
+        "L1":int(L1),
+        "L2":int(L2),
+        "aspect_ratio":max(L1,L2)/min(L1,L2),
         "Ns":ns,
         "Nf":nf,
         "representable":True,
@@ -117,23 +120,24 @@ def _resource_row(L,filling,eval_samples=16384,train_samples=4096,ref_L=3):
     }
 
 
-def _print_resource_table(sizes,filling):
-    rows=[_resource_row(L,filling) for L in sizes]
+def _print_resource_table(shapes,filling):
+    rows=[_resource_row(L1,L2,filling) for L1,L2 in shapes]
     print("\n[resource estimate] current Raw backflow ansatz",flush=True)
     print(
-        " L    Ns    Nf   params   denseQGT(GiB)  Jac4096  Jac16384"
+        " shape    Ns    Nf   params   denseQGT(GiB)  Jac4096  Jac16384"
         "  chunk/qchunk   time rel. ~Nf^2..Nf^3",
         flush=True,
     )
     for r in rows:
+        tag=f"{r['L1']}x{r['L2']}"
         if not r["representable"]:
             print(
-                f"{r['L']:2d} {r['Ns']:5d}   --   filling not representable",
+                f"{tag:>6s} {r['Ns']:5d}   --   filling not representable",
                 flush=True,
             )
             continue
         print(
-            f"{r['L']:2d} {r['Ns']:5d} {r['Nf']:5d} "
+            f"{tag:>6s} {r['Ns']:5d} {r['Nf']:5d} "
             f"{r['n_parameters_estimate']:7d} "
             f"{r['dense_qgt_estimate_GiB']:13.4f} "
             f"{r['jacobian_4096_estimate_GiB']:8.4f} "
@@ -146,14 +150,14 @@ def _print_resource_table(sizes,filling):
     return rows
 
 
-def _branch_csv(root,L,seed):
+def _branch_csv(root,L1,L2,seed):
     return (
-        root/f"L{L}x{L}"/f"seed_{seed}"/"continuation_up"/"branch_scan.csv"
+        root/f"L{L1}x{L2}"/f"seed_{seed}"/"continuation_up"/"branch_scan.csv"
     )
 
 
-def _load_branch_row(root,L,seed,V):
-    path=_branch_csv(root,L,seed)
+def _load_branch_row(root,L1,L2,seed,V):
+    path=_branch_csv(root,L1,L2,seed)
     if not path.exists():
         return None
     with path.open(newline="",encoding="utf-8") as f:
@@ -170,22 +174,23 @@ def _load_branch_row(root,L,seed,V):
     return dict(candidates[-1])
 
 
-def _collect(root,sizes,seed,V,filling,reuse_root=None):
+def _collect(root,shapes,seed,V,filling,reuse_root=None):
     out=[]
-    for L in sizes:
-        row=_load_branch_row(root,L,seed,V)
+    for L1,L2 in shapes:
+        row=_load_branch_row(root,L1,L2,seed,V)
         source_root=root
         if row is None and reuse_root is not None:
-            row=_load_branch_row(reuse_root,L,seed,V)
+            row=_load_branch_row(reuse_root,L1,L2,seed,V)
             source_root=reuse_root
         if row is None:
-            print(f"[collect] L={L}: no completed branch row",flush=True)
+            print(f"[collect] L1xL2={L1}x{L2}: no completed branch row",flush=True)
             continue
 
-        ns=int(round(_f(row.get("scan_Ns"),18*L*L)))
+        area=L1*L2
+        ns=int(round(_f(row.get("scan_Ns"),18*area)))
         nf=int(round(_f(row.get("scan_Nf"),float(filling)*ns)))
-        ncell=3*L*L
-        ntri=6*L*L
+        ncell=3*area
+        ntri=6*area
         E=_f(row.get("mc_E"))
         Eerr=_f(row.get("mc_E_error"))
         js=_f(row.get("J_same_mean"))
@@ -203,7 +208,10 @@ def _collect(root,sizes,seed,V,filling,reuse_root=None):
             else np.nan
         )
         out.append({
-            "L":L,
+            "L1":L1,
+            "L2":L2,
+            "shape":f"{L1}x{L2}",
+            "aspect_ratio":max(L1,L2)/min(L1,L2),
             "Ns":ns,
             "Nf":nf,
             "Ncell":ncell,
@@ -235,7 +243,7 @@ def _collect(root,sizes,seed,V,filling,reuse_root=None):
             "mc_tau_corr":_f(row.get("mc_tau_corr")),
             "mc_R_hat":_f(row.get("mc_R_hat")),
             "sampler_acceptance":_f(row.get("sampler_acceptance")),
-            "source":str(_branch_csv(source_root,L,seed)),
+            "source":str(_branch_csv(source_root,L1,L2,seed)),
         })
 
     if not out:
@@ -263,9 +271,9 @@ def _linear_intercept(x,y):
 def _plot_fss(root,rows,seed,V):
     import matplotlib.pyplot as plt
 
-    rows=sorted(rows,key=lambda r:r["L"])
+    rows=sorted(rows,key=lambda r:(r["Ntriangle"],r["L1"],r["L2"]))
     x=np.asarray([r["inv_Ntriangle"] for r in rows],float)
-    L=np.asarray([r["L"] for r in rows],int)
+    labels=[r["shape"] for r in rows]
 
     # 1) LC same order amplitude and sqrt(S) on the same physical scale.
     j=np.asarray([r["J_same_abs"] for r in rows],float)
@@ -278,8 +286,8 @@ def _plot_fss(root,rows,seed,V):
     fig,ax=plt.subplots(figsize=(7.2,5.4))
     ax.errorbar(x,j,yerr=je,marker="o",capsize=2.5,label=r"$|J_{same}|$")
     ax.errorbar(x,sq,yerr=sqe,marker="s",capsize=2.5,label=r"$\sqrt{S_{LC,same}}$")
-    for xx,yy,ll in zip(x,j,L):
-        ax.annotate(f"L={ll}",(xx,yy),xytext=(4,4),textcoords="offset points",fontsize=8)
+    for xx,yy,lab in zip(x,j,labels):
+        ax.annotate(lab,(xx,yy),xytext=(4,4),textcoords="offset points",fontsize=8)
     fit=_linear_intercept(x,j)
     if fit is not None:
         intercept,slope=fit
@@ -333,8 +341,14 @@ def parser():
         description=__doc__,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--sizes",nargs="+",type=int,required=True,
-                   help="Square L values, e.g. --sizes 2 3 4 5")
+    p.add_argument(
+        "--shapes",nargs="+",default=None,
+        help="Supercell shapes such as --shapes 2x3 3x3 3x4 4x5",
+    )
+    p.add_argument(
+        "--sizes",nargs="+",type=int,default=None,
+        help="Backward-compatible shorthand for square shapes, e.g. 2 3 4",
+    )
     p.add_argument("--V",type=float,required=True)
     p.add_argument("--filling",type=_fraction,default=Fraction(1,3))
     p.add_argument("--seed",default="lc_same")
@@ -351,6 +365,10 @@ def parser():
         ),
     )
     p.add_argument("--collect-only",action="store_true")
+    p.add_argument(
+        "--run-only",action="store_true",
+        help="Run requested tasks but do not write combined FSS CSV/plots. Recommended for Slurm arrays.",
+    )
     p.add_argument("--dry-run",action="store_true")
     p.add_argument(
         "vscan_args",nargs=argparse.REMAINDER,
@@ -361,12 +379,25 @@ def parser():
 
 def main():
     a=parser().parse_args()
-    sizes=sorted(set(int(L) for L in a.sizes))
-    if not sizes or min(sizes)<1:
-        raise ValueError("all sizes must be positive")
+    shapes=[]
+    if a.shapes:
+        for token in a.shapes:
+            t=str(token).lower().replace("*","x")
+            if "x" not in t:
+                raise ValueError(f"Invalid shape {token!r}; use e.g. 3x4")
+            u,v=t.split("x",1)
+            L1,L2=int(u),int(v)
+            if L1<1 or L2<1:
+                raise ValueError("all shape dimensions must be positive")
+            shapes.append((L1,L2))
+    if a.sizes:
+        shapes.extend((int(L),int(L)) for L in a.sizes)
+    shapes=sorted(set(shapes),key=lambda z:(z[0]*z[1],z[0],z[1]))
+    if not shapes:
+        raise ValueError("provide --shapes and/or --sizes")
 
     filling=a.filling
-    resource_rows=_print_resource_table(sizes,filling)
+    resource_rows=_print_resource_table(shapes,filling)
 
     root=Path(a.output).expanduser().resolve()
     root.mkdir(parents=True,exist_ok=True)
@@ -375,7 +406,7 @@ def main():
         else Path(a.reuse_root).expanduser().resolve()
     )
     settings={
-        "sizes":sizes,
+        "shapes":[[int(x),int(y)] for x,y in shapes],
         "V":float(a.V),
         "filling":str(filling),
         "filling_float":float(filling),
@@ -389,7 +420,8 @@ def main():
             "its energy against other phases at every size."
         ),
     }
-    (root/"fixed_phase_fss_settings.json").write_text(
+    shape_tag="_".join(f"L{x}x{y}" for x,y in shapes)
+    (root/f"fixed_phase_fss_settings_{shape_tag}.json").write_text(
         json.dumps(settings,indent=2,ensure_ascii=False),encoding="utf-8"
     )
 
@@ -398,18 +430,18 @@ def main():
         extra=extra[1:]
 
     if not a.collect_only:
-        for L in sizes:
-            rr=_resource_row(L,filling)
+        for L1,L2 in shapes:
+            rr=_resource_row(L1,L2,filling)
             if not rr["representable"]:
                 raise ValueError(
-                    f"filling={filling} is not exactly representable for L={L}"
+                    f"filling={filling} is not exactly representable for {L1}x{L2}"
                 )
             if (
                 reuse_root is not None
-                and _load_branch_row(reuse_root,L,a.seed,float(a.V)) is not None
+                and _load_branch_row(reuse_root,L1,L2,a.seed,float(a.V)) is not None
             ):
                 print(
-                    f"\n[fss run] L={L}: reuse read-only result from "
+                    f"\n[fss run] {L1}x{L2}: reuse read-only result from "
                     f"{reuse_root}",
                     flush=True,
                 )
@@ -417,7 +449,7 @@ def main():
 
             cmd=[
                 sys.executable,str(VSCAN),
-                "--L1",str(L),"--L2",str(L),
+                "--L1",str(L1),"--L2",str(L2),
                 "--filling",str(filling),
                 "--seed",a.seed,
                 "--mode","continuation",
@@ -431,9 +463,9 @@ def main():
             if not a.dry_run:
                 subprocess.run(cmd,check=True)
 
-    if not a.dry_run:
+    if not a.dry_run and not a.run_only:
         _collect(
-            root,sizes,a.seed,float(a.V),filling,reuse_root=reuse_root
+            root,shapes,a.seed,float(a.V),filling,reuse_root=reuse_root
         )
 
 
