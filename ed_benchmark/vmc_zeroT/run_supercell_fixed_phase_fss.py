@@ -355,6 +355,14 @@ def parser():
     p.add_argument("--V",type=float,required=True)
     p.add_argument("--filling",type=_fraction,default=Fraction(1,3))
     p.add_argument("--seed",default="lc_same")
+    p.add_argument(
+        "--sampler",choices=["fast","netket"],default="fast",
+        help="Sampler backend forwarded explicitly to run_supercell_vscan.py.",
+    )
+    p.add_argument(
+        "--sampler-chunk-size",type=int,default=None,
+        help="Optional sampler chunk size forwarded to run_supercell_vscan.py.",
+    )
     p.add_argument("--t",type=float,default=1.0)
     p.add_argument("--t1",type=float,default=0.5)
     p.add_argument("--t2",type=float,default=-0.5)
@@ -414,6 +422,8 @@ def main():
         "filling":str(filling),
         "filling_float":float(filling),
         "seed":a.seed,
+        "sampler":a.sampler,
+        "sampler_chunk_size":a.sampler_chunk_size,
         "t":float(a.t),"t1":float(a.t1),"t2":float(a.t2),
         "seed_amplitude":float(a.seed_amplitude),
         "resource_estimates":resource_rows,
@@ -455,6 +465,7 @@ def main():
                 "--L1",str(L1),"--L2",str(L2),
                 "--filling",str(filling),
                 "--seed",a.seed,
+                "--sampler",a.sampler,
                 "--mode","continuation",
                 "--direction","up",
                 "--V-values",str(float(a.V)),
@@ -462,6 +473,10 @@ def main():
                 "--seed-amplitude",str(a.seed_amplitude),
                 "--output",str(root),
             ]+extra
+            if a.sampler_chunk_size is not None:
+                cmd.extend([
+                    "--sampler-chunk-size",str(int(a.sampler_chunk_size))
+                ])
             print("\n[fss run] "+" ".join(cmd),flush=True)
             if not a.dry_run:
                 subprocess.run(cmd,check=True)
