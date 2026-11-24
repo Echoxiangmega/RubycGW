@@ -235,6 +235,18 @@ def parser():
     p.add_argument("--n-chains",type=int,default=32)
     p.add_argument("--n-discard",type=int,default=16)
     p.add_argument(
+        "--sampler",choices=["fast","netket"],default="fast",
+        help=(
+            "Raw Metropolis sampler backend. 'fast' uses the persistent-cache "
+            "rank-3 Woodbury sampler; 'netket' uses standard "
+            "MetropolisFermionHop."
+        ),
+    )
+    p.add_argument(
+        "--sampler-chunk-size",type=int,default=None,
+        help="Optional sampler batch chunk size passed to the Raw runner.",
+    )
+    p.add_argument(
         "--sweep-size",type=int,default=None,
         help="Default auto is about 2*Nf/3 (16 for 2x2).",
     )
@@ -326,6 +338,14 @@ def main():
     if old_settings_path.exists():
         old=json.loads(old_settings_path.read_text(encoding="utf-8"))
         old_nf=old.get("Nf")
+        old_sampler=old.get("sampler")
+        if old_sampler is not None and str(old_sampler)!=str(a.sampler):
+            raise ValueError(
+                f"Existing scan at {branch_root} used sampler={old_sampler}, "
+                f"but this run requests sampler={a.sampler}. Use a different "
+                "--output root or remove the old scan if you intentionally "
+                "want to change sampler."
+            )
         if old_nf is not None and int(old_nf)!=nf:
             raise ValueError(
                 f"Existing scan at {branch_root} has Nf={old_nf}, but this "
@@ -355,7 +375,8 @@ def main():
 
     print(
         f"[scan] size={a.L1}x{a.L2} Ns={ns} Nf={nf} "
-        f"filling={filling_effective:.12g} sweep_size={sweep}",
+        f"filling={filling_effective:.12g} sweep_size={sweep} "
+        f"sampler={a.sampler}",
         flush=True,
     )
 
@@ -439,7 +460,10 @@ def main():
             "--packed-kernel",
             "--fast-local-energy",
             "--no-fast-local-gradient-check",
-            "--fast-sampler",
+            (
+                "--fast-sampler"
+                if a.sampler=="fast" else "--no-fast-sampler"
+            ),
             "--orbital-parameterization","free",
             "--orbital-gauge-fix-interval","20",
             "--no-analytic-logderiv",
@@ -456,6 +480,11 @@ def main():
             ),
             "--output",str(point_dir),
         ]
+        if a.sampler_chunk_size is not None:
+            cmd.extend([
+                "--sampler-chunk-size",str(int(a.sampler_chunk_size))
+            ])
+
         if interrupted_stage:
             # Optimisation already finished and final_params.npz was saved.
             # Re-enter the Raw stage in eval-only mode so we only rebuild the
