@@ -170,10 +170,14 @@ def _load_branch_row(root,L,seed,V):
     return dict(candidates[-1])
 
 
-def _collect(root,sizes,seed,V,filling):
+def _collect(root,sizes,seed,V,filling,reuse_root=None):
     out=[]
     for L in sizes:
         row=_load_branch_row(root,L,seed,V)
+        source_root=root
+        if row is None and reuse_root is not None:
+            row=_load_branch_row(reuse_root,L,seed,V)
+            source_root=reuse_root
         if row is None:
             print(f"[collect] L={L}: no completed branch row",flush=True)
             continue
@@ -231,7 +235,7 @@ def _collect(root,sizes,seed,V,filling):
             "mc_tau_corr":_f(row.get("mc_tau_corr")),
             "mc_R_hat":_f(row.get("mc_R_hat")),
             "sampler_acceptance":_f(row.get("sampler_acceptance")),
-            "source":str(_branch_csv(root,L,seed)),
+            "source":str(_branch_csv(source_root,L,seed)),
         })
 
     if not out:
@@ -339,6 +343,13 @@ def parser():
     p.add_argument("--t2",type=float,default=-0.5)
     p.add_argument("--seed-amplitude",type=float,default=0.08)
     p.add_argument("--output",required=True)
+    p.add_argument(
+        "--reuse-root",default=None,
+        help=(
+            "Optional existing V-scan root. If the requested size/V/seed is "
+            "already present there, reuse it read-only instead of rerunning it."
+        ),
+    )
     p.add_argument("--collect-only",action="store_true")
     p.add_argument("--dry-run",action="store_true")
     p.add_argument(
@@ -359,6 +370,10 @@ def main():
 
     root=Path(a.output).expanduser().resolve()
     root.mkdir(parents=True,exist_ok=True)
+    reuse_root=(
+        None if a.reuse_root is None
+        else Path(a.reuse_root).expanduser().resolve()
+    )
     settings={
         "sizes":sizes,
         "V":float(a.V),
@@ -389,6 +404,17 @@ def main():
                 raise ValueError(
                     f"filling={filling} is not exactly representable for L={L}"
                 )
+            if (
+                reuse_root is not None
+                and _load_branch_row(reuse_root,L,a.seed,float(a.V)) is not None
+            ):
+                print(
+                    f"\n[fss run] L={L}: reuse read-only result from "
+                    f"{reuse_root}",
+                    flush=True,
+                )
+                continue
+
             cmd=[
                 sys.executable,str(VSCAN),
                 "--L1",str(L),"--L2",str(L),
@@ -406,7 +432,9 @@ def main():
                 subprocess.run(cmd,check=True)
 
     if not a.dry_run:
-        _collect(root,sizes,a.seed,float(a.V),filling)
+        _collect(
+            root,sizes,a.seed,float(a.V),filling,reuse_root=reuse_root
+        )
 
 
 if __name__=="__main__":
