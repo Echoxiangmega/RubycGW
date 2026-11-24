@@ -593,6 +593,13 @@ def _mc_order_observables(
         })
         return out
 
+    if current_ops is None:
+        print(
+            "[current operators] fast hopping estimator unavailable; "
+            "building explicit J and J^2 operators lazily for fallback.",
+            flush=True,
+        )
+        current_ops=_current_operators(hi,g)
     same,opp,same2,opp2=current_ops
     sm=vstate.expect(same)
     om=vstate.expect(opp)
