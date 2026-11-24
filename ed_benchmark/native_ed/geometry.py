@@ -378,14 +378,33 @@ class RubyPBC:
         return loops
 
     def permitted_momenta(self):
-        """k1,k2 in units of reciprocal primitive lattice vectors."""
+        """k1,k2 in units of reciprocal primitive lattice vectors.
+
+        Allowed momenta satisfy M^T q in Z^2, with q identified modulo the
+        primitive reciprocal lattice.  Floating-point modulo can otherwise
+        represent the same class as both 0 and 1 (for example 0.0 and
+        0.9999999999999999), which created spurious extra momenta for some
+        rectangular ring3 supercells such as 2x3 and 5x4.
+        """
         out={}
         d=abs(round(np.linalg.det(self.M)))
         for i in range(d):
             for j in range(d):
-                q=np.linalg.solve(self.M.T,np.array([i,j],dtype=float))%1
-                out[tuple(np.round(q,10))]=tuple(float(x) for x in q)
-        assert len(out)==d
+                q=np.linalg.solve(
+                    self.M.T,np.array([i,j],dtype=float)
+                )
+                q=np.mod(q,1.0)
+                # Canonicalise reciprocal-lattice boundary values before
+                # deduplication: q=1 is exactly equivalent to q=0.
+                q[np.isclose(q,1.0,rtol=0.0,atol=1e-10)]=0.0
+                q[np.isclose(q,0.0,rtol=0.0,atol=1e-10)]=0.0
+                key=tuple(float(x) for x in np.round(q,10))
+                out[key]=key
+        if len(out)!=d:
+            raise RuntimeError(
+                f"Expected {d} permitted momenta for M={self.M.tolist()}, "
+                f"but found {len(out)}"
+            )
         return [out[key] for key in sorted(out)]
 
     def metadata(self):
