@@ -83,6 +83,12 @@ from symmetry_projection import (
 )
 
 
+from ed_central_projectors import (
+    ed_central_sectors, pair_time_reversal_sectors,
+    central_projector_diagnostics,
+)
+
+
 def write_csv(path: Path, rows):
     if not rows:
         return
@@ -154,8 +160,9 @@ def c3v_targets_from_ed(g,H,ed_gs,tol=1e-8):
     targets=[]
     V=np.asarray(ed_gs,complex)
     V,_=np.linalg.qr(V)
-    for ir in ("A1","A2"):
-        chars=c3v_irrep_characters(ir)
+    for ir in ("A1","A2","E"):
+        # d*chi gives the correctly normalized central projector.
+        chars=c3v_irrep_characters(ir)*(2 if ir=="E" else 1)
         cols=[]
         for j in range(V.shape[1]):
             p,w=project_to_characters(group,chars,V[:,j])
@@ -172,11 +179,8 @@ def c3v_targets_from_ed(g,H,ed_gs,tol=1e-8):
                 "characters":np.asarray(chars,complex),
                 "ground_dimension":rank,
             })
-    if not targets:
-        raise RuntimeError(
-            "Could not identify an A1/A2 C3v component in the ED ground manifold; "
-            "the two-dimensional E irrep needs a matrix-valued projector."
-        )
+    if sum(t["ground_dimension"] for t in targets)!=V.shape[1]:
+        raise RuntimeError("C3v projectors do not resolve the complete ED ground manifold")
     return group,targets
 
 
@@ -294,6 +298,15 @@ def train_one(
         g,nf,l1,l2,seed_name,seed_amplitude
     )
     blocks0,v0,eta0,tr0=_warm_blocks(initial_params,seed_data)
+    # A symmetry-adapted Raw seed can have exactly zero weight in a
+    # different degenerate target. A small reproducible perturbation of
+    # the occupied subspace makes the initial projected amplitude generic.
+    if point_maps is not None and ed_gs is not None and ed_gs.shape[1]>1 and not time_reversal_even:
+        rng=np.random.default_rng(rng_seed)
+        blocks0=[M+1e-4*max(1.,np.linalg.norm(M))/
+                 max(1.,np.sqrt(M.size))*
+                 (rng.standard_normal(M.shape)+1j*rng.standard_normal(M.shape))
+                 if M.size else M for M in blocks0]
     if initial_tr_phase_override is not None:
         tr0=float(initial_tr_phase_override)
     if tr0 is None:
@@ -440,13 +453,11 @@ def train_one(
                 group=build_c3v_group(g,native_H.states)
             else:
                 group=build_c3_group(g,native_H.states)
-            sector_weight=float(project_to_characters(
-                group,np.asarray(point_chars,complex),psi
-            )[1])
-            extra["target_sector_weight"]=sector_weight
-            extra["projected_sector_residual"]=projected_sector_residual(
+            sector_weight,residual=central_projector_diagnostics(
                 group,np.asarray(point_chars,complex),psi
             )
+            extra["target_sector_weight"]=sector_weight
+            extra["projected_sector_residual"]=residual
         if diagnostic_projectors:
             for label,grp,ch in diagnostic_projectors:
                 _,weight=project_to_characters(grp,ch,psi)
@@ -476,6 +487,9 @@ def train_one(
         "variational_v":params["v"],
         "variational_eta":params["eta"],
     }
+    if point_maps is not None:
+        save_items["projection_site_maps"]=np.asarray(point_maps,np.int32)
+        save_items["projection_coefficients"]=np.asarray(point_chars,np.complex128)
     if params.get("tr_phase",None) is not None:
         save_items["variational_tr_phase"]=np.asarray(
             params["tr_phase"],dtype=np.float64
@@ -758,19 +772,49 @@ def main():
         if "label" not in t:
             t["label"]=f"m{int(t.get('m',0))}"
 
+    # For a degenerate ED ground space, use the actual 18-operation
+    # residual group rather than assuming internal Gamma or A1/A2.
+    # Tint warmup retains the union of all ground-manifold momenta;
+    # the full spatial stage resolves each distinct residual irrep.
+    if exact_available and ed_gs.shape[1]>1 and a.point_group=="c3v" and not a.skip_internal_translation:
+        sym_tol=max(1e-7,100*a.ed_degeneracy_tol)
+        tintg=build_internal_translation_group(g,native_H.states)
+        tint_sectors=ed_central_sectors(tintg,ed_gs,tol=sym_tol)
+        internal_translation_chars=sum(
+            (t["characters"] for t in tint_sectors),
+            np.zeros(len(tintg),complex)
+        )
+        internal_translation_label=("Gamma" if np.allclose(internal_translation_chars,1)
+                                    else "ED_momenta")
+        rg=build_internal_c3v_space_group(g,native_H.states)
+        sectors=ed_central_sectors(rg,ed_gs,tol=sym_tol)
+        if a.restore_time_reversal:
+            sectors=pair_time_reversal_sectors(sectors,tol=10*sym_tol)
+        targets=[]
+        for idx,sec in enumerate(sectors):
+            ch=sec["characters"]
+            label=f"ED{idx+1:02d}_d{sec['irrep_dimension']}"
+            if sec.get("tr_paired"):
+                label+="_TRpair"
+            # Give the familiar Gamma irreps their conventional labels.
+            for ir in ("A1","A2","E"):
+                ref=np.tile(c3v_irrep_characters(ir)*(2 if ir=="E" else 1),3)
+                if np.max(abs(ch-ref))<10*sym_tol:
+                    label=ir
+                    break
+            targets.append(dict(sec,label=label))
+            residual_spatial_chars_by_label[label]=ch
+        print(f"[ED] Tint ground momenta={len(tint_sectors)}, "
+              f"residual targets={[t['label'] for t in targets]}",flush=True)
+
     if internal_translation_chars is None:
-        if exact_available and ed_gs is not None and ed_gs.shape[1] != 1 and not a.skip_internal_translation:
-            raise RuntimeError(
-                "The staged internal-translation benchmark currently requires a unique "
-                "1x1 ED ground state. Use --skip-internal-translation for a degenerate "
-                "ED manifold until matrix-valued residual irreps are implemented."
-            )
         internal_translation_chars=np.ones(3,dtype=np.complex128)
         internal_translation_label="Gamma"
         if a.point_group=="c3v":
             for t in targets:
                 residual_spatial_chars_by_label[str(t["label"])]=(
-                    internal_gamma_c3v_characters(str(t["label"]))
+                    (np.tile(2*c3v_irrep_characters("E"),3)
+                     if str(t["label"])=="E" else internal_gamma_c3v_characters(str(t["label"])))
                 )
 
     point_maps=None
@@ -794,6 +838,8 @@ def main():
             ) from exc
     settings={
         **vars(a),
+        "internal_translation_projector": [[float(z.real),float(z.imag)] for z in internal_translation_chars],
+        "residual_projectors": {k:[[float(z.real),float(z.imag)] for z in v] for k,v in residual_spatial_chars_by_label.items()},
         "family":"ring3_supercell_bloch",
         "Ns":g.Ns,"Nf":nf,
         "n_supercells":a.L1*a.L2,
@@ -811,6 +857,8 @@ def main():
         "point_group_targets":[{
             "label":str(t["label"]),
             "ground_dimension":t["ground_dimension"],
+            "irrep_dimension":t.get("irrep_dimension"),
+            "tr_paired":bool(t.get("tr_paired",False)),
         } for t in targets],
     }
     atomic_json(out/"settings.json",settings)
