@@ -111,7 +111,7 @@ def _solve_ed_full(g, nf, V, k=8, degeneracy_tol=1e-8):
     truncated = deg == len(evals)
     gs = evecs[:, mask]
     t2 = time.perf_counter()
-    obs = benchmark_observables(g, H.states, gs, native_observables)
+    obs = benchmark_observables(g, H.states, gs, native_observables, ground_manifold=not truncated)
     t_obs = time.perf_counter() - t2
     row = {
         "method": "ED",
@@ -222,7 +222,7 @@ def _solve_ed_symmetry(g, nf, V, k=8, degeneracy_tol=1e-8, sector_low=4):
     gs,_=np.linalg.qr(gs)
 
     t2=time.perf_counter()
-    obs=benchmark_observables(g,H.states,gs,native_observables)
+    obs=benchmark_observables(g,H.states,gs,native_observables,ground_manifold=not truncated)
     t_obs=time.perf_counter()-t2
 
     row={

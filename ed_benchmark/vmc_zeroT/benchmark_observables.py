@@ -6,7 +6,8 @@ in the final benchmark are not Monte-Carlo measurement noise.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from order_diagnostics import order_diagnostics
 from itertools import product
 import math
 import numpy as np
@@ -27,6 +28,7 @@ class ObservableResult:
     lc_opposite_S: float
     lc_same_S_connected: float
     lc_opposite_S_connected: float
+    diagnostics: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {
@@ -43,6 +45,7 @@ class ObservableResult:
             "S_LC_opposite": self.lc_opposite_S,
             "S_LC_same_connected": self.lc_same_S_connected,
             "S_LC_opposite_connected": self.lc_opposite_S_connected,
+            **self.diagnostics,
         }
 
 
@@ -117,7 +120,7 @@ def _normalized_columns(psi_vectors: np.ndarray) -> np.ndarray:
     return x / norms[None, :]
 
 
-def benchmark_observables(g, states, psi_vectors, native_observables_module, weights=None) -> ObservableResult:
+def benchmark_observables(g, states, psi_vectors, native_observables_module, weights=None, *, ground_manifold=False) -> ObservableResult:
     """Compute common charge, BOW, and LC diagnostics.
 
     Several ED ground vectors are interpreted as an incoherent ensemble,
@@ -132,6 +135,9 @@ def benchmark_observables(g, states, psi_vectors, native_observables_module, wei
     weights = np.asarray(weights, float)
     weights = weights / weights.sum()
 
+    if ground_manifold:
+        if not np.allclose(psi.conj().T@psi,np.eye(ng),atol=1e-8) or not np.allclose(weights,1/ng):
+            raise ValueError("Ground diagnostics require an orthonormal, equally weighted complete manifold")
     ns = g.Ns
     occ = occupations_from_native_states(states, ns)
     density = np.zeros(ns, float)
@@ -144,6 +150,7 @@ def benchmark_observables(g, states, psi_vectors, native_observables_module, wei
     ntri = len(tri)
     J_mean = np.zeros(ntri, complex)
     J_second = np.zeros((ntri, ntri), complex)
+    current_projected = np.zeros((ntri,ng,ng),complex) if ground_manifold else None
 
     fstar = ruby_star_formfactor(g)
     bow_terms = _bow_terms(g, fstar)
@@ -172,6 +179,8 @@ def benchmark_observables(g, states, psi_vectors, native_observables_module, wei
         rawJ = jvec.conj() @ jvec.T
         J_mean += w * jm
         J_second += w * rawJ
+        if ground_manifold:
+            current_projected[:,:,a] = (psi.conj().T@jvec.T).T
 
         bx = native_observables_module.op_sum(v, states, ns, bow_terms)
         bm = np.vdot(v, bx)
@@ -208,6 +217,8 @@ def benchmark_observables(g, states, psi_vectors, native_observables_module, wei
     if opp_S < 0 and abs(opp_S) < 1e-12:
         opp_S = 0.0
 
+    diagnostics=order_diagnostics(g,occ,psi,weights,raw_delta_n,J_second,tri,
+                                  current_projected,ground_manifold=ground_manifold)
     return ObservableResult(
         charge_qmax=float(qmax["value"]),
         charge_q1=float(qmax["k"][0]),
@@ -222,4 +233,5 @@ def benchmark_observables(g, states, psi_vectors, native_observables_module, wei
         lc_opposite_S=opp_S_raw,
         lc_same_S_connected=same_S,
         lc_opposite_S_connected=opp_S,
+        diagnostics=diagnostics,
     )
