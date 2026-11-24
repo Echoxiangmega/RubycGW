@@ -9,7 +9,7 @@ square LxL ring3 supercells, then collects the corresponding order diagnostics.
 Typical use
 -----------
   python run_supercell_fixed_phase_fss.py \
-      --sizes 2 3 4 5 \
+      --shapes 2x2 2x3 3x3 3x4 4x4 \
       --V 3 \
       --filling 2/9 \
       --seed lc_same \
@@ -18,11 +18,11 @@ Typical use
 Extra arguments after "--" are forwarded to run_supercell_vscan.py, e.g.
   ... --output results/fss -- --eval-samples 16384 --anchor-iter 260
 
-For a Slurm array it is often better to run one size per task:
-  ... --sizes 4 --V 3 --filling 2/9 --seed lc_same --output results/fss
+For a Slurm array it is often better to run one shape per task:
+  ... --shapes 3x4 --V 3 --filling 2/9 --seed lc_same --output results/fss --run-only
 
-Then run once with --collect-only and all desired --sizes to make the combined
-CSV/plots.
+Then run once with --collect-only and all desired --shapes to make the
+combined CSV/plots.
 
 Important
 ---------
@@ -102,6 +102,7 @@ def _resource_row(L1,L2,filling,eval_samples=16384,train_samples=4096,ref_shape=
     else:
         chunk,qchunk=32,32
 
+    sweep=max(16,int(round(2*nf/3)))
     return {
         "L1":int(L1),
         "L2":int(L2),
@@ -115,6 +116,8 @@ def _resource_row(L1,L2,filling,eval_samples=16384,train_samples=4096,ref_shape=
         "jacobian_16384_estimate_GiB":jac_eval,
         "chunk_size_auto":chunk,
         "qgt_chunk_size_auto":qchunk,
+        "sweep_size_auto":sweep,
+        "sweep_proposals_per_particle":float(sweep)/float(nf),
         "runtime_relative_Nf2":r2,
         "runtime_relative_Nf3":r3,
     }
@@ -124,7 +127,7 @@ def _print_resource_table(shapes,filling):
     rows=[_resource_row(L1,L2,filling) for L1,L2 in shapes]
     print("\n[resource estimate] current Raw backflow ansatz",flush=True)
     print(
-        " shape    Ns    Nf   params   denseQGT(GiB)  Jac4096  Jac16384"
+        " shape    Ns    Nf   params   sweep  prop/Nf  Jac16384"
         "  chunk/qchunk   time rel. ~Nf^2..Nf^3",
         flush=True,
     )
@@ -139,8 +142,8 @@ def _print_resource_table(shapes,filling):
         print(
             f"{tag:>6s} {r['Ns']:5d} {r['Nf']:5d} "
             f"{r['n_parameters_estimate']:7d} "
-            f"{r['dense_qgt_estimate_GiB']:13.4f} "
-            f"{r['jacobian_4096_estimate_GiB']:8.4f} "
+            f"{r['sweep_size_auto']:6d} "
+            f"{r['sweep_proposals_per_particle']:8.3f} "
             f"{r['jacobian_16384_estimate_GiB']:9.4f} "
             f"{r['chunk_size_auto']:4d}/{r['qgt_chunk_size_auto']:<4d} "
             f"{r['runtime_relative_Nf2']:7.2f}.."
