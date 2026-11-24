@@ -823,12 +823,28 @@ def main():
         f"max_conn_size={max_conn}",
         flush=True,
     )
-    current_ops=_current_operators(hi,g)
-    print(
-        "[current operators] "
-        + ", ".join(type(op).__name__ for op in current_ops),
-        flush=True,
+    defer_current_ops=(
+        bool(a.skip_pav)
+        and a.correlator=="backflow"
+        and bool(getattr(a,"fast_local_energy",False))
     )
+    if defer_current_ops:
+        # Raw fast-local/backflow stages measure J and <J^2> from the exact
+        # Woodbury local-current estimator.  Building symbolic J^2 here scales
+        # very poorly with the number of triangles and is unnecessary.
+        current_ops=None
+        print(
+            "[current operators] deferred: Raw fast-local/backflow path uses "
+            "Woodbury J_loc and |J_loc|^2",
+            flush=True,
+        )
+    else:
+        current_ops=_current_operators(hi,g)
+        print(
+            "[current operators] "
+            + ", ".join(type(op).__name__ for op in current_ops),
+            flush=True,
+        )
     _,_,shell_mats,_=jastrow_channels(
         g,mode=a.jastrow_mode,n_shells=a.jastrow_shells
     )
