@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Raw-only V scan at fixed filling 1/3 for ring3 supercells.
+"""Raw-only V scan for ring3 supercells at configurable fixed filling.
 
 Primary use on a cluster:
   * one process / Slurm-array task per (L1,L2,seed,direction);
@@ -78,11 +78,10 @@ def _auto_chunks(L1,L2):
     return 32,32
 
 
-def _auto_sweep(L1,L2):
-    nf=6*int(L1)*int(L2)
-    # About 2/3 of Nf reproduces the tested 2x2 value 16 while keeping
-    # decorrelation effort proportional to system size.
-    return max(16,int(round(2*nf/3)))
+def _auto_sweep(nf):
+    # About 2/3 of Nf reproduces the tested 1/3-filled 2x2 value 16 while
+    # keeping decorrelation effort proportional to the actual particle number.
+    return max(16,int(round(2*int(nf)/3)))
 
 
 def _write_rows(path,rows):
@@ -161,6 +160,21 @@ def parser():
     )
     p.add_argument("--L1",type=int,required=True)
     p.add_argument("--L2",type=int,required=True)
+    filling_group=p.add_mutually_exclusive_group()
+    filling_group.add_argument(
+        "--nf",type=int,default=None,
+        help=(
+            "Exact particle number. If omitted together with --filling, "
+            "the historical default Nf/Ns=1/3 is used."
+        ),
+    )
+    filling_group.add_argument(
+        "--filling",type=float,default=None,
+        help=(
+            "Requested particle filling Nf/Ns. It must correspond to an "
+            "integer particle number for the selected L1,L2 supercell."
+        ),
+    )
     p.add_argument("--seed",choices=DEFAULT_SEEDS,required=True)
     p.add_argument(
         "--mode",choices=["continuation","independent"],
@@ -239,8 +253,39 @@ def main():
     if int(a.maps_every)<0:
         raise ValueError("--maps-every must be >= 0")
 
-    nf=6*a.L1*a.L2  # fixed filling = Nf/Ns = 1/3
     ns=18*a.L1*a.L2
+    if a.nf is not None:
+        nf=int(a.nf)
+        filling_requested=None
+    elif a.filling is not None:
+        filling_requested=float(a.filling)
+        if not (0.0<filling_requested<1.0):
+            raise ValueError("--filling must satisfy 0 < filling < 1")
+        nf_float=filling_requested*ns
+        nf=int(round(nf_float))
+        if abs(nf_float-nf)>1e-8:
+            lower=max(1,int(math.floor(nf_float)))
+            upper=min(ns-1,int(math.ceil(nf_float)))
+            choices=sorted(set((lower,upper)))
+            detail=", ".join(
+                f"Nf={n} -> filling={n/ns:.12g}" for n in choices
+            )
+            raise ValueError(
+                f"--filling={filling_requested:.12g} gives noninteger "
+                f"Nf={nf_float:.12g} for Ns={ns}. "
+                f"Choose an exactly representable filling or use --nf. "
+                f"Nearest choices: {detail}"
+            )
+    else:
+        nf=6*a.L1*a.L2
+        filling_requested=1.0/3.0
+
+    if not (1<=nf<ns):
+        raise ValueError(
+            f"Particle number must satisfy 1 <= Nf < Ns; got Nf={nf}, Ns={ns}"
+        )
+    filling_effective=float(nf)/float(ns)
+
     chunk_auto,qgt_chunk_auto=_auto_chunks(a.L1,a.L2)
     chunk=chunk_auto if a.chunk_size is None else int(a.chunk_size)
     qgt_chunk=(
@@ -249,7 +294,7 @@ def main():
         else int(a.qgt_chunk_size)
     )
     sweep=(
-        _auto_sweep(a.L1,a.L2)
+        _auto_sweep(nf)
         if a.sweep_size is None
         else int(a.sweep_size)
     )
@@ -267,7 +312,8 @@ def main():
         **vars(a),
         "Ns":ns,
         "Nf":nf,
-        "filling":1.0/3.0,
+        "filling":filling_effective,
+        "filling_requested":filling_requested,
         "V_scan_order":values,
         "chunk_size_effective":chunk,
         "qgt_chunk_size_effective":qgt_chunk,
@@ -277,6 +323,12 @@ def main():
     (branch_root/"scan_settings.json").write_text(
         json.dumps(settings,indent=2,ensure_ascii=False),
         encoding="utf-8",
+    )
+
+    print(
+        f"[scan] size={a.L1}x{a.L2} Ns={ns} Nf={nf} "
+        f"filling={filling_effective:.12g} sweep_size={sweep}",
+        flush=True,
     )
 
     rows=[]
