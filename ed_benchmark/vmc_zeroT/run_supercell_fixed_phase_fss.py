@@ -363,6 +363,23 @@ def parser():
         "--sampler-chunk-size",type=int,default=None,
         help="Optional sampler chunk size forwarded to run_supercell_vscan.py.",
     )
+    p.add_argument(
+        "--iter",type=int,default=230,
+        help=(
+            "Raw optimization iterations for each fixed-V size task. Because "
+            "each task contains a single V point, this maps to --anchor-iter."
+        ),
+    )
+    p.add_argument("--train-samples-early",type=int,default=1024)
+    p.add_argument("--train-samples-late",type=int,default=2048)
+    p.add_argument("--train-samples-refine",type=int,default=4096)
+    p.add_argument("--eval-samples",type=int,default=8192)
+    p.add_argument("--n-chains",type=int,default=32)
+    p.add_argument("--n-discard",type=int,default=16)
+    p.add_argument(
+        "--sweep-size",type=int,default=None,
+        help="Explicit Metropolis proposals per sweep; omit to use V-scan auto.",
+    )
     p.add_argument("--t",type=float,default=1.0)
     p.add_argument("--t1",type=float,default=0.5)
     p.add_argument("--t2",type=float,default=-0.5)
@@ -424,6 +441,14 @@ def main():
         "seed":a.seed,
         "sampler":a.sampler,
         "sampler_chunk_size":a.sampler_chunk_size,
+        "iter":int(a.iter),
+        "train_samples_early":int(a.train_samples_early),
+        "train_samples_late":int(a.train_samples_late),
+        "train_samples_refine":int(a.train_samples_refine),
+        "eval_samples":int(a.eval_samples),
+        "n_chains":int(a.n_chains),
+        "n_discard":int(a.n_discard),
+        "sweep_size":a.sweep_size,
         "t":float(a.t),"t1":float(a.t1),"t2":float(a.t2),
         "seed_amplitude":float(a.seed_amplitude),
         "resource_estimates":resource_rows,
@@ -466,6 +491,13 @@ def main():
                 "--filling",str(filling),
                 "--seed",a.seed,
                 "--sampler",a.sampler,
+                "--anchor-iter",str(int(a.iter)),
+                "--train-samples-early",str(int(a.train_samples_early)),
+                "--train-samples-late",str(int(a.train_samples_late)),
+                "--train-samples-refine",str(int(a.train_samples_refine)),
+                "--eval-samples",str(int(a.eval_samples)),
+                "--n-chains",str(int(a.n_chains)),
+                "--n-discard",str(int(a.n_discard)),
                 "--mode","continuation",
                 "--direction","up",
                 "--V-values",str(float(a.V)),
@@ -477,6 +509,8 @@ def main():
                 cmd.extend([
                     "--sampler-chunk-size",str(int(a.sampler_chunk_size))
                 ])
+            if a.sweep_size is not None:
+                cmd.extend(["--sweep-size",str(int(a.sweep_size))])
             print("\n[fss run] "+" ".join(cmd),flush=True)
             if not a.dry_run:
                 subprocess.run(cmd,check=True)
