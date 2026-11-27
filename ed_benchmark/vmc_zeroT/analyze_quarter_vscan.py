@@ -72,7 +72,8 @@ def main(argv=None):
     cmd=[sys.executable,str(HERE/'analyze_supercell_vscan.py'),
          '--root',str(root),'--master',str(master),
          '--mode',a.mode,'--direction',a.direction,
-         '--tie-sigma',str(a.tie_sigma),'--energy-reference','normal']
+         '--tie-sigma',str(a.tie_sigma),'--energy-reference','normal',
+         '--expected-seeds',*SEEDS]
     if a.output is not None:cmd+=['--output',a.output]
     subprocess.run(cmd,check=True)
     print(f'[analysis] One-command collection and analysis complete: {root}')

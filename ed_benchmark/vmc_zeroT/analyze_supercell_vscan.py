@@ -181,8 +181,8 @@ def _write_csv(path,rows):
         w.writerows(rows)
 
 
-def _phase_rows(size_rows,tie_sigma):
-    """Assign phases by comparing distinct final physical phases, not seeds.
+def _phase_rows(size_rows,tie_sigma,expected_seeds=None):
+    """Rank variational candidates using their measured energies.
 
     Several continuation seeds can converge to the same physical phase.  Such
     seed-to-seed near-degeneracy is evidence for optimisation consistency, not
@@ -190,10 +190,12 @@ def _phase_rows(size_rows,tie_sigma):
     lowest-energy representative of every final phase_label, and then compare
     the best and second-best *distinct phases*.
     """
-    all_branches={
+    observed_branches={
         _s(r.get("branch_seed",r.get("seed")))
         for r in size_rows
     }
+    all_branches=(set(expected_seeds) if expected_seeds is not None
+                  else observed_branches)
     by_v=defaultdict(list)
     for r in size_rows:
         by_v[round(_f(r.get("scan_V",r.get("V"))),12)].append(r)
@@ -223,8 +225,8 @@ def _phase_rows(size_rows,tie_sigma):
             e2=gap=sgap=z=np.nan
             second_seed=""
             second_phase=""
-            # With all expected branches present, seeing only one physical
-            # phase is a definite phase assignment, not a tie.
+            # Missing branches are checked separately below. A single
+            # observed candidate cannot certify the physical phase.
             phase_uncertain=False
         else:
             e2=_f(second.get("mc_E"))
@@ -252,6 +254,7 @@ def _phase_rows(size_rows,tie_sigma):
 
         out.append({
             "V":V,
+            "assignment_scope":"lowest-energy tested variational candidate",
             "winner_seed":best_seed,
             "winner_phase":best_phase,
             "winner_E":e1,
@@ -541,8 +544,8 @@ def _phase_plot(phase_rows,outdir,L1,L2,tie_sigma):
     ax.set_yticks([])
     ax.set_xlabel("V")
     ax.set_title(
-        f"Lowest-energy Raw phase assignment, {L1}x{L2}\n"
-        "text shows the winning continuation seed"
+        f"Lowest-energy tested variational candidate, {L1}x{L2}\n"
+        "text shows the winning continuation seed; order needs separate tests"
     )
     fig.tight_layout()
     fig.savefig(outdir/"phase_diagram.png",dpi=220)
@@ -837,10 +840,13 @@ def _phase_table_public(phase_rows):
             k:v for k,v in r.items()
             if k!="_winner_row"
         }
-        for key in ("mx","my","mz","B_sign","M_pseudospin_x",
+        for key in ("mx","my","mz","B_sign","delta","mu",
+                    "M_pseudospin_x",
                     "M_pseudospin_y","M_pseudospin_z",
                     "M_pseudospin_xy_amplitude","M_pseudospin_z_amplitude",
                     "pair_far_s_abs","pair_far_dplus_abs","pair_far_dminus_abs",
+                    "pair_far_s_error","pair_far_dplus_error",
+                    "pair_far_dminus_error",
                     "pair_far_distance","pair_far_samples"):
             row["winner_"+key]=r["_winner_row"].get(key,"")
         out.append(row)
@@ -993,6 +999,8 @@ def main():
                    help="Below this combined-error z-score, mark the phase assignment uncertain.")
     p.add_argument("--energy-reference",default="normal",
                    help="Fixed branch used for energy-difference and z-score plots.")
+    p.add_argument("--expected-seeds",nargs="+",default=None,
+                   help="Full branch list; absent branches mark candidate rankings incomplete.")
     p.add_argument("--fss-v",nargs="*",type=float,default=None,
                    help="V values for finite-size scaling; nearest common scan values are used.")
     a=p.parse_args()
@@ -1029,7 +1037,7 @@ def main():
     for (L1,L2),rr in sorted(grouped.items()):
         outdir=outroot/f"L{L1}x{L2}"
         outdir.mkdir(parents=True,exist_ok=True)
-        phase=_phase_rows(rr,a.tie_sigma)
+        phase=_phase_rows(rr,a.tie_sigma,expected_seeds=a.expected_seeds)
         size_phase[(L1,L2)]=phase
 
         _energy_plot(rr,outdir,L1,L2)
