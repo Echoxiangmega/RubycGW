@@ -308,6 +308,7 @@ def main():
              "--eval-samples",str(a.competing_eval_samples),
              "--refine-steps",str(a.competing_refine_steps),
              "--pair-samples",str(a.competing_pair_samples),
+             "--maps-every",str(a.maps_every),
              "--rng-seed",str(a.rng_seed),"--output",str(a.output)]
         if a.dry_run:cmd.append("--dry-run")
         if not a.resume:cmd.append("--no-resume")

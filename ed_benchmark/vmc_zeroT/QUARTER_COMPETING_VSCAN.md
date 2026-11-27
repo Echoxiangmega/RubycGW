@@ -82,6 +82,42 @@ running; stop and resubmit only the four new array tasks after pulling the
 new code. Completed V-point summaries are resumed with the same OUT and
 unchanged scan settings; an incomplete V point starts again.
 
+## One-body maps for the four new branches
+
+The new CPU branches originally ignored `--maps-every`, so older completed
+points have only energy/order and separated-pair diagnostics. New scans pass
+`--maps-every` through to the CPU runner and save independent Monte Carlo
+site-density, bond-order and bond-current maps at scan indices 0,N,2N,...
+and the final point. Each map is stored under
+`V_p.../quarter_maps/{site_density.csv,bond_observables.csv,
+site_bond_current_triptych.png,site_bond_current_triptych.svg,map_summary.json}`.
+The maps are one-body expectations; a bond-current map is not a measurement
+of superconducting coherence, and statistical noise must be assessed before
+interpreting small current arrows.
+
+Existing completed points can be mapped without repeating optimization. Use
+the same model, scan direction, mode and output root as the original run:
+
+```bash
+for seed in sdw pf_s pf_dplus pf_dminus; do
+  python -u research/quarter_competing_vscan.py \
+    --L1 4 --L2 4 --filling 1/4 --t 1 --t1 -0.5 --t2 0.5 \
+    --seed "$seed" --mode continuation --direction down \
+    --V-min 0.5 --V-max 3.5 --V-step 0.2 \
+    --maps-only --maps-every 6 --map-samples 4096 \
+    --output results/vscan_quarter_L4
+done
+```
+
+`--maps-only` reads saved `competing_summary.json` parameters and never
+reoptimizes or rewrites existing `branch_scan.csv`/energy summaries. Missing
+points are reported and skipped. `--V-values 1.5 2.5 --maps-every 1`
+selects particular V values instead; use `--overwrite-maps` to resample a
+previously mapped point. The separate map chain uses the original saved
+evaluation burn/interval and a distinct random seed. If a live Slurm job is
+still writing the same point, wait until that point completes before running
+the backfill.
+
 ## Run
 
 From the repository root, for a single branch:

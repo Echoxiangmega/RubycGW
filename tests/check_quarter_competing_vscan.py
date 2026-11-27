@@ -10,7 +10,7 @@ REPO=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(REPO/'ed_benchmark'/'native_ed'),
               str(REPO/'ed_benchmark'/'vmc_zeroT'),str(REPO/'research')]
 
-from core import FixedHamiltonian,make_states  # noqa: E402
+from core import FixedHamiltonian,make_states,edge_triplets  # noqa: E402
 from geometry import RubyPBC,make_ring3_supercell  # noqa: E402
 from observables import apply_ops  # noqa: E402
 from quarter_competing_vscan import Trial,exact_filling,_add,_remove  # noqa: E402
@@ -99,6 +99,29 @@ def check():
             cache=trial.hop_cache(target,previous=cache,move=(src,dst))
             chain=target
             assert np.allclose(cache[1],trial.features(chain),atol=1e-10),seed
+
+    # The map's oriented rho=<c_i^dag c_j> estimator must agree with the
+    # exact Fock-space matrix element, including the fermion sign and phase.
+    states=make_states(g.Ns,2)
+    configs=[np.flatnonzero([(int(s)>>(g.Ns-1-i))&1
+                            for i in range(g.Ns)]) for s in states]
+    for seed,params in (
+        ('sdw',dict(mx=.09,my=.05,mz=.02,B_sign=1,v=[.03]*7)),
+        ('pf_dplus',dict(delta=.2,mu=-.9,v=[.03]*7)),
+    ):
+        trial=Trial(g,2,seed,params,mats)
+        log=np.asarray([trial.logpsi(x) for x in configs])
+        psi=np.exp(log-np.max(log.real));psi/=np.linalg.norm(psi)
+        edge=g.edges[0]
+        row,col,sign=edge_triplets(g,states,0)
+        from_j=np.asarray([int(edge.j) in configs[c] for c in col])
+        exact=np.vdot(psi[row[from_j]],sign[from_j]*psi[col[from_j]])
+        estimator=0j
+        for config,amp in zip(configs,psi):
+            if int(edge.i) in config and int(edge.j) not in config and abs(amp)>1e-14:
+                ratio,parity,_=trial.hop_ratio(config,int(edge.i),int(edge.j))
+                estimator+=abs(amp)**2*parity*ratio
+        assert np.allclose(estimator,exact,atol=1e-11),seed
     print('Pfaffian, filling/M compatibility, and four local energies: OK')
 
 

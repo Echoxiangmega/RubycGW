@@ -308,7 +308,7 @@ class Trial:
 
 
 def sample(trial,V,*,warmup,samples,interval,rng,measure=True,orders=False,
-           pair_samples=0):
+           pair_samples=0,maps=False):
     g=trial.g;nf=trial.nf
     for _ in range(2000):
         occ=np.sort(rng.choice(g.Ns,nf,replace=False))
@@ -323,6 +323,9 @@ def sample(trial,V,*,warmup,samples,interval,rng,measure=True,orders=False,
     pair_values=[]
     pair_stride=max(1,samples//pair_samples) if pair_samples else 0
     values=[];features=[];measured_orders=[];accepted=attempted=0
+    if maps:
+        map_density=np.zeros(g.Ns,float)
+        map_rho=np.zeros(len(g.edges),complex)
     for sweep in range(warmup+samples*interval):
         for _ in range(nf):
             filled=np.zeros(g.Ns,bool);filled[occ]=True
@@ -343,10 +346,24 @@ def sample(trial,V,*,warmup,samples,interval,rng,measure=True,orders=False,
             if pair_info is not None and isample%pair_stride==0 and len(pair_values)<pair_samples:
                 pair_values.append(far_pair_estimator(trial,occ,logpsi,
                                       pair_info[0],pair_info[1]))
+            if maps:
+                # rho_e=<c_i^dag c_j> for the oriented edge (i,j).
+                # The local estimator is nonzero for n_i=1,n_j=0; the
+                # fermionic sign is separate from the wavefunction ratio.
+                filled=np.zeros(g.Ns,bool);filled[occ]=True
+                map_density[occ]+=1.
+                for ie,e in enumerate(g.edges):
+                    i,j=int(e.i),int(e.j)
+                    if filled[i] and not filled[j]:
+                        ratio,sign,_=trial.hop_ratio(occ,i,j,cache)
+                        map_rho[ie]+=sign*ratio
             features.append(cache[1].copy())
     feats=np.asarray(features,float)
     out={'acceptance':accepted/attempted,'samples':samples,
          'features':feats}
+    if maps:
+        out['map_density']=map_density/samples
+        out['map_rho']=map_rho/samples
     if measure:
         y=np.asarray(values,complex)
         if not np.all(np.isfinite(y)):
@@ -495,6 +512,61 @@ def write_rows(path,rows):
         writer=csv.DictWriter(f,fieldnames=keys);writer.writeheader();writer.writerows(rows)
 
 
+def save_maps(g,nf,mats,seed,row,V,point,*,samples,burn,interval,rng_seed,
+              overwrite=False):
+    """Measure one-body site/bond/current maps from saved variational parameters."""
+    from plot_saved_state_maps import (
+        site_positions,edge_segments,export_site_csv,export_bond_csv,
+        plot_site_bond_current_triptych,
+    )
+    map_dir=point/'quarter_maps'
+    metadata_path=map_dir/'map_summary.json'
+    if metadata_path.exists() and not overwrite:
+        saved=json.loads(metadata_path.read_text())
+        if int(saved.get('n_samples',-1))==samples:
+            print(f'[quarter maps] reuse {map_dir}',flush=True)
+            return
+    params={key:row[key] for key in
+            (('mx','my','mz','B_sign','v') if seed=='sdw'
+             else ('delta','mu','v'))}
+    trial=Trial(g,nf,seed,params,mats)
+    t0=time.perf_counter()
+    print(f'[quarter maps] {seed} V={V:g}: sampling {samples} '
+          f'configurations',flush=True)
+    result=sample(trial,V,warmup=burn,samples=samples,interval=interval,
+                  rng=np.random.default_rng(rng_seed),measure=False,maps=True)
+    density=np.asarray(result['map_density'],float)
+    rho=np.asarray(result['map_rho'],complex)
+    bond=2*np.real(rho)
+    current=np.asarray([float((1j*float(g.t[e.kind])*(z-z.conjugate())).real)
+                        for e,z in zip(g.edges,rho)])
+    if not np.isclose(density.sum(),nf,atol=1e-8):
+        raise RuntimeError('Map density sum is inconsistent with fixed Nf')
+    map_dir.mkdir(parents=True,exist_ok=True)
+    xy,cells=site_positions(g)
+    starts,ends,crossed=edge_segments(g,xy,cells)
+    export_site_csv(map_dir/'site_density.csv',g,xy,density)
+    export_bond_csv(map_dir/'bond_observables.csv',g,starts,ends,crossed,
+                    rho,bond,current)
+    title=f'L{row["L1"]}x{row["L2"]} {seed} V={V:g}, Nf={nf}'
+    plot_site_bond_current_triptych(g,xy,starts,ends,crossed,density,bond,
+                                    current,map_dir,title)
+    metadata={
+        'seed':seed,'V':float(V),'Nf':int(nf),'Ns':int(g.Ns),
+        'n_samples':int(samples),'burn':int(burn),'interval':int(interval),
+        'rng_seed':int(rng_seed),'acceptance':float(result['acceptance']),
+        'mean_density':float(density.mean()),
+        'density_rms_modulation':float(density.std()),
+        'max_abs_bond_order':float(np.max(abs(bond))),
+        'max_abs_current':float(np.max(abs(current))),
+        'estimator':'fixed-N Pfaffian/SDW hop ratios on independent MC chain',
+        'elapsed_s':float(time.perf_counter()-t0),
+    }
+    metadata_path.write_text(json.dumps(metadata,indent=2))
+    print(f'[quarter maps] wrote {map_dir}, '
+          f'elapsed={metadata["elapsed_s"]:.1f}s',flush=True)
+
+
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--L1',type=int,required=True);p.add_argument('--L2',type=int,required=True)
@@ -512,6 +584,13 @@ def main(argv=None):
     p.add_argument('--interval',type=int,default=2);p.add_argument('--refine-steps',type=int,default=9)
     p.add_argument('--pair-samples',type=int,default=64,
                    help='Sparse final-chain samples of separated s/d pair correlations')
+    p.add_argument('--maps-every',type=int,default=0,
+                   help='Map scan indices 0,N,2N,... and the final V; 0 disables maps')
+    p.add_argument('--map-samples',type=int,default=None,
+                   help='Independent site/bond/current samples; defaults to eval-samples')
+    p.add_argument('--maps-only',action='store_true',
+                   help='Backfill maps from completed V summaries without optimizing')
+    p.add_argument('--overwrite-maps',action='store_true')
     p.add_argument('--rng-seed',type=int,default=2026)
     p.add_argument('--resume',action=argparse.BooleanOptionalAction,default=True)
     p.add_argument('--output',required=True);p.add_argument('--dry-run',action='store_true')
@@ -522,7 +601,8 @@ def main(argv=None):
     ns,nf=exact_filling(a.L1,a.L2,a.filling)
     values=v_values(a)
     if (a.train_samples<16 or a.eval_samples<16 or a.interval<1 or
-        a.refine_steps<0 or a.pair_samples<0 or a.pair_samples>a.eval_samples):
+        a.refine_steps<0 or a.pair_samples<0 or a.pair_samples>a.eval_samples or
+        a.maps_every<0 or (a.map_samples is not None and a.map_samples<16)):
         raise ValueError('Require >=16 samples, interval>=1, and refine-steps>=0')
     root=Path(a.output).expanduser().resolve()
     branch=root/f'L{a.L1}x{a.L2}'/f'seed_{a.seed}'/f'{a.mode}_{a.direction}'
@@ -539,18 +619,37 @@ def main(argv=None):
     settings_path=branch/'scan_settings.json'
     if settings_path.exists():
         old=json.loads(settings_path.read_text())
-        for k in ('L1','L2','seed','filling','Nf','t','t1','t2',
-                  'ansatz_schema_version',
-                  'seed_amplitude','rng_seed','burn','eval_burn','interval',
-                  'train_samples','eval_samples','refine_steps','pair_samples'):
+        checked=('L1','L2','seed','filling','Nf','t','t1','t2',
+                 'ansatz_schema_version')
+        if not a.maps_only:
+            checked+=('seed_amplitude','rng_seed','burn','eval_burn',
+                      'interval','train_samples','eval_samples',
+                      'refine_steps','pair_samples')
+        for k in checked:
             if old.get(k)!=settings[k]:
                 raise ValueError(f'Incompatible saved branch setting {k}: '
                                  f'{old.get(k)!r} vs {settings[k]!r}')
-    settings_path.write_text(json.dumps(settings,indent=2))
+    elif a.maps_only:
+        raise FileNotFoundError(f'No saved branch settings: {settings_path}')
+    if not a.maps_only:
+        settings_path.write_text(json.dumps(settings,indent=2))
     rows=[];previous=None;rng=np.random.default_rng(a.rng_seed)
     for index,V in enumerate(values):
         point=branch/vtag(V);point.mkdir(exist_ok=True)
         cached=point/'competing_summary.json'
+        make_map=a.maps_every>0 and (
+            index%a.maps_every==0 or index==len(values)-1)
+        if a.maps_only:
+            if make_map and cached.exists():
+                row=json.loads(cached.read_text())
+                save_maps(g,nf,mats,a.seed,row,V,point,
+                          samples=a.map_samples or int(old['eval_samples']),
+                          burn=int(old['eval_burn']),interval=int(old['interval']),
+                          rng_seed=int(old['rng_seed'])+721943+index,
+                          overwrite=a.overwrite_maps)
+            elif make_map:
+                print(f'[quarter maps] missing {cached}; skipping',flush=True)
+            continue
         if a.resume and cached.exists():
             row=json.loads(cached.read_text())
         else:
@@ -575,6 +674,12 @@ def main(argv=None):
                 else 'Raw-SDW-Slater-Jastrow',backflow_enabled=False,
                 correlator='bond_aware_J7',phase_label=label)
             cached.write_text(json.dumps(row,indent=2))
+        if make_map:
+            save_maps(g,nf,mats,a.seed,row,V,point,
+                      samples=a.map_samples or a.eval_samples,
+                      burn=a.eval_burn,interval=a.interval,
+                      rng_seed=a.rng_seed+721943+index,
+                      overwrite=a.overwrite_maps)
         previous={k:row[k] for k in (('mx','my','mz','B_sign','v')
                   if a.seed=='sdw' else ('delta','mu','v'))}
         rows.append(row);write_rows(branch/'branch_scan.csv',rows)
