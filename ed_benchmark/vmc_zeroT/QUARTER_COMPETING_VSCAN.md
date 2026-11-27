@@ -68,6 +68,20 @@ original Slater and paired counterparts are evaluated with the same native
 Hamiltonian; `tests/check_quarter_competing_vscan.py` verifies representative
 local energies against the exact 24-site Fock matrix.
 
+At 4x4 the first V has 12 independent SDW initial states (six for each Pf
+branch), then `refine_steps` rounds of several further sample calls, before
+the first energy summary is saved. This work is sampling and optimization,
+not a long Hamiltonian construction. The CPU sampler caches the inverse and
+the seven Jastrow density fields for every state, uses an exact O(7) Jastrow
+ratio for each proposed hop, and incrementally updates those fields after an
+accepted hop. It rebuilds the occupied inverse after accepted hops, so this
+is still distinct from the JAX/Woodbury sampler of the original eight seeds.
+The job log prints initial-state and refinement progress before the first V
+summary. Updating the code cannot speed up a Python job that is already
+running; stop and resubmit only the four new array tasks after pulling the
+new code. Completed V-point summaries are resumed with the same OUT and
+unchanged scan settings; an incomplete V point starts again.
+
 ## Run
 
 From the repository root, for a single branch:

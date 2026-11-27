@@ -82,6 +82,23 @@ def check():
             expected+=h*np.exp(trial.logpsi(config)-z)
         measured=trial.local_energy(occ,z,1.5)
         assert np.allclose(measured,expected,rtol=2e-11,atol=1e-10),seed
+
+        # Long accepted-hop chains must retain the exact Jastrow features and
+        # fixed-N determinant/Pfaffian amplitudes after every cache update.
+        chain=occ.copy();cache=trial.hop_cache(chain)
+        for _ in range(24):
+            src=int(rng.choice(chain))
+            dst=int(rng.choice(np.setdiff1d(np.arange(g.Ns),chain)))
+            ratio,_,target=trial.hop_ratio(chain,src,dst,cache)
+            # The reference logpf intentionally marks near-singular matrices
+            # as outside its numerical support.
+            if not np.isfinite(trial.logpsi(target).real):continue
+            direct=np.exp(trial.logpsi(target)-trial.logpsi(chain))
+            assert np.allclose(ratio,direct,rtol=2e-10,atol=2e-11),(
+                seed,src,dst,chain,ratio,direct,cache[1]-trial.features(chain))
+            cache=trial.hop_cache(target,previous=cache,move=(src,dst))
+            chain=target
+            assert np.allclose(cache[1],trial.features(chain),atol=1e-10),seed
     print('Pfaffian, filling/M compatibility, and four local energies: OK')
 
 

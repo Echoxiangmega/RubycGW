@@ -14,6 +14,7 @@ import csv
 import json
 import math
 import sys
+import time
 from fractions import Fraction
 from functools import lru_cache
 from pathlib import Path
@@ -213,8 +214,13 @@ class Trial:
             base=self.logpf(z)
         return base+float(self.v@self.features(occ))
 
-    def hop_cache(self,occ):
-        """One inverse for all connected hops out of this configuration."""
+    def hop_cache(self,occ,previous=None,move=None):
+        """Inverse and Jastrow fields shared by all hops from this state.
+
+        On an accepted hop, update the density field and seven features in
+        O(channels * Ns) instead of summing over every occupied pair again.
+        The inverse is rebuilt so the long Markov chain has no update drift.
+        """
         if self.Q is not None:a=self.Q[occ,:]
         elif self.blocked.shape[1]:
             a=np.block([[self.F[np.ix_(occ,occ)],self.blocked[occ]],
@@ -223,7 +229,23 @@ class Trial:
         else:a=self.F[np.ix_(occ,occ)]
         try:inverse=np.linalg.inv(a)
         except np.linalg.LinAlgError:inverse=None
-        return inverse,self.features(occ)
+        if previous is None:
+            field=self.mats[:,:,occ].sum(axis=2)
+            features=self.features(occ)
+        else:
+            if move is None:raise ValueError('Accepted hop required for cache update')
+            src,dst=move
+            features=previous[1]+self.feature_delta(src,dst,previous)
+            field=previous[2]+self.mats[:,:,dst]-self.mats[:,:,src]
+        return inverse,features,field
+
+    def feature_delta(self,src,dst,cache):
+        """Exact seven-channel feature change for an occupied src -> empty dst."""
+        field=cache[2]
+        return (field[:,dst]-field[:,src]
+                +.5*(self.mats[:,dst,dst]+self.mats[:,src,src]
+                       -2*self.mats[:,src,dst])
+                -self.fill*(self.rows[:,dst]-self.rows[:,src]))
 
     def hop_ratio(self,occ,a,b,cache=None):
         """Canonical amplitude ratio after moving an occupied a to empty b.
@@ -237,7 +259,7 @@ class Trial:
         parity=(-1 if np.count_nonzero((occ>min(a,b)) &
                                        (occ<max(a,b)))%2 else 1)
         if cache is None:cache=self.hop_cache(occ)
-        inverse,old_features=cache
+        inverse=cache[0]
         if inverse is None:
             ratio=np.exp(self.logpsi(target)-self.logpsi(occ))
             return ratio,parity,target
@@ -247,7 +269,7 @@ class Trial:
             v=np.r_[self.F[b,occ],self.blocked[b]]
             v[k]=0.
             basic=v@inverse[:,k]
-        exponent=float(self.v@(self.features(target)-old_features))
+        exponent=float(self.v@self.feature_delta(a,b,cache))
         ratio=parity*basic*np.exp(exponent)
         if not (np.isfinite(ratio.real) and np.isfinite(ratio.imag)):
             ratio=np.exp(self.logpsi(target)-self.logpsi(occ))
@@ -255,11 +277,11 @@ class Trial:
             raise FloatingPointError('Non-finite one-particle move ratio')
         return ratio,parity,target
 
-    def local_energy(self,occ,logpsi,V):
+    def local_energy(self,occ,logpsi,V,cache=None):
         occupied=np.zeros(self.g.Ns,bool);occupied[occ]=True
         tri=np.bincount(occ//3,minlength=self.g.Ns//3)
         energy=complex(V*np.sum(tri*(tri-1)//2))
-        cache=self.hop_cache(occ)
+        if cache is None:cache=self.hop_cache(occ)
         for e in self.g.edges:
             i,j=int(e.i),int(e.j)
             if occupied[i]==occupied[j]:continue
@@ -268,11 +290,11 @@ class Trial:
             energy+=self.g.t[e.kind]*sign*ratio
         return energy
 
-    def m_point_onebody(self,occ,logpsi):
+    def m_point_onebody(self,occ,logpsi,cache=None):
         """Local estimators of the three *measured* M-point order sources."""
         if self.m_sources is None:return None
         filled=np.zeros(self.g.Ns,bool);filled[occ]=True
-        cache=self.hop_cache(occ)
+        if cache is None:cache=self.hop_cache(occ)
         values=[]
         for source in self.m_sources:
             value=complex(np.sum(source[occ,occ]))
@@ -308,19 +330,20 @@ def sample(trial,V,*,warmup,samples,interval,rng,measure=True,orders=False,
             ratio,_,target=trial.hop_ratio(occ,a,b,cache);attempted+=1
             if abs(ratio)>0 and np.log(max(rng.random(),1e-300))<min(
                     0.,2*np.log(abs(ratio))):
+                previous=cache
                 occ=target
                 logpsi+=np.log(ratio)
-                cache=trial.hop_cache(occ)
+                cache=trial.hop_cache(occ,previous=previous,move=(a,b))
                 accepted+=1
         if sweep>=warmup and (sweep-warmup)%interval==0:
             isample=(sweep-warmup)//interval
-            if measure:values.append(trial.local_energy(occ,logpsi,V))
+            if measure:values.append(trial.local_energy(occ,logpsi,V,cache))
             if orders and trial.m_sources is not None:
-                measured_orders.append(trial.m_point_onebody(occ,logpsi))
+                measured_orders.append(trial.m_point_onebody(occ,logpsi,cache))
             if pair_info is not None and isample%pair_stride==0 and len(pair_values)<pair_samples:
                 pair_values.append(far_pair_estimator(trial,occ,logpsi,
                                       pair_info[0],pair_info[1]))
-            features.append(trial.features(occ))
+            features.append(cache[1].copy())
     feats=np.asarray(features,float)
     out={'acceptance':accepted/attempted,'samples':samples,
          'features':feats}
@@ -384,12 +407,15 @@ def initialize(seed,amplitude):
 
 def optimize(g,nf,mats,seed,V,initial,options,rng):
     """Bounded stochastic coordinate search and an SR update of all 7 Jastrows."""
+    started=time.perf_counter()
     params=[dict(x) for x in initial]
     if seed=='sdw':
         params+=initialize(seed,options.seed_amplitude)
     else:
         params+=initialize(seed,options.seed_amplitude)
     scores=[]
+    print(f'[quarter] V={V:g} {seed}: screening {len(params)} initial states '
+          f'({options.train_samples} samples each)',flush=True)
     for index,p in enumerate(params):
         try:
             trial=Trial(g,nf,seed,p,mats)
@@ -397,7 +423,14 @@ def optimize(g,nf,mats,seed,V,initial,options,rng):
                      samples=options.train_samples,interval=options.interval,
                      rng=np.random.default_rng(options.rng_seed+index+100000*int(V*100)))
             scores.append((s['E'],p))
-        except (ValueError,RuntimeError,FloatingPointError,np.linalg.LinAlgError):continue
+        except (ValueError,RuntimeError,FloatingPointError,np.linalg.LinAlgError) as exc:
+            print(f'[quarter] V={V:g} {seed}: initial {index+1}/{len(params)} '
+                  f'skipped ({exc}), elapsed={time.perf_counter()-started:.1f}s',
+                  flush=True)
+            continue
+        print(f'[quarter] V={V:g} {seed}: initial {index+1}/{len(params)} '
+              f'done, valid={len(scores)}, elapsed={time.perf_counter()-started:.1f}s',
+              flush=True)
     if not scores:raise RuntimeError('All initial candidates failed')
     best=min(scores,key=lambda x:x[0])[1]
     for step in range(options.refine_steps):
@@ -437,7 +470,13 @@ def optimize(g,nf,mats,seed,V,initial,options,rng):
                 results.append((s0['E'],p))
             except (ValueError,RuntimeError,FloatingPointError,np.linalg.LinAlgError):continue
         if results:best=min(results,key=lambda x:x[0])[1]
+        print(f'[quarter] V={V:g} {seed}: refine '
+              f'{step+1}/{options.refine_steps}, valid={len(results)}, '
+              f'elapsed={time.perf_counter()-started:.1f}s',flush=True)
     final=Trial(g,nf,seed,best,mats)
+    print(f'[quarter] V={V:g} {seed}: final evaluation '
+          f'({options.eval_samples} samples), '
+          f'elapsed={time.perf_counter()-started:.1f}s',flush=True)
     result=sample(final,V,warmup=options.eval_burn,
                   samples=options.eval_samples,interval=options.interval,
                   rng=np.random.default_rng(options.rng_seed+97333+int(V*1000)),
