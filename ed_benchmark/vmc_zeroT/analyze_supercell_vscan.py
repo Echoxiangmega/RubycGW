@@ -6,19 +6,22 @@ The script consumes branch_scan.csv files produced by run_supercell_vscan.py
 supercell size:
 
   * energy_branches.png
-      All seed/continuation branches E(V) on one axis with MC error bars.
+      Lowest old-seed energy per final phase; four new ansatzes each remain a
+      separate candidate, with MC error bars.
   * energy_relative.png
-      E_branch(V)-min_branch E(V), useful for locating crossings.
+      E_candidate(V)-min_candidate E(V), useful for locating crossings.
   * energy_reference_per_site.png
-      Small branch splittings relative to one fixed reference, in milli-energy/site.
+      Candidate splittings relative to the phase reached by a reference seed
+      at each V, in milli-energy/site.
   * energy_reference_zscore.png
       The same splittings divided by their combined MC error.
   * energy_phase_envelopes.png
-      Lowest energy of each final physical phase after merging seed duplicates.
+      Relative energies using the same old-phase/new-ansatz grouping.
+  * energy_competitors.csv
+      Selected energy, error, actual phase label and originating seed at each V.
   * phase_diagram.png
-      Phase assignment from the lowest-energy optimized branch.  Points where
-      the lowest and second-lowest branches differ by less than --tie-sigma
-      combined standard deviations are hatched/marked uncertain.
+      Candidate assignment from the lowest-energy optimized representative.
+      Close energies or missing branches are hatched/marked uncertain.
   * error_diagnostics.png
       MC energy error, split-Rhat, autocorrelation time and acceptance.
   * lro_diagnostics.png
@@ -75,6 +78,8 @@ BRANCH_LABELS={
     "pf_dplus":"Pfaffian d+id candidate",
     "pf_dminus":"Pfaffian d-id candidate",
 }
+
+COMPETING_SEEDS=frozenset(("sdw","pf_s","pf_dplus","pf_dminus"))
 
 
 def _f(x, default=np.nan):
@@ -181,14 +186,53 @@ def _write_csv(path,rows):
         w.writerows(rows)
 
 
+def _comparison_key(r):
+    """Merge old seeds by their final phase, retaining each new ansatz."""
+    seed=_s(r.get("branch_seed",r.get("seed")))
+    if seed in COMPETING_SEEDS:
+        return "ansatz:"+seed
+    return "phase:"+_s(r.get("phase_label"),"unknown")
+
+
+def _comparison_label(key):
+    kind,name=key.split(":",1)
+    return BRANCH_LABELS.get(name,name) if kind=="ansatz" else name
+
+
+def _comparison_rows(size_rows):
+    """Lowest measured energy per (V, old phase or new ansatz)."""
+    best={}
+    for r in size_rows:
+        k=(round(_f(r.get("scan_V",r.get("V"))),12),_comparison_key(r))
+        if k not in best or _f(r.get("mc_E"))<_f(best[k].get("mc_E")):
+            best[k]=r
+    return [best[k] for k in sorted(best)]
+
+
+def _comparison_groups(size_rows):
+    groups=defaultdict(list)
+    for r in _comparison_rows(size_rows):
+        groups[_comparison_key(r)].append(r)
+    return groups
+
+
+def _comparison_table(size_rows):
+    return [{
+        "V":_f(r.get("scan_V",r.get("V"))),
+        "candidate":_comparison_key(r),
+        "display_label":_comparison_label(_comparison_key(r)),
+        "phase_label":_s(r.get("phase_label"),"unknown"),
+        "selected_seed":_s(r.get("branch_seed",r.get("seed"))),
+        "mc_E":_f(r.get("mc_E")),
+        "mc_E_error":_f(r.get("mc_E_error")),
+    } for r in _comparison_rows(size_rows)]
+
+
 def _phase_rows(size_rows,tie_sigma,expected_seeds=None):
     """Rank variational candidates using their measured energies.
 
-    Several continuation seeds can converge to the same physical phase.  Such
-    seed-to-seed near-degeneracy is evidence for optimisation consistency, not
-    phase uncertainty.  At each V we therefore first keep only the
-    lowest-energy representative of every final phase_label, and then compare
-    the best and second-best *distinct phases*.
+    Older seeds that converge to the same final phase share one representative.
+    The SDW and three Pfaffian ansatzes remain separate, including d+id/d-id.
     """
     observed_branches={
         _s(r.get("branch_seed",r.get("seed")))
@@ -204,16 +248,8 @@ def _phase_rows(size_rows,tie_sigma,expected_seeds=None):
     for V in sorted(by_v):
         candidates=sorted(by_v[V],key=lambda r:_f(r.get("mc_E")))
 
-        by_phase=defaultdict(list)
-        for r in candidates:
-            ph=_s(r.get("phase_label"),"unknown")
-            by_phase[ph].append(r)
-        phase_best={
-            ph:min(rr,key=lambda r:_f(r.get("mc_E")))
-            for ph,rr in by_phase.items()
-        }
         phase_candidates=sorted(
-            phase_best.values(),key=lambda r:_f(r.get("mc_E"))
+            _comparison_rows(candidates),key=lambda r:_f(r.get("mc_E"))
         )
 
         best=phase_candidates[0]
@@ -242,6 +278,7 @@ def _phase_rows(size_rows,tie_sigma,expected_seeds=None):
 
         best_seed=_s(best.get("branch_seed",best.get("seed")))
         best_phase=_s(best.get("phase_label"),"unknown")
+        best_competitor=_comparison_key(best)
         if best_phase.endswith("_uncertain"):
             phase_uncertain=True
         present={
@@ -257,10 +294,12 @@ def _phase_rows(size_rows,tie_sigma,expected_seeds=None):
             "assignment_scope":"lowest-energy tested variational candidate",
             "winner_seed":best_seed,
             "winner_phase":best_phase,
+            "winner_candidate":best_competitor,
             "winner_E":e1,
             "winner_E_error":s1,
             "second_seed":second_seed,
             "second_phase":second_phase,
+            "second_candidate":_comparison_key(second) if second is not None else "",
             "second_E":e2,
             "energy_gap":gap,
             "energy_gap_sigma":sgap,
@@ -269,7 +308,10 @@ def _phase_rows(size_rows,tie_sigma,expected_seeds=None):
             "phase_uncertain":phase_uncertain,
             "incomplete":incomplete,
             "n_candidates":len(candidates),
-            "n_phases":len(phase_candidates),
+            "n_competitors":len(phase_candidates),
+            "n_phases":len({
+                _s(r.get("phase_label"),"unknown") for r in phase_candidates
+            }),
             "missing_branches":";".join(missing),
             "_winner_row":best,
         })
@@ -277,27 +319,18 @@ def _phase_rows(size_rows,tie_sigma,expected_seeds=None):
 
 def _energy_plot(size_rows,outdir,L1,L2):
     fig,ax=plt.subplots(figsize=(8.5,5.8))
-    branches=sorted(
-        {_s(r.get("branch_seed",r.get("seed"))) for r in size_rows},
-        key=_branch_sort_key,
-    )
-    for branch in branches:
-        rr=sorted(
-            [r for r in size_rows
-             if _s(r.get("branch_seed",r.get("seed")))==branch],
-            key=lambda r:_f(r.get("scan_V",r.get("V"))),
-        )
+    for key,rr in sorted(_comparison_groups(size_rows).items()):
         x=np.asarray([_f(r.get("scan_V",r.get("V"))) for r in rr])
         y=np.asarray([_f(r.get("mc_E")) for r in rr])
         e=np.asarray([_f(r.get("mc_E_error"),0.0) for r in rr])
         ax.errorbar(
             x,y,yerr=e,marker="o",markersize=3.5,
             linewidth=1.2,capsize=2.5,
-            label=BRANCH_LABELS.get(branch,branch),
+            label=_comparison_label(key),
         )
     ax.set_xlabel("V")
     ax.set_ylabel("VMC energy")
-    ax.set_title(f"Raw VMC branch energies, {L1}x{L2} ring3 supercell")
+    ax.set_title(f"Lowest energy per old phase / new ansatz, {L1}x{L2}")
     ax.grid(alpha=0.25)
     ax.legend(fontsize=8,ncol=2)
     fig.tight_layout()
@@ -307,21 +340,12 @@ def _energy_plot(size_rows,outdir,L1,L2):
 
 def _relative_energy_plot(size_rows,outdir,L1,L2):
     by_v=defaultdict(list)
-    for r in size_rows:
+    for r in _comparison_rows(size_rows):
         by_v[round(_f(r.get("scan_V",r.get("V"))),12)].append(r)
     emin={V:min(_f(r.get("mc_E")) for r in rs) for V,rs in by_v.items()}
 
     fig,ax=plt.subplots(figsize=(8.5,5.8))
-    branches=sorted(
-        {_s(r.get("branch_seed",r.get("seed"))) for r in size_rows},
-        key=_branch_sort_key,
-    )
-    for branch in branches:
-        rr=sorted(
-            [r for r in size_rows
-             if _s(r.get("branch_seed",r.get("seed")))==branch],
-            key=lambda r:_f(r.get("scan_V",r.get("V"))),
-        )
+    for key,rr in sorted(_comparison_groups(size_rows).items()):
         x=np.asarray([_f(r.get("scan_V",r.get("V"))) for r in rr])
         y=np.asarray([
             _f(r.get("mc_E"))-emin[round(_f(r.get("scan_V",r.get("V"))),12)]
@@ -331,12 +355,12 @@ def _relative_energy_plot(size_rows,outdir,L1,L2):
         ax.errorbar(
             x,y,yerr=e,marker="o",markersize=3.5,
             linewidth=1.2,capsize=2.5,
-            label=BRANCH_LABELS.get(branch,branch),
+            label=_comparison_label(key),
         )
     ax.axhline(0.0,linewidth=1.0)
     ax.set_xlabel("V")
-    ax.set_ylabel(r"$E_{branch}-E_{min}$")
-    ax.set_title(f"Relative branch energies, {L1}x{L2}")
+    ax.set_ylabel(r"$E_{candidate}-E_{min}$")
+    ax.set_title(f"Relative old-phase / new-ansatz energies, {L1}x{L2}")
     ax.grid(alpha=0.25)
     ax.legend(fontsize=8,ncol=2)
     fig.tight_layout()
@@ -346,36 +370,42 @@ def _relative_energy_plot(size_rows,outdir,L1,L2):
 
 
 def _reference_energy_plots(size_rows,outdir,L1,L2,reference="normal"):
-    """Plot branch energy differences to one fixed reference branch.
+    """Compare selected old-phase/new-ansatz energies to a reference.
 
-    Error bars are propagated for the difference assuming independent final
-    MC evaluations.  A companion z-score plot shows whether differences are
-    statistically resolved.
+    For an old reference seed, use its final phase at each V and the lowest
+    energy among old seeds reaching that phase. This reference may change
+    phase across V. Error bars assume independent final MC evaluations.
     """
-    by_branch_v=defaultdict(dict)
+    by_key_v=defaultdict(dict)
+    for r in _comparison_rows(size_rows):
+        by_key_v[_comparison_key(r)][round(_f(r.get("scan_V",r.get("V"))),12)]=r
+    by_seed_v={}
     for r in size_rows:
-        b=_s(r.get("branch_seed",r.get("seed")))
-        V=round(_f(r.get("scan_V",r.get("V"))),12)
-        by_branch_v[b][V]=r
+        if _s(r.get("branch_seed",r.get("seed")))==reference:
+            by_seed_v[round(_f(r.get("scan_V",r.get("V"))),12)]=r
+    if not by_key_v:
+        return
+    if not by_seed_v:
+        first_key=sorted(by_key_v)[0]
+        by_seed_v=dict(by_key_v[first_key])
+        ref_label=_comparison_label(first_key)
+    else:
+        ref_label=f"phase reached by {BRANCH_LABELS.get(reference,reference)} seed"
+    ref_by_v={}
+    for V,r in by_seed_v.items():
+        chosen=by_key_v[_comparison_key(r)].get(V)
+        if chosen is not None:
+            ref_by_v[V]=chosen
 
-    if reference not in by_branch_v:
-        branches=sorted(by_branch_v,key=_branch_sort_key)
-        if not branches:
-            return
-        reference=branches[0]
-
-    branches=sorted(by_branch_v,key=_branch_sort_key)
     fig,ax=plt.subplots(figsize=(8.8,5.9))
     figz,axz=plt.subplots(figsize=(8.8,5.9))
 
     ns=18*int(L1)*int(L2)
-    for branch in branches:
-        if branch==reference:
-            continue
+    for key,per_v in sorted(by_key_v.items()):
         xs=[]; dys=[]; errs=[]; zs=[]
-        for V,r in sorted(by_branch_v[branch].items()):
-            ref=by_branch_v[reference].get(V)
-            if ref is None:
+        for V,r in sorted(per_v.items()):
+            ref=ref_by_v.get(V)
+            if ref is None or r is ref:
                 continue
             e=_f(r.get("mc_E"))
             er=_f(r.get("mc_E_error"))
@@ -392,7 +422,7 @@ def _reference_energy_plots(size_rows,outdir,L1,L2,reference="normal"):
             zs.append(de/se if se>0 else np.nan)
 
         if xs:
-            label=BRANCH_LABELS.get(branch,branch)
+            label=_comparison_label(key)
             ax.errorbar(
                 xs,dys,yerr=errs,marker="o",markersize=3.5,
                 linewidth=1.2,capsize=2.5,label=label,
@@ -403,12 +433,9 @@ def _reference_energy_plots(size_rows,outdir,L1,L2,reference="normal"):
     ax.axhline(0.0,linewidth=1.0)
     ax.set_xlabel("V")
     ax.set_ylabel(r"$10^3(E_b-E_{ref})/N_s$")
-    ax.set_title(
-        f"Branch splittings relative to {BRANCH_LABELS.get(reference,reference)}, "
-        f"{L1}x{L2}"
-    )
+    ax.set_title(f"Candidate energies relative to {ref_label}, {L1}x{L2}")
     ax.grid(alpha=0.25)
-    ax.legend(fontsize=8,ncol=2)
+    if ax.get_legend_handles_labels()[0]:ax.legend(fontsize=8,ncol=2)
     fig.tight_layout()
     fig.savefig(outdir/"energy_reference_per_site.png",dpi=220)
     plt.close(fig)
@@ -419,48 +446,36 @@ def _reference_energy_plots(size_rows,outdir,L1,L2,reference="normal"):
     axz.set_xlabel("V")
     axz.set_ylabel(r"$(E_b-E_{ref})/\sqrt{\sigma_b^2+\sigma_{ref}^2}$")
     axz.set_title(
-        f"Statistical significance of branch splittings, {L1}x{L2}"
+        f"Statistical significance of candidate splittings, {L1}x{L2}"
     )
     axz.grid(alpha=0.25)
-    axz.legend(fontsize=8,ncol=2)
+    if axz.get_legend_handles_labels()[0]:axz.legend(fontsize=8,ncol=2)
     figz.tight_layout()
     figz.savefig(outdir/"energy_reference_zscore.png",dpi=220)
     plt.close(figz)
 
 
 def _phase_envelope_plot(size_rows,outdir,L1,L2):
-    """Plot the lowest branch belonging to each final physical phase.
-
-    This removes seed-to-seed duplication: several initial seeds that converge
-    to the same phase contribute only the lowest-energy representative at each V.
-    """
+    """Compare old final phases and four separate new ansatzes."""
     by_v=defaultdict(list)
-    for r in size_rows:
+    for r in _comparison_rows(size_rows):
         V=round(_f(r.get("scan_V",r.get("V"))),12)
         by_v[V].append(r)
 
     phase_data=defaultdict(list)
     for V,rows in sorted(by_v.items()):
-        by_phase=defaultdict(list)
-        for r in rows:
-            ph=_s(r.get("phase_label"),"unknown")
-            by_phase[ph].append(r)
-        phase_best={
-            ph:min(rr,key=lambda x:_f(x.get("mc_E")))
-            for ph,rr in by_phase.items()
-        }
-        all_best=list(phase_best.values())
-        ref=min(all_best,key=lambda r:_f(r.get("mc_E")))
+        ref=min(rows,key=lambda r:_f(r.get("mc_E")))
         emin=_f(ref.get("mc_E"))
         sref=_f(ref.get("mc_E_error"))
-        for ph,r in phase_best.items():
+        for r in rows:
+            key=_comparison_key(r)
             de=_f(r.get("mc_E"))-emin
             if r is ref:
                 de_err=0.0
             else:
                 sr=_f(r.get("mc_E_error"))
                 de_err=math.sqrt(max(0.0,sr*sr+sref*sref))
-            phase_data[ph].append((
+            phase_data[key].append((
                 V,
                 de,
                 de_err,
@@ -468,20 +483,20 @@ def _phase_envelope_plot(size_rows,outdir,L1,L2):
             ))
 
     fig,ax=plt.subplots(figsize=(8.8,5.9))
-    for ph,vals in sorted(phase_data.items()):
+    for key,vals in sorted(phase_data.items()):
         x=np.asarray([v[0] for v in vals],float)
         y=np.asarray([v[1] for v in vals],float)
         e=np.asarray([v[2] for v in vals],float)
         ax.errorbar(
             x,y,yerr=e,marker="o",markersize=4,
-            linewidth=1.25,capsize=2.5,label=ph,
+            linewidth=1.25,capsize=2.5,label=_comparison_label(key),
         )
     ax.axhline(0.0,linewidth=1.0)
     ax.set_xlabel("V")
-    ax.set_ylabel(r"$E_{phase}^{min}-E_{all}^{min}$")
+    ax.set_ylabel(r"$E_{candidate}-E_{min}$")
     ax.set_title(
-        f"Physical-phase energy envelopes, {L1}x{L2}\n"
-        "seeds converging to the same final phase are merged"
+        f"Old-phase / new-ansatz energy envelopes, {L1}x{L2}\n"
+        "old seeds merge by final phase; four new ansatzes remain separate"
     )
     ax.grid(alpha=0.25)
     ax.legend(fontsize=8,ncol=2)
@@ -505,7 +520,7 @@ def _phase_plot(phase_rows,outdir,L1,L2,tie_sigma):
 
     phases=[]
     for r in phase_rows:
-        p=r["winner_phase"]
+        p=r["winner_candidate"]
         if p not in phases:
             phases.append(p)
     cmap=plt.get_cmap("tab20")
@@ -513,7 +528,7 @@ def _phase_plot(phase_rows,outdir,L1,L2,tie_sigma):
 
     fig,ax=plt.subplots(figsize=(9.0,2.4))
     for i,r in enumerate(phase_rows):
-        p=r["winner_phase"]
+        p=r["winner_candidate"]
         uncertain=bool(r["uncertain"])
         rect=ax.axvspan(
             bounds[i],bounds[i+1],
@@ -531,12 +546,12 @@ def _phase_plot(phase_rows,outdir,L1,L2,tie_sigma):
         )
 
     handles=[
-        Patch(facecolor=phase_color[p],label=p)
+        Patch(facecolor=phase_color[p],label=_comparison_label(p))
         for p in phases
     ]
     handles.append(Patch(
         facecolor="white",edgecolor="black",hatch="///",
-        label=f"uncertain (<{tie_sigma:g} sigma gap)"
+        label=f"uncertain (<{tie_sigma:g} sigma gap or missing branches)"
     ))
     ax.legend(handles=handles,bbox_to_anchor=(1.01,1),loc="upper left",fontsize=8)
     ax.set_xlim(bounds[0],bounds[-1])
@@ -628,7 +643,7 @@ def _lro_plot(phase_rows,outdir,L1,L2):
             any_data=True
         ax.set_ylabel("Correlation strength")
         ax.grid(alpha=0.25)
-        ax.legend(fontsize=8)
+        if ax.get_legend_handles_labels()[0]:ax.legend(fontsize=8)
     axes[-1].set_xlabel("V")
     fig.suptitle(
         f"LRO diagnostics of the lowest-energy Raw branch, {L1}x{L2}\n"
@@ -661,7 +676,7 @@ def _orders_plot(phase_rows,outdir,L1,L2):
     ax.set_ylabel("Order amplitude")
     ax.set_title(f"One-point order parameters of the lowest-energy branch, {L1}x{L2}")
     ax.grid(alpha=0.25)
-    ax.legend(fontsize=8)
+    if any_data:ax.legend(fontsize=8)
     fig.tight_layout()
     if any_data:
         fig.savefig(outdir/"ground_state_orders.png",dpi=220)
@@ -998,7 +1013,7 @@ def main():
     p.add_argument("--tie-sigma",type=float,default=2.0,
                    help="Below this combined-error z-score, mark the phase assignment uncertain.")
     p.add_argument("--energy-reference",default="normal",
-                   help="Fixed branch used for energy-difference and z-score plots.")
+                   help="Seed whose final phase supplies the per-V energy reference.")
     p.add_argument("--expected-seeds",nargs="+",default=None,
                    help="Full branch list; absent branches mark candidate rankings incomplete.")
     p.add_argument("--fss-v",nargs="*",type=float,default=None,
@@ -1052,6 +1067,7 @@ def main():
         _orders_plot(phase,outdir,L1,L2)
         _competing_orders(rr,outdir,L1,L2)
         _coexistence_scatter(phase,outdir,L1,L2)
+        _write_csv(outdir/"energy_competitors.csv",_comparison_table(rr))
         _write_csv(outdir/"phase_table.csv",_phase_table_public(phase))
 
         n_uncertain=sum(bool(x["uncertain"]) for x in phase)
