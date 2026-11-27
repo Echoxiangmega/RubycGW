@@ -82,6 +82,15 @@ def check():
             expected+=h*np.exp(trial.logpsi(config)-z)
         measured=trial.local_energy(occ,z,1.5)
         assert np.allclose(measured,expected,rtol=2e-11,atol=1e-10),seed
+        occupied=np.zeros(g.Ns,bool);occupied[occ]=True
+        moves=[((e.i if occupied[e.i] else e.j),
+                (e.j if occupied[e.i] else e.i))
+               for e in g.edges if occupied[e.i]!=occupied[e.j]]
+        batch,signs=trial.hop_ratios(
+            occ,[a for a,_ in moves],[b for _,b in moves],trial.hop_cache(occ))
+        scalar=[trial.hop_ratio(occ,a,b) for a,b in moves]
+        assert np.allclose(batch,[r[0] for r in scalar],rtol=2e-11,atol=1e-11),seed
+        assert np.array_equal(signs,[r[1] for r in scalar]),seed
 
         # Long accepted-hop chains must retain the exact Jastrow features and
         # fixed-N determinant/Pfaffian amplitudes after every cache update.

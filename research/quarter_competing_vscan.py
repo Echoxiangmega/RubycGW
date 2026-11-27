@@ -162,6 +162,14 @@ class Trial:
         self.fill=nf/g.Ns
         self.rows=self.mats.sum(axis=2)
         self.constant=.5*self.fill**2*self.mats.sum(axis=(1,2))
+        # The seven Jastrow parameters are fixed within this Trial. Contract
+        # them once so rejected MC proposals need only scalar lookups.
+        self.weighted_mat=np.einsum('k,kij->ij',self.v,self.mats,optimize=True)
+        self.weighted_rows=self.v@self.rows
+        self.weighted_diag=np.diag(self.weighted_mat).copy()
+        self.edge_i=np.asarray([e.i for e in g.edges],dtype=int)
+        self.edge_j=np.asarray([e.j for e in g.edges],dtype=int)
+        self.edge_t=np.asarray([g.t[e.kind] for e in g.edges],float)
         if seed=='sdw':
             sign=int(params['B_sign'])
             self.m_sources=sdw_sources(g,sign)
@@ -239,12 +247,15 @@ class Trial:
         if previous is None:
             field=self.mats[:,:,occ].sum(axis=2)
             features=self.features(occ)
+            weighted_field=self.v@field
         else:
             if move is None:raise ValueError('Accepted hop required for cache update')
             src,dst=move
             features=previous[1]+self.feature_delta(src,dst,previous)
             field=previous[2]+self.mats[:,:,dst]-self.mats[:,:,src]
-        return inverse,features,field,occ.copy(),updates
+            weighted_field=(previous[5]+self.weighted_mat[:,dst]
+                            -self.weighted_mat[:,src])
+        return inverse,features,field,occ.copy(),updates,weighted_field
 
     def _updated_inverse(self,occ,previous,move):
         """Exact low-rank accepted-hop update before periodic rebuilding."""
@@ -310,10 +321,15 @@ class Trial:
         if self.Q is not None:
             basic=self.Q[b,:]@inverse[:,k]
         else:
-            v=np.r_[self.F[b,occ],self.blocked[b]]
-            v[k]=0.
-            basic=v@inverse[:,k]
-        exponent=float(self.v@self.feature_delta(a,b,cache))
+            column=inverse[:,k]
+            basic=(self.F[b,occ]@column[:self.nf]
+                   +self.blocked[b]@column[self.nf:]
+                   -self.F[b,a]*column[k])
+        weighted_field=cache[5]
+        exponent=float(weighted_field[b]-weighted_field[a]
+            +.5*(self.weighted_diag[b]+self.weighted_diag[a]
+                  -2*self.weighted_mat[a,b])
+            -self.fill*(self.weighted_rows[b]-self.weighted_rows[a]))
         ratio=parity*basic*np.exp(exponent)
         if not (np.isfinite(ratio.real) and np.isfinite(ratio.imag)):
             target=occ.copy();target[k]=b;target.sort()
@@ -329,13 +345,49 @@ class Trial:
         tri=np.bincount(occ//3,minlength=self.g.Ns//3)
         energy=complex(V*np.sum(tri*(tri-1)//2))
         if cache is None:cache=self.hop_cache(occ)
-        for e in self.g.edges:
-            i,j=int(e.i),int(e.j)
-            if occupied[i]==occupied[j]:continue
-            a,b=(i,j) if occupied[i] else (j,i)
-            ratio,sign,_=self.hop_ratio(occ,a,b,cache,target_required=False)
-            energy+=self.g.t[e.kind]*sign*ratio
+        active=occupied[self.edge_i]!=occupied[self.edge_j]
+        i=self.edge_i[active];j=self.edge_j[active]
+        a=np.where(occupied[i],i,j)
+        b=np.where(occupied[i],j,i)
+        ratio,sign=self.hop_ratios(occ,a,b,cache)
+        energy+=np.dot(self.edge_t[active]*sign,ratio)
         return energy
+
+    def hop_ratios(self,occ,src,dst,cache):
+        """All independent hopping ratios from one configuration at once."""
+        src=np.asarray(src,int);dst=np.asarray(dst,int)
+        if cache[0] is None:
+            rr=[self.hop_ratio(occ,int(a),int(b),cache,target_required=False)
+                for a,b in zip(src,dst)]
+            return (np.asarray([x[0] for x in rr],complex),
+                    np.asarray([x[1] for x in rr],int))
+        inverse=cache[0]
+        k=np.searchsorted(occ,src)
+        lo=np.minimum(src,dst);hi=np.maximum(src,dst)
+        left=np.searchsorted(occ,lo,side='right')
+        right=np.searchsorted(occ,hi,side='left')
+        parity=np.where((right-left)%2,-1,1)
+        if self.Q is not None:
+            basic=np.einsum('mn,mn->m',self.Q[dst],inverse[:,k].T)
+        else:
+            basic=np.einsum(
+                'mn,mn->m',self.F[np.ix_(dst,occ)],
+                inverse[:self.nf,k].T)
+            if self.blocked.shape[1]:
+                basic+=np.einsum(
+                    'mn,mn->m',self.blocked[dst],inverse[self.nf:,k].T)
+            basic-=self.F[dst,src]*inverse[k,k]
+        field=cache[5]
+        exponent=(field[dst]-field[src]
+            +.5*(self.weighted_diag[dst]+self.weighted_diag[src]
+                  -2*self.weighted_mat[src,dst])
+            -self.fill*(self.weighted_rows[dst]-self.weighted_rows[src]))
+        ratios=parity*basic*np.exp(exponent)
+        bad=np.flatnonzero(~np.isfinite(ratios))
+        for idx in bad:
+            ratios[idx]=self.hop_ratio(
+                occ,int(src[idx]),int(dst[idx]),cache,target_required=False)[0]
+        return ratios,parity
 
     def m_point_onebody(self,occ,logpsi,cache=None):
         """Local estimators of the three *measured* M-point order sources."""
