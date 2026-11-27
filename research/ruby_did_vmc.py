@@ -3,7 +3,9 @@
 
 This is a small, independent reference implementation of the pairing ansatz.
 It uses the native Ruby geometry, the full physical hopping and interaction,
-and a projected E-orbital A--B pairing source.  It has no NetKet dependency.
+and projected E-orbital A--B and same-sublattice pairing sources. It has no
+NetKet dependency. The f_nnn source requires a torus that resolves oriented
+same-sublattice bonds (the primitive 2x2 torus does not).
 
 Example (from the repository root):
   OPENBLAS_NUM_THREADS=1 python research/ruby_did_vmc.py \
@@ -51,8 +53,8 @@ def form_factors(form: str) -> np.ndarray:
     return x / np.max(np.abs(x))
 
 
-def orbital_pair_matrix() -> np.ndarray:
-    """Physical site matrix of the effective honeycomb singlet.
+def orbital_pair_matrix(channel: str = "singlet") -> np.ndarray:
+    """Physical site matrix of an effective honeycomb pair channel.
 
     W columns are the triangle E doublet in site order (0,1,2) and (3,4,5).
     In the unrotated A/B chirality basis the pair is a_+ b_+ + a_- b_-.
@@ -60,25 +62,54 @@ def orbital_pair_matrix() -> np.ndarray:
     omega = np.exp(2j * np.pi / 3)
     W = np.array([[1, 1], [omega, omega.conjugate()],
                   [omega**2, omega]], complex) / np.sqrt(3)
-    M = W.conj() @ W.conj().T
-    if not np.allclose(M.imag, 0, atol=1e-12):
+    matrices = {
+        "singlet": np.eye(2),
+        # Same physical chirality on an A-B bond; B's aligned pseudospin
+        # frame turns this into the symmetric (triplet) opposite-flavor pair.
+        "f_ab": np.diag([1, -1]),
+        # Symmetric opposite-chirality pair within each triangle sublattice.
+        "f_nnn": np.array([[0, 1], [1, 0]]),
+    }
+    if channel not in matrices:
+        raise ValueError(f"Unknown orbital pairing channel: {channel}")
+    M = W.conj() @ matrices[channel] @ W.conj().T
+    if channel != "f_ab" and not np.allclose(M.imag, 0, atol=1e-12):
         raise RuntimeError("The physical pair matrix should be real")
-    return M.real
+    return M if channel == "f_ab" else M.real
 
 
 def pairing_source(g: RubyPBC, delta: float, form: str) -> np.ndarray:
-    """Antisymmetric 6Nc-by-6Nc source on honeycomb A--B bonds."""
-    M = orbital_pair_matrix()
-    phase = form_factors(form)
+    """Physical spinless pairing source, including two distinct f irreps.
+
+    At t1=-t2 both f sources have eigenvalue -1 under the signed C6.
+    The A-B and same-sublattice sources have opposite mirror eigenvalues.
+    """
+    if form not in ("f_ab", "f_nnn"):
+        M = orbital_pair_matrix()
+        phase = form_factors(form)
+    else:
+        M = orbital_pair_matrix(form)
+        phase = np.ones(3)
     directions = ((0, 0), (0, 1), (-1, 0))
     D = np.zeros((g.Ns, g.Ns), complex)
     for ci, R in enumerate(g.reps):
-        for direction, amp in zip(directions, phase):
-            cj, _ = g.reduce((R[0] + direction[0], R[1] + direction[1]))
-            ai = slice(6 * ci, 6 * ci + 3)
-            bj = slice(6 * cj + 3, 6 * cj + 6)
-            D[ai, bj] += delta * amp * M
-            D[bj, ai] -= delta * amp * M.T
+        if form == "f_nnn":
+            # Three 120-degree triangular directions. Reversing the bond
+            # changes the sign, as required by symmetric flavor exchange.
+            for direction in ((1, 0), (0, 1), (-1, -1)):
+                cj, _ = g.reduce((R[0] + direction[0], R[1] + direction[1]))
+                for sub in (0, 3):
+                    i = slice(6 * ci + sub, 6 * ci + sub + 3)
+                    j = slice(6 * cj + sub, 6 * cj + sub + 3)
+                    D[i, j] += delta * M
+                    D[j, i] -= delta * M.T
+        else:
+            for direction, amp in zip(directions, phase):
+                cj, _ = g.reduce((R[0] + direction[0], R[1] + direction[1]))
+                ai = slice(6 * ci, 6 * ci + 3)
+                bj = slice(6 * cj + 3, 6 * cj + 6)
+                D[ai, bj] += delta * amp * M
+                D[bj, ai] -= delta * amp * M.T
     if not np.allclose(D + D.T, 0, atol=1e-12):
         raise RuntimeError("Fermionic pairing source is not antisymmetric")
     return D

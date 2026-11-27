@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -J ruby_quarter
-#SBATCH --array=0-11
+#SBATCH --array=0-13
 #SBATCH --cpus-per-task=3
 #SBATCH --output=logs/ruby_quarter_%A_%a.log
 #SBATCH --partition=C064M0256G
@@ -62,7 +62,7 @@ CG_MAXITER="${CG_MAXITER:-100}"
 JASTROW_SHELLS="${JASTROW_SHELLS:-4}"
 RNG_SEED="${RNG_SEED:-2026}"
 
-# These four control only the SDW/Pfaffian CPU branches. The original eight
+# These control only the SDW/Pfaffian CPU branches. The original eight
 # Slater/backflow branches use the optimizer and sample counts above.
 COMPETING_TRAIN_SAMPLES="${COMPETING_TRAIN_SAMPLES:-512}"
 COMPETING_EVAL_SAMPLES="${COMPETING_EVAL_SAMPLES:-4096}"
@@ -71,8 +71,13 @@ COMPETING_PAIR_SAMPLES="${COMPETING_PAIR_SAMPLES:-128}"
 COMPETING_WORKERS="${COMPETING_WORKERS:-1}"
 
 SEEDS=(normal sd isd lc_same lc_opposite random ps_co mix_co_lc_opposite
-       sdw pf_s pf_dplus pf_dminus)
-SEED="${SEEDS[${SLURM_ARRAY_TASK_ID}]}"
+       sdw pf_s pf_dplus pf_dminus pf_f_ab pf_f_nnn)
+TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
+if (( TASK_ID < 0 || TASK_ID >= ${#SEEDS[@]} )); then
+  echo "ERROR: array task $TASK_ID outside 0..$((${#SEEDS[@]}-1))" >&2
+  exit 2
+fi
+SEED="${SEEDS[TASK_ID]}"
 
 if (( L1 % 2 != 0 || L2 % 2 != 0 )); then
   echo 'ERROR: both L1 and L2 must be even for 1/4 filling and all three M points' >&2
@@ -82,7 +87,7 @@ if [[ "$T1" != "-$T2" ]]; then
   python - "$T1" "$T2" <<'PY'
 import math,sys
 if not math.isclose(float(sys.argv[1]),-float(sys.argv[2]),abs_tol=1e-12):
-    raise SystemExit('ERROR: the current Pfaffian singlet requires t1=-t2')
+    raise SystemExit('ERROR: the current Pfaffian pseudospin seeds require t1=-t2')
 PY
 fi
 

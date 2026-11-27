@@ -32,8 +32,10 @@ COMPETING_RUNNER=HERE.parents[1]/"research"/"quarter_competing_vscan.py"
 DEFAULT_SEEDS=[
     "normal","sd","isd","lc_same","lc_opposite","random",
     "ps_co","mix_co_lc_opposite","sdw","pf_s","pf_dplus","pf_dminus",
+    "pf_f_ab","pf_f_nnn",
 ]
-COMPETING_SEEDS={"sdw","pf_s","pf_dplus","pf_dminus"}
+COMPETING_SEEDS={"sdw","pf_s","pf_dplus","pf_dminus",
+                 "pf_f_ab","pf_f_nnn"}
 
 
 def _parse_filling(value):

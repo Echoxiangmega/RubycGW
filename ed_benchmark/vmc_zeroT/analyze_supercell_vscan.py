@@ -61,7 +61,7 @@ from matplotlib.patches import Patch
 BRANCH_ORDER=[
     "normal","sd","isd","lc_same","lc_opposite","random",
     "ps_co","mix_co_lc_opposite",
-    "sdw","pf_s","pf_dplus","pf_dminus",
+    "sdw","pf_s","pf_dplus","pf_dminus","pf_f_ab","pf_f_nnn",
 ]
 
 BRANCH_LABELS={
@@ -77,9 +77,12 @@ BRANCH_LABELS={
     "pf_s":"Pfaffian s candidate",
     "pf_dplus":"Pfaffian d+id candidate",
     "pf_dminus":"Pfaffian d-id candidate",
+    "pf_f_ab":"Pfaffian f (A-B triplet) candidate",
+    "pf_f_nnn":"Pfaffian f (same sublattice) candidate",
 }
 
-COMPETING_SEEDS=frozenset(("sdw","pf_s","pf_dplus","pf_dminus"))
+COMPETING_SEEDS=frozenset(("sdw","pf_s","pf_dplus","pf_dminus",
+                           "pf_f_ab","pf_f_nnn"))
 
 
 def _f(x, default=np.nan):
@@ -860,8 +863,10 @@ def _phase_table_public(phase_rows):
                     "M_pseudospin_y","M_pseudospin_z",
                     "M_pseudospin_xy_amplitude","M_pseudospin_z_amplitude",
                     "pair_far_s_abs","pair_far_dplus_abs","pair_far_dminus_abs",
+                    "pair_far_f_ab_abs","pair_far_f_nnn_abs",
                     "pair_far_s_error","pair_far_dplus_error",
-                    "pair_far_dminus_error",
+                    "pair_far_dminus_error","pair_far_f_ab_error",
+                    "pair_far_f_nnn_error",
                     "pair_far_distance","pair_far_samples"):
             row["winner_"+key]=r["_winner_row"].get(key,"")
         out.append(row)
@@ -876,9 +881,11 @@ def _competing_orders(size_rows,outdir,L1,L2):
             "M_pseudospin_z_amplitude","pair_far_s_abs","pair_far_s_error",
             "pair_far_dplus_abs","pair_far_dplus_error",
             "pair_far_dminus_abs","pair_far_dminus_error",
+            "pair_far_f_ab_abs","pair_far_f_ab_error",
+            "pair_far_f_nnn_abs","pair_far_f_nnn_error",
             "pair_far_samples","pair_far_distance","pair_far_cells")
     selected=[r for r in size_rows if _s(r.get("branch_seed")) in
-              ("sdw","pf_s","pf_dplus","pf_dminus")]
+              COMPETING_SEEDS]
     if not selected:return
     _write_csv(outdir/"candidate_order_parameters.csv",
                [{key:r.get(key,"") for key in fields} for r in selected])
@@ -894,7 +901,9 @@ def _competing_orders(size_rows,outdir,L1,L2):
     axes[0].set_ylabel("M-point one-point amplitude / triangle")
     for seed,key,label in (("pf_s","pair_far_s_abs","s"),
                             ("pf_dplus","pair_far_dplus_abs","d+id"),
-                            ("pf_dminus","pair_far_dminus_abs","d-id")):
+                            ("pf_dminus","pair_far_dminus_abs","d-id"),
+                            ("pf_f_ab","pair_far_f_ab_abs","f A-B"),
+                            ("pf_f_nnn","pair_far_f_nnn_abs","f same sublattice")):
         rr=sorted((r for r in selected if _s(r.get("branch_seed"))==seed),
                   key=lambda r:_f(r.get("scan_V")))
         if rr:

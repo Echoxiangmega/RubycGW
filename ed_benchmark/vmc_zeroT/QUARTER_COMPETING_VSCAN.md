@@ -1,8 +1,8 @@
 # Quarter-filled SDW and pairing candidates in the ring3 V scan
 
 The established `run_supercell_vscan.py` still runs its eight Slater/backflow
-branches unchanged. It also accepts four new seeds: `sdw`, `pf_s`, `pf_dplus`,
-and `pf_dminus`. Each seed has its own continuation branch and writes the same
+branches unchanged. It also accepts `sdw`, `pf_s`, `pf_dplus`, `pf_dminus`,
+`pf_f_ab`, and `pf_f_nnn`. Each seed has its own continuation branch and writes the same
 `branch_scan.csv` layout consumed by the existing collector and analyzer.
 The analyzer groups the two time-reversal partner d branches under the same
 candidate-phase label while retaining their separate seed energies.
@@ -57,6 +57,28 @@ thermodynamic phase. Adjust `--competing-pair-samples`, or set it to zero to
 disable the additional estimator. The new analyzer writes
 `candidate_order_parameters.csv`, `competing_order_diagnostics.png`, and the
 winner observables in `phase_table.csv` alongside its older energy plots.
+
+Two separate f-wave irreps are now available for `t1=-t2`. `pf_f_ab` uses
+the three nearest-neighbor A-B triangle bonds with equal bond weights and
+the physical chirality matrix diag(1,-1); in the aligned B pseudospin basis
+this is a symmetric triplet. `pf_f_nnn` pairs triangles on the same A or B
+sublattice along `(1,0)`, `(0,1)`, `(-1,-1)` with a symmetric opposite-
+chirality matrix sigma_x and an odd sign under bond reversal. Directly
+applying the gauge-compensated C6 to the microscopic pair matrices gives
+eigenvalue -1 for both; their ordinary-mirror eigenvalues differ, so they
+are independent candidates. The final chains measure their own separated
+f-wave pair correlations (`pair_far_f_ab_*` and `pair_far_f_nnn_*`). The
+three older singlet pair correlators remain available.
+
+For a 4x4 quarter-filled scan previously launched with array tasks 0-11,
+submit `sbatch --array=12-13 --export=ALL,L1=4,L2=4,OUT=$PWD/results/vscan_quarter_L4,V_MIN=0.5,V_MAX=3.5,V_STEP=0.2,DIRECTION=down ed_benchmark/vmc_zeroT/slurm_vscan_quarter_all_cpu.sh`
+from the repository root to add the two f branches. Keep all physical and
+scan settings identical to the earlier jobs. For the old Slater branches,
+submitting the same command and output root with resume enabled skips V
+points with completed summaries and warm-starts the next V from the last
+completed point. Adjusting training sample counts affects subsequent points;
+the completed points retain their original energy estimates and sampling
+errors. Changing the sampler backend itself requires a separate output root.
 
 The new restricted optimizer is a CPU reference implementation: it scans
 multiple initial structural parameters, optimizes Jastrow via stochastic

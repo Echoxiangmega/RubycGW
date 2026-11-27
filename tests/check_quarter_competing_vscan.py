@@ -21,6 +21,23 @@ from vmc_ansatz import jastrow_channels  # noqa: E402
 def check():
     assert exact_filling(2,2,'1/4')==(72,18)
     assert np.all(make_ring3_supercell(2,2).M%2==0)
+    # Both f candidates are distinct irreps of the actual signed C6 at
+    # t1=-t2. They have opposite ordinary-mirror characters.
+    symmetry_g=RubyPBC('4x4',t1=-.5,t2=.5)
+    rotation,signs=symmetry_g.gauge_point_maps()['C6']
+    mirror=next(iter(symmetry_g.point_maps()['mirrors'].values()))
+    for form,mirror_eigenvalue in (('f_ab',-1),('f_nnn',1)):
+        D=pairing_source(symmetry_g,.2,form)
+        assert np.linalg.norm(D)>0
+        assert np.allclose(D,-D.T)
+        rotated=np.zeros_like(D)
+        rotated[np.ix_(rotation,rotation)]=signs[:,None]*D*signs[None,:]
+        assert np.allclose(rotated,-D),form
+        reflected=np.zeros_like(D)
+        reflected[np.ix_(mirror,mirror)]=D
+        assert np.allclose(reflected,mirror_eigenvalue*D),form
+    ring_g=make_ring3_supercell(2,2,t1=-.5,t2=.5)
+    assert np.linalg.norm(pairing_source(ring_g,.2,'f_nnn'))>0
     for shape in ((3,3),(2,1)):
         try:exact_filling(*shape,'1/4')
         except ValueError:pass
@@ -70,6 +87,7 @@ def check():
         ('pf_s',dict(delta=.2,mu=-1.,v=[.01]*7)),
         ('pf_dplus',dict(delta=.2,mu=-1.,v=[.01]*7)),
         ('pf_dminus',dict(delta=.2,mu=-1.,v=[.01]*7)),
+        ('pf_f_ab',dict(delta=.2,mu=0.,v=[.01]*7)),
     ):
         trial=Trial(g,6,seed,p,mats)
         z=trial.logpsi(occ)
@@ -120,6 +138,10 @@ def check():
             cache=trial.hop_cache(target,previous=cache,move=(src,dst))
             chain=target
             assert np.allclose(cache[1],trial.features(chain),atol=1e-10),seed
+            if cache[0] is None:
+                # A nodal triplet state can have effectively zero Pfaffian
+                # weight; direct amplitudes are used until it leaves the node.
+                continue
             if trial.Q is not None:
                 matrix=trial.Q[chain,:]
             elif trial.blocked.shape[1]:
@@ -130,6 +152,29 @@ def check():
                 matrix=trial.F[np.ix_(chain,chain)]
             assert np.allclose(matrix@cache[0],np.eye(len(matrix)),
                                rtol=1e-8,atol=1e-8),seed
+
+    # The same-sublattice f source vanishes on the tiny primitive 2x2 torus
+    # because a primitive bond meets its reversal. The 18-site ring torus
+    # resolves the oriented bonds and permits an independent exact check.
+    tiny=RubyPBC('ring3',t=1.,t1=-.5,t2=.5)
+    tiny_h=FixedHamiltonian(tiny,4,1.5,method='sparse')
+    _,_,tiny_mats,_=jastrow_channels(tiny,mode='bond_aware',n_shells=4)
+    tiny_trial=Trial(tiny,4,'pf_f_nnn',
+                     dict(delta=.2,mu=-.9,v=[.01]*7),tiny_mats)
+    tiny_occ=np.array([0,1,2,3])
+    tiny_log=tiny_trial.logpsi(tiny_occ)
+    assert np.isfinite(tiny_log.real)
+    tiny_bit=sum(1<<(tiny.Ns-1-int(i)) for i in tiny_occ)
+    tiny_row=int(np.flatnonzero(tiny_h.states==tiny_bit)[0])
+    expected=0j
+    for j,h in zip(tiny_h.operator.getrow(tiny_row).indices,
+                   tiny_h.operator.getrow(tiny_row).data):
+        state=int(tiny_h.states[j])
+        config=np.flatnonzero([(state>>(tiny.Ns-1-i))&1
+                               for i in range(tiny.Ns)])
+        expected+=h*np.exp(tiny_trial.logpsi(config)-tiny_log)
+    assert np.allclose(tiny_trial.local_energy(tiny_occ,tiny_log,1.5),
+                       expected,rtol=2e-11,atol=1e-10)
 
     # The map's oriented rho=<c_i^dag c_j> estimator must agree with the
     # exact Fock-space matrix element, including the fermion sign and phase.

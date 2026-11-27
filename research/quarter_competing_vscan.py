@@ -4,7 +4,7 @@
 This is a CPU reference branch driver for the existing run_supercell_vscan.py
 output tree. Its Slater/Pfaffian states share the seven bond-aware density
 Jastrow channels, but do not include the fast Slater-only backflow correlator.
-Run one seed (sdw, pf_s, pf_dplus, pf_dminus) per process. The usual collector
+Run one seed (sdw, pf_s, pf_dplus, pf_dminus, pf_f_ab, pf_f_nnn) per process. The usual collector
 can combine its branch_scan.csv with the pre-existing normal/CO/LC branches.
 """
 from __future__ import annotations
@@ -33,7 +33,8 @@ from ruby_did_vmc import (bcs_pair_function,hopping_matrix,  # noqa: E402
                           pairing_source,orbital_pair_matrix,form_factors)
 from quarter_sdw_vmc import local_fields  # noqa: E402
 
-PF_FORMS={'pf_s':'s','pf_dplus':'d+','pf_dminus':'d-'}
+PF_FORMS={'pf_s':'s','pf_dplus':'d+','pf_dminus':'d-',
+          'pf_f_ab':'f_ab','pf_f_nnn':'f_nnn'}
 SEEDS=('sdw',*PF_FORMS)
 _WORKER_CONTEXT=None
 
@@ -96,15 +97,24 @@ def pair_orbitals(g,mu,delta,form):
     return bcs_pair_function(h,D)
 
 
-def pair_bonds_for_cell(g,ci):
-    """Three E-singlet A-B pair bonds from one primitive cell."""
-    M=orbital_pair_matrix()
+def pair_bonds_for_cell(g,ci,form='s'):
+    """Three oriented projected pair bonds from one primitive cell."""
+    channel=form if form in ('f_ab','f_nnn') else 'singlet'
+    M=orbital_pair_matrix(channel)
     R=g.reps[ci]
     bonds=[]
-    for dx,dy in ((0,0),(0,1),(-1,0)):
+    directions=((1,0),(0,1),(-1,-1)) if form=='f_nnn' else (
+        (0,0),(0,1),(-1,0))
+    for dx,dy in directions:
         cj,_=g.reduce((R[0]+dx,R[1]+dy))
-        bonds.append([(6*ci+i,6*cj+3+j,M[i,j])
-                      for i in range(3) for j in range(3) if abs(M[i,j])>1e-12])
+        if form=='f_nnn':
+            bonds.append([(6*ci+sub+i,6*cj+sub+j,M[i,j])
+                          for sub in (0,3) for i in range(3) for j in range(3)
+                          if abs(M[i,j])>1e-12])
+        else:
+            bonds.append([(6*ci+i,6*cj+3+j,M[i,j])
+                          for i in range(3) for j in range(3)
+                          if abs(M[i,j])>1e-12])
     return bonds
 
 
@@ -154,7 +164,7 @@ def far_pair_estimator(trial,occ,logpsi,bonds_a,bonds_b):
                     # <psi|O|psi> uses the *conjugate* amplitude ratio.
                     z=trial.logpsi(created)
                     if np.isfinite(z.real):
-                        C[u,v]+=ca*cb*s1*s2*s3*s4*np.exp(np.conj(z-logpsi))
+                        C[u,v]+=np.conj(ca)*cb*s1*s2*s3*s4*np.exp(np.conj(z-logpsi))
     return C
 
 
@@ -255,6 +265,12 @@ class Trial:
             else:a=self.F[np.ix_(occ,occ)]
             try:inverse=np.linalg.inv(a)
             except np.linalg.LinAlgError:inverse=None
+            if inverse is not None and not np.allclose(
+                    a@inverse,np.eye(len(a)),rtol=1.e-8,atol=1.e-8):
+                # Nodal f-wave configurations can be numerically singular
+                # even if LAPACK returns an inverse. Use direct amplitudes
+                # instead of feeding an inaccurate inverse to hop updates.
+                inverse=None
         if previous is None:
             field=self.mats[:,:,occ].sum(axis=2)
             features=self.features(occ)
@@ -431,7 +447,15 @@ def sample(trial,V,*,warmup,samples,interval,rng,measure=True,orders=False,
     if pair_samples:
         ci,cj,dist=far_pair_cells(g)
         pair_info=(pair_bonds_for_cell(g,ci),pair_bonds_for_cell(g,cj),ci,cj,dist)
+        f_pair_info=None
+        if trial.seed in ('pf_f_ab','pf_f_nnn'):
+            form=PF_FORMS[trial.seed]
+            f_pair_info=(pair_bonds_for_cell(g,ci,form),
+                         pair_bonds_for_cell(g,cj,form))
+    else:
+        f_pair_info=None
     pair_values=[]
+    f_pair_values=[]
     pair_stride=max(1,samples//pair_samples) if pair_samples else 0
     values=[];features=[];measured_orders=[];accepted=attempted=0
     if maps:
@@ -464,6 +488,9 @@ def sample(trial,V,*,warmup,samples,interval,rng,measure=True,orders=False,
             if pair_info is not None and isample%pair_stride==0 and len(pair_values)<pair_samples:
                 pair_values.append(far_pair_estimator(trial,occ,logpsi,
                                       pair_info[0],pair_info[1]))
+                if f_pair_info is not None:
+                    f_pair_values.append(far_pair_estimator(
+                        trial,occ,logpsi,*f_pair_info))
             if maps:
                 # rho_e=<c_i^dag c_j> for the oriented edge (i,j).
                 # The local estimator is nonzero for n_i=1,n_j=0; the
@@ -524,6 +551,21 @@ def sample(trial,V,*,warmup,samples,interval,rng,measure=True,orders=False,
         out['pair_far_samples']=len(matrices)
         out['pair_far_cells']=[int(pair_info[2]),int(pair_info[3])]
         out['pair_far_distance']=float(pair_info[4])
+    if f_pair_values:
+        key=PF_FORMS[trial.seed]
+        weights=np.ones(3,dtype=complex)
+        # f_nnn contains both A-A and B-B bonds, so normalize by twice the
+        # number of directions for comparable pair-operator squared norms.
+        normalization=6. if key=='f_nnn' else 3.
+        z=np.einsum('u,nuv,v->n',weights.conj(),
+                    np.asarray(f_pair_values),weights)/normalization
+        parts=np.array_split(z,max(2,min(12,len(z)//8)))
+        means=np.asarray([part.mean() for part in parts])
+        out[f'pair_far_{key}_real']=float(z.real.mean())
+        out[f'pair_far_{key}_imag']=float(z.imag.mean())
+        out[f'pair_far_{key}_abs']=float(abs(z.mean()))
+        out[f'pair_far_{key}_error']=float(np.sqrt(
+            means.real.var(ddof=1)+means.imag.var(ddof=1))/np.sqrt(len(means)))
     return out
 
 
@@ -535,9 +577,13 @@ def initialize(seed,amplitude):
                 for s in (+1,-1) for x,y,z in
                 ((a,0.,0.),(0.,a,0.),(0.,0.,a),(a,a,0.),
                  (a,a,a),(a,a,-a))]
+    # The A-B f source has symmetry-enforced unpaired BdG orbitals. At the
+    # old singlet chemical potentials these exceed Nf on the quarter-filled
+    # ring3 torus, making all six starting Pfaffians identically zero.
+    mus=(-.5,0.) if seed=='pf_f_ab' else (-1.3,-.9)
     return [dict(delta=d,mu=mu,v=v)
             for d in (max(.01,amplitude/2),amplitude,2*amplitude)
-            for mu in (-1.3,-.9)]
+            for mu in mus]
 
 
 def _init_candidate_worker(g,nf,mats,seed,burn,train_samples,interval):
@@ -772,7 +818,7 @@ def main(argv=None):
     a=p.parse_args(argv)
     if a.L1<=0 or a.L2<=0:raise ValueError('L1,L2 must be positive')
     if not np.isclose(a.t1,-a.t2,atol=1e-12):
-        raise ValueError('These projected singlet Pf seeds require t1=-t2')
+        raise ValueError('These projected pseudospin Pf seeds require t1=-t2')
     ns,nf=exact_filling(a.L1,a.L2,a.filling)
     values=v_values(a)
     if (a.train_samples<16 or a.eval_samples<16 or a.interval<1 or
@@ -841,8 +887,11 @@ def main(argv=None):
                     label='SDW_M_orientation_uncertain'
                 else:label='SDW_M_LC' if z>xy else 'SDW_M_CO'
             else:
-                label=('Pf_s_candidate' if a.seed=='pf_s'
-                       else 'Pf_d_chiral_candidate')
+                label={'pf_s':'Pf_s_candidate',
+                       'pf_dplus':'Pf_d_chiral_candidate',
+                       'pf_dminus':'Pf_d_chiral_candidate',
+                       'pf_f_ab':'Pf_f_AB_triplet_candidate',
+                       'pf_f_nnn':'Pf_f_NNN_triplet_candidate'}[a.seed]
             row.update(seed=a.seed,branch_seed=a.seed,scan_V=V,scan_index=index,
                 scan_mode=a.mode,scan_direction=a.direction,L1=a.L1,L2=a.L2,
                 Ns=ns,Nf=nf,filling=nf/ns,scan_Ns=ns,scan_Nf=nf,
