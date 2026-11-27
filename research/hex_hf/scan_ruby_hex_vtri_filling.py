@@ -133,7 +133,9 @@ def plot_maps(root: Path, vs: list[float], ns: list[float], a: argparse.Namespac
     labels=np.zeros((len(ns),len(vs)), dtype=int)
     quantity={k:np.full(labels.shape,np.nan) for k in (
         'charge_q_rms','real_bond_q_rms','current_rms_recomputed',
-        'J_tri_rms','F_per_primitive','sd_isd_form_overlap')}
+        'J_tri_rms','F_per_primitive','sd_isd_form_overlap',
+        'pseudospin_co_even_amplitude','pseudospin_co_odd_amplitude',
+        'pseudospin_co_amplitude')}
     for iv,v in enumerate(vs):
         for jn,n in enumerate(ns):
             r=loc.get((round(v,12),round(n,12)))
@@ -162,6 +164,8 @@ def plot_maps(root: Path, vs: list[float], ns: list[float], a: argparse.Namespac
 
     labels_data=[('charge_q_rms',r'Finite-$Q$ charge RMS'),
                  ('real_bond_q_rms',r'Finite-$Q$ real bond RMS'),
+                 ('pseudospin_co_even_amplitude',r'In-plane pseudospin CO even'),
+                 ('pseudospin_co_odd_amplitude',r'In-plane pseudospin CO odd'),
                  ('current_rms_recomputed',r'Bond current RMS'),
                  ('J_tri_rms',r'Triangle circulation RMS'),
                  ('F_per_primitive',r'$F$ per primitive cell')]
@@ -181,7 +185,10 @@ def plot_maps(root: Path, vs: list[float], ns: list[float], a: argparse.Namespac
 def write_candidates(point: Path, trials: list[dict]) -> None:
     cols=['seed','converged','iterations','residual','symmetry_residual','F','Omega',
           'E','Ekin','EH','EFock','Npart','mu','charge_std','charge_mod_max',
-          'J_A','J_B','J_plus','J_minus','J_tri_rms','current_rms','max_divergence']
+          'J_A','J_B','J_plus','J_minus','J_tri_rms','current_rms','max_divergence',
+          'has_inplane_pseudospin_co','pseudospin_x_even','pseudospin_x_odd',
+          'pseudospin_y_even','pseudospin_y_odd','pseudospin_co_even_amplitude',
+          'pseudospin_co_odd_amplitude','pseudospin_co_amplitude']
     tmp=point/'candidates.csv.tmp'
     with tmp.open('w',newline='',encoding='utf-8') as f:
         w=csv.DictWriter(f,fieldnames=cols);w.writeheader()
@@ -212,6 +219,25 @@ def execute(a: argparse.Namespace) -> None:
         ns=[float(x) for x in existing['n_values']]
         a.period=existing['geometry']
         a.symmetry=existing['symmetry']
+        scanpath=root/'scan.json'
+        if scanpath.is_file():
+            oldrows=json.loads(scanpath.read_text(encoding='utf-8'))
+            refreshed={}
+            for row in oldrows:
+                if row.get('valid'):
+                    model=RubyHexHF(row['period'],row['symmetry'],
+                        (int(row['Nk1']),int(row['Nk2'])),row['t'],row['t1'],row['t2'],
+                        row['V_tri'],row['V_t1'],row['V_t2'])
+                    state=record_path(root,int(row['point']))/'best'/'state.npz'
+                    if state.is_file():
+                        with np.load(state,allow_pickle=False) as z:
+                            code,diag=order_diagnostics(model,z,row,a)
+                        row.update(diag)
+                        row['phase_code']=int(code)
+                        row['phase']=LABELS[code]
+                refreshed[stable_key(float(row['V_tri']),
+                    float(row['filling_per_primitive']))]=row
+            persist(root,refreshed)
         plot_maps(root,vs,ns,a)
         return
     if confpath.exists():
@@ -279,10 +305,15 @@ def execute(a: argparse.Namespace) -> None:
                 print(f'  [failed] {name}: {type(exc).__name__}: {exc}',flush=True)
                 continue
             result['seed']=name
+            if result['converged']:
+                _,diag=classify(model,result,a)
+                result.update(diag)
             trials.append(result)
             print(f'  {name:25} converged={str(result["converged"]):5} '
                   f'res={result["residual"]:.2e} F={result["F"]:.9g} '
-                  f'Jtri={result["J_tri_rms"]:.2e} CDW={result["charge_mod_max"]:.2e}',flush=True)
+                  f'Jtri={result["J_tri_rms"]:.2e} CDW={result["charge_mod_max"]:.2e} '
+                  f'COe/o={result.get("pseudospin_co_even_amplitude",0.):.2e}/'
+                  f'{result.get("pseudospin_co_odd_amplitude",0.):.2e}',flush=True)
             if a.save_candidates and result['converged']:
                 save_solution(model,result,point/'candidate_states'/f'{si:02d}_{name}')
         write_candidates(point,trials)

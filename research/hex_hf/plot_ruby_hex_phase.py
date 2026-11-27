@@ -46,6 +46,42 @@ COLORS = [
     '#b6d3d3','#b9b3a6','#b3b7aa','#a88fbd',
 ]
 SHORT = ['?','N','CDW','SD','ISD','BOW','LC+','LC-','LC','LC+CDW','q0-CDW','q0-BOW', 'CDW+SD','CDW+ISD','CDW+BOW','BOW+LC']
+LABELS += [
+    'In-plane pseudospin CO (even)',
+    'In-plane pseudospin CO (odd)',
+    'In-plane pseudospin CO (even + odd)',
+    'Pseudospin CO + finite-Q CDW',
+    'Pseudospin CO + real BOW',
+    'Pseudospin CO + loop current',
+]
+COLORS += ['#e69f00','#56b4e9','#cc79a7','#d8a657','#8c9fce','#a078a0']
+SHORT += ['COe','COo','COe+o','CO+CDW','CO+BOW','CO+LC']
+
+
+def inplane_pseudospin_co(n, ncell):
+    """Uniform-cell physical x/y pseudospin CO, resolved by A/B parity."""
+    nr = np.asarray(n, dtype=float).reshape(ncell, 6)
+    a, b = nr[:, :3], nr[:, 3:]
+    ax = 2*a[:, 0] - a[:, 1] - a[:, 2]
+    ay = np.sqrt(3.) * (a[:, 2] - a[:, 1])
+    bx = 2*b[:, 0] - b[:, 1] - b[:, 2]
+    # Physical B-triangle pseudospin frame has the opposite algebraic y sign.
+    by = np.sqrt(3.) * (b[:, 1] - b[:, 2])
+    root2 = np.sqrt(2.)
+    values = {
+        'pseudospin_x_even': float(np.mean(ax + bx) / root2),
+        'pseudospin_x_odd': float(np.mean(ax - bx) / root2),
+        'pseudospin_y_even': float(np.mean(ay + by) / root2),
+        'pseudospin_y_odd': float(np.mean(ay - by) / root2),
+    }
+    even = float(np.hypot(values['pseudospin_x_even'],
+                          values['pseudospin_y_even']))
+    odd = float(np.hypot(values['pseudospin_x_odd'],
+                         values['pseudospin_y_odd']))
+    values['pseudospin_co_even_amplitude'] = even
+    values['pseudospin_co_odd_amplitude'] = odd
+    values['pseudospin_co_amplitude'] = float(np.hypot(even, odd))
+    return values
 
 
 def order_diagnostics(m, z, row, a):
@@ -68,13 +104,19 @@ def order_diagnostics(m, z, row, a):
     nr = n.reshape(m.ncell, 6)
     dn = nr - nr.mean(axis=0, keepdims=True)
     charge_q_rms = float(np.sqrt(np.mean(dn**2)))
+    psco = inplane_pseudospin_co(n, m.ncell)
+    ps_even = psco['pseudospin_co_even_amplitude']
+    ps_odd = psco['pseudospin_co_odd_amplitude']
+    ps_order = max(ps_even, ps_odd) > a.charge_threshold
     J = 2*np.imag(m.tb * chi)
     current_rms = float(np.sqrt(np.mean(J**2)))
     charge = charge_q_rms > a.charge_threshold
     bow = bow_rms > a.bond_threshold
     lc = current_rms > a.current_threshold
     plus = abs(float(row['J_plus'])); minus = abs(float(row['J_minus']))
-    if lc:
+    if lc and ps_order:
+        code=21
+    elif lc:
         if charge:
             code=9
         elif bow:
@@ -85,6 +127,17 @@ def order_diagnostics(m, z, row, a):
             code=7
         else:
             code=8
+    elif ps_order and charge:
+        code=19
+    elif ps_order and bow:
+        code=20
+    elif ps_order:
+        if ps_even > 2*ps_odd:
+            code=16
+        elif ps_odd > 2*ps_even:
+            code=17
+        else:
+            code=18
     elif charge and bow:
         if form_overlap >= a.min_form_overlap: code=12
         elif form_overlap <= -a.min_form_overlap: code=13
@@ -120,6 +173,8 @@ def order_diagnostics(m, z, row, a):
         'has_finite_q_cdw':int(charge),
         'has_real_bow_modulation':int(bow),
         'has_loop_current':int(lc),
+        'has_inplane_pseudospin_co':int(ps_order),
+        **psco,
     }
     return code,d
 

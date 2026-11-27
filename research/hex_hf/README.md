@@ -4,7 +4,7 @@
 
 **模型**：`V_t1=V_t2=0`，但 **hopping** `t1,t2` 仍按命令行输入，不是零。`V_tri` 仅作用在两类三角形内部的密度键。`n` 是 **每六位点原胞的平均 spinless 电子数**，满足 `0<n<6`；由每次自洽的化学势调整实现固定 filling。例如 ring3 的超胞有 3 个原胞，平均粒子数为 `3*n`（一般可非整数，因为它是无限周期体系中的一个超胞，对 k 网格取平均）。
 
-脚本中使用相同的 Hartree 与复数 Fock 序参数，允许实数 CDW、SD/ISD-like BOW、loop current 和共存序；每个点通过多初态找收敛的最低 **Helmholtz 自由能 F**。不收敛点不会伪装成某一相。
+脚本中使用相同的 Hartree 与复数 Fock 序参数，允许实数 CDW、SD/ISD-like BOW、loop current、面内 pseudospin CO 和共存序；每个点通过多初态找收敛的最低 **Helmholtz 自由能 F**。不收敛点不会伪装成某一相。
 
 ## 安装与目录
 
@@ -40,7 +40,7 @@ OPENBLAS_NUM_THREADS=1 python scan_ruby_hex_vtri_filling.py \
   --random-starts 3 --output results/hex18_Vtri_n_fine
 ```
 
-`--period hex2x2` 对应 24-site 的 2×2 Bravais 超胞、三个 M 波矢；`ring3` 对应 18-site 六角环和 K 相关调制。默认 `--symmetry none` 不施加点群约束，保留超胞周期，并允许面内 pseudospin CO 打破 C3。`c3` 或 `c6` 会投影掉这些面内 CO 分量，不适用于包含 `x_even/x_odd/y_even/y_odd` 的扫描。
+`--period hex2x2` 对应 24-site 的 2×2 Bravais 超胞、三个 M 波矢；`ring3` 对应 18-site 六角环和 K 相关调制。默认 `--symmetry none` 不施加点群约束，保留超胞周期，并允许面内 pseudospin CO 打破 C3。`c3` 或 `c6` 会投影掉这些面内 CO 分量，不适用于包含 `x_even/x_odd/y_even/y_odd` 的扫描。结果端会从占据数投影出 `pseudospin_x/y_even/odd` 和 even/odd 总幅度，并用于相分类；这与 seed 名称分开，分类依据是收敛后的实际占据数。
 
 可以用 `--Vtri-values 0 .25 .5 1 1.5 2` 和 `--n-values 1.0 1.25 1.5 1.75 2` 指定非均匀网格，覆盖连续的相关区间。
 
@@ -73,6 +73,8 @@ results/hex18_Vtri_n/
     charge_q_rms.png
     real_bond_q_rms.png
     current_rms_recomputed.png
+    pseudospin_co_even_amplitude.png
+    pseudospin_co_odd_amplitude.png
     J_tri_rms.png
     F_per_primitive.png
     point_0000/
