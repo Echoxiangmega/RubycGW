@@ -235,6 +235,8 @@ def parser():
     p.add_argument("--competing-eval-samples",type=int,default=4096,
                    help="Final independent samples for restricted SDW/Pf branches")
     p.add_argument("--competing-refine-steps",type=int,default=9)
+    p.add_argument("--competing-workers",type=int,default=1,
+                   help="Parallel CPU workers for independent SDW/Pf candidates")
     p.add_argument("--competing-pair-samples",type=int,default=64,
                    help="Final-chain samples for separated pair correlations")
     p.add_argument(
@@ -307,6 +309,7 @@ def main():
              "--train-samples",str(a.competing_train_samples),
              "--eval-samples",str(a.competing_eval_samples),
              "--refine-steps",str(a.competing_refine_steps),
+             "--candidate-workers",str(a.competing_workers),
              "--pair-samples",str(a.competing_pair_samples),
              "--maps-every",str(a.maps_every),
              "--rng-seed",str(a.rng_seed),"--output",str(a.output)]

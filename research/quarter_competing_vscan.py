@@ -13,8 +13,11 @@ import argparse
 import csv
 import json
 import math
+import multiprocessing
+import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from fractions import Fraction
 from functools import lru_cache
 from pathlib import Path
@@ -32,6 +35,7 @@ from quarter_sdw_vmc import local_fields  # noqa: E402
 
 PF_FORMS={'pf_s':'s','pf_dplus':'d+','pf_dminus':'d-'}
 SEEDS=('sdw',*PF_FORMS)
+_WORKER_CONTEXT=None
 
 
 def exact_filling(l1,l2,filling):
@@ -173,6 +177,12 @@ class Trial:
         if seed=='sdw':
             sign=int(params['B_sign'])
             self.m_sources=sdw_sources(g,sign)
+            self.m_links=[]
+            for source in self.m_sources:
+                dst,src=np.nonzero(np.abs(source)>1.e-12)
+                offdiag=dst!=src
+                dst=dst[offdiag];src=src[offdiag]
+                self.m_links.append((np.diag(source),src,dst,source[dst,src]))
             self.Q=sdw_orbitals(g,nf,params['mx'],params['my'],params['mz'],sign)
             self.F=self.blocked=None
         else:
@@ -182,6 +192,7 @@ class Trial:
                 raise ValueError('Incompatible blocked BdG orbitals and particle parity')
             self.Q=None
             self.m_sources=None
+            self.m_links=None
 
     def features(self,occ):
         # Exact 0.5*(n-f)^T M (n-f), with M symmetric.
@@ -395,13 +406,11 @@ class Trial:
         filled=np.zeros(self.g.Ns,bool);filled[occ]=True
         if cache is None:cache=self.hop_cache(occ)
         values=[]
-        for source in self.m_sources:
-            value=complex(np.sum(source[occ,occ]))
-            for a in occ:
-                for b in np.flatnonzero(np.abs(source[:,a])>1e-12):
-                    if filled[b] or b==a:continue
-                    ratio,sign,_=self.hop_ratio(occ,a,b,cache,target_required=False)
-                    value+=source[b,a]*sign*ratio
+        for diagonal,src,dst,coef in self.m_links:
+            active=filled[src]&~filled[dst]
+            ratio,sign=self.hop_ratios(occ,src[active],dst[active],cache)
+            value=complex(diagonal[occ].sum()
+                          +np.dot(coef[active]*sign,ratio))
             values.append(value)
         return values
 
@@ -531,7 +540,61 @@ def initialize(seed,amplitude):
             for mu in (-1.3,-.9)]
 
 
+def _init_candidate_worker(g,nf,mats,seed,burn,train_samples,interval):
+    global _WORKER_CONTEXT
+    _WORKER_CONTEXT=(g,nf,mats,seed,burn,train_samples,interval)
+
+
+def _score_candidate(g,nf,mats,seed,burn,train_samples,interval,V,p,rng_seed):
+    try:
+        trial=Trial(g,nf,seed,p,mats)
+        result=sample(trial,V,warmup=burn,samples=train_samples,
+                      interval=interval,rng=np.random.default_rng(rng_seed))
+        return result['E'],result['mc_E_error'],None
+    except (ValueError,RuntimeError,FloatingPointError,np.linalg.LinAlgError) as exc:
+        return None,None,str(exc)
+
+
+def _worker_candidate(task):
+    index,p,V,rng_seed=task
+    return index,p,*_score_candidate(*_WORKER_CONTEXT,V,p,rng_seed)
+
+
+def _score_candidates(tasks,g,nf,mats,seed,options,pool):
+    if pool is not None:
+        return list(pool.map(_worker_candidate,tasks))
+    return [
+        (index,p,*_score_candidate(
+            g,nf,mats,seed,options.burn,options.train_samples,
+            options.interval,V,p,rng_seed))
+        for index,p,V,rng_seed in tasks
+    ]
+
+
 def optimize(g,nf,mats,seed,V,initial,options,rng):
+    """Optimize with optional parallel, independently seeded candidate chains."""
+    workers=getattr(options,'candidate_workers',1)
+    if workers==1:
+        return _optimize(g,nf,mats,seed,V,initial,options,rng,None)
+    # Spawn workers with one BLAS thread each; restore the parent's environment
+    # for its baseline SR step and final evaluation.
+    keys=('OPENBLAS_NUM_THREADS','MKL_NUM_THREADS','OMP_NUM_THREADS','NUMEXPR_NUM_THREADS')
+    saved={key:os.environ.get(key) for key in keys}
+    try:
+        os.environ.update({key:'1' for key in keys})
+        with ProcessPoolExecutor(
+            max_workers=workers,mp_context=multiprocessing.get_context('spawn'),
+            initializer=_init_candidate_worker,
+            initargs=(g,nf,mats,seed,options.burn,options.train_samples,
+                      options.interval)) as pool:
+            return _optimize(g,nf,mats,seed,V,initial,options,rng,pool)
+    finally:
+        for key,value in saved.items():
+            if value is None:os.environ.pop(key,None)
+            else:os.environ[key]=value
+
+
+def _optimize(g,nf,mats,seed,V,initial,options,rng,pool):
     """Bounded stochastic coordinate search and an SR update of all 7 Jastrows."""
     started=time.perf_counter()
     params=[dict(x) for x in initial]
@@ -542,18 +605,16 @@ def optimize(g,nf,mats,seed,V,initial,options,rng):
     scores=[]
     print(f'[quarter] V={V:g} {seed}: screening {len(params)} initial states '
           f'({options.train_samples} samples each)',flush=True)
-    for index,p in enumerate(params):
-        try:
-            trial=Trial(g,nf,seed,p,mats)
-            s=sample(trial,V,warmup=options.burn,
-                     samples=options.train_samples,interval=options.interval,
-                     rng=np.random.default_rng(options.rng_seed+index+100000*int(V*100)))
-            scores.append((s['E'],p))
-        except (ValueError,RuntimeError,FloatingPointError,np.linalg.LinAlgError) as exc:
+    tasks=[(index,p,V,options.rng_seed+index+100000*int(V*100))
+           for index,p in enumerate(params)]
+    for index,p,energy,_,error in _score_candidates(
+            tasks,g,nf,mats,seed,options,pool):
+        if error is not None:
             print(f'[quarter] V={V:g} {seed}: initial {index+1}/{len(params)} '
-                  f'skipped ({exc}), elapsed={time.perf_counter()-started:.1f}s',
+                  f'skipped ({error}), elapsed={time.perf_counter()-started:.1f}s',
                   flush=True)
             continue
+        scores.append((energy,p))
         print(f'[quarter] V={V:g} {seed}: initial {index+1}/{len(params)} '
               f'done, valid={len(scores)}, elapsed={time.perf_counter()-started:.1f}s',
               flush=True)
@@ -584,17 +645,12 @@ def optimize(g,nf,mats,seed,V,initial,options,rng):
             candidates=[proposed,{**proposed,key:best[key]+inc},
                         {**proposed,key:max(.001,best[key]-inc)
                          if key=='delta' else best[key]-inc}]
-        results=[]
-        for index,p in enumerate(candidates):
-            try:
-                t=Trial(g,nf,seed,p,mats)
-                # Common RNG stream across candidates helps make the local
-                # comparison reproducible; errors still require remeasurement.
-                s0=sample(t,V,warmup=options.burn,
-                          samples=options.train_samples,interval=options.interval,
-                          rng=np.random.default_rng(options.rng_seed+1000*step+index))
-                results.append((s0['E'],p,s0['mc_E_error'],index))
-            except (ValueError,RuntimeError,FloatingPointError,np.linalg.LinAlgError):continue
+        tasks=[(index,p,V,options.rng_seed+1000*step+index)
+               for index,p in enumerate(candidates)]
+        results=[(energy,p,error,index)
+                 for index,p,energy,error,failed in _score_candidates(
+                     tasks,g,nf,mats,seed,options,pool)
+                 if failed is None]
         if results:
             train_e,best,train_err,selected=min(results,key=lambda x:x[0])
             detail=(f'E_train={train_e:.6f}±{train_err:.4f}, '
@@ -699,6 +755,8 @@ def main(argv=None):
     p.add_argument('--burn',type=int,default=30);p.add_argument('--train-samples',type=int,default=512)
     p.add_argument('--eval-burn',type=int,default=120);p.add_argument('--eval-samples',type=int,default=4096)
     p.add_argument('--interval',type=int,default=2);p.add_argument('--refine-steps',type=int,default=9)
+    p.add_argument('--candidate-workers',type=int,default=1,
+                   help='Independent screening/refine candidates in parallel; 1 keeps serial execution')
     p.add_argument('--pair-samples',type=int,default=64,
                    help='Sparse final-chain samples of separated s/d pair correlations')
     p.add_argument('--maps-every',type=int,default=0,
@@ -719,7 +777,8 @@ def main(argv=None):
     values=v_values(a)
     if (a.train_samples<16 or a.eval_samples<16 or a.interval<1 or
         a.refine_steps<0 or a.pair_samples<0 or a.pair_samples>a.eval_samples or
-        a.maps_every<0 or (a.map_samples is not None and a.map_samples<16)):
+        a.maps_every<0 or a.candidate_workers<1 or
+        (a.map_samples is not None and a.map_samples<16)):
         raise ValueError('Require >=16 samples, interval>=1, and refine-steps>=0')
     root=Path(a.output).expanduser().resolve()
     branch=root/f'L{a.L1}x{a.L2}'/f'seed_{a.seed}'/f'{a.mode}_{a.direction}'

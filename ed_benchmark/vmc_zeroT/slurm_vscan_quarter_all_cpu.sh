@@ -68,6 +68,7 @@ COMPETING_TRAIN_SAMPLES="${COMPETING_TRAIN_SAMPLES:-512}"
 COMPETING_EVAL_SAMPLES="${COMPETING_EVAL_SAMPLES:-4096}"
 COMPETING_REFINE_STEPS="${COMPETING_REFINE_STEPS:-9}"
 COMPETING_PAIR_SAMPLES="${COMPETING_PAIR_SAMPLES:-128}"
+COMPETING_WORKERS="${COMPETING_WORKERS:-1}"
 
 SEEDS=(normal sd isd lc_same lc_opposite random ps_co mix_co_lc_opposite
        sdw pf_s pf_dplus pf_dminus)
@@ -133,6 +134,7 @@ CMD=(python -u ed_benchmark/vmc_zeroT/run_supercell_vscan.py
   --competing-train-samples "$COMPETING_TRAIN_SAMPLES"
   --competing-eval-samples "$COMPETING_EVAL_SAMPLES"
   --competing-refine-steps "$COMPETING_REFINE_STEPS"
+  --competing-workers "$COMPETING_WORKERS"
   --competing-pair-samples "$COMPETING_PAIR_SAMPLES"
   --output "$OUT")
 printf '[command]'; printf ' %q' "${CMD[@]}"; echo

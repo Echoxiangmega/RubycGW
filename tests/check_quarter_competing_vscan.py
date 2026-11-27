@@ -91,6 +91,18 @@ def check():
         scalar=[trial.hop_ratio(occ,a,b) for a,b in moves]
         assert np.allclose(batch,[r[0] for r in scalar],rtol=2e-11,atol=1e-11),seed
         assert np.array_equal(signs,[r[1] for r in scalar]),seed
+        if seed=='sdw':
+            measured_m=trial.m_point_onebody(occ,z)
+            reference_m=[]
+            for source in trial.m_sources:
+                value=complex(np.sum(source[occ,occ]))
+                for a in occ:
+                    for b in np.flatnonzero(abs(source[:,a])>1e-12):
+                        if occupied[b] or b==a:continue
+                        ratio,sign,_=trial.hop_ratio(occ,int(a),int(b))
+                        value+=source[b,a]*sign*ratio
+                reference_m.append(value)
+            assert np.allclose(measured_m,reference_m,rtol=2e-11,atol=1e-11)
 
         # Long accepted-hop chains must retain the exact Jastrow features and
         # fixed-N determinant/Pfaffian amplitudes after every cache update.

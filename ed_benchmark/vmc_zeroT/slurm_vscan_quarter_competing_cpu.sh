@@ -46,5 +46,6 @@ python -u ed_benchmark/vmc_zeroT/run_supercell_vscan.py \
   --competing-train-samples "${TRAIN_SAMPLES:-512}" \
   --competing-eval-samples "${EVAL_SAMPLES:-4096}" \
   --competing-refine-steps "${REFINE_STEPS:-9}" \
+  --competing-workers "${COMPETING_WORKERS:-1}" \
   --competing-pair-samples "${PAIR_SAMPLES:-64}" \
   --rng-seed "${RNG_SEED:-2026}" --output "$OUT"
