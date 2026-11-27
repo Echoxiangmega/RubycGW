@@ -7,7 +7,7 @@ the previous hex-HF package.  A converged minimum-F state is selected at each
 fixed-filling point, and all progress is saved before continuing.
 
 Example:
-    python scan_ruby_hex_vtri_filling.py --period ring3 --symmetry c3 \\
+    python scan_ruby_hex_vtri_filling.py --period ring3 --symmetry none \\
       --t 1 --t1 0.5 --t2 0.5 --nk 10 10 \\
       --Vtri-min 0 --Vtri-max 3 --Vtri-step 0.25 \\
       --n-min 1 --n-max 3 --n-step 0.25 \\
@@ -324,7 +324,8 @@ def execute(a: argparse.Namespace) -> None:
 def parser() -> argparse.ArgumentParser:
     p=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument('--period',choices=['ring3','hex2x2'],default='ring3')
-    p.add_argument('--symmetry',choices=['c6','c3','none'],default='c3')
+    p.add_argument('--symmetry',choices=['c6','c3','none'],default='none',
+                   help='Default none allows the in-plane pseudospin CO seeds to break C3')
     p.add_argument('--nk',nargs=2,type=int,default=[8,8])
     p.add_argument('--t',type=float,default=1.)
     p.add_argument('--t1',type=float,default=.5)
@@ -340,8 +341,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument('--n-values',nargs='+',type=float,default=None,
                    help='Explicit fillings; overrides n-min,max,step')
     p.add_argument('--temperature',type=float,default=.04)
-    p.add_argument('--seeds',nargs='+',default=['normal','cdw','sd','isd',
-       'real_bond','lc_same','lc_opposite','lc_random','mixed','random'])
+    p.add_argument('--seeds',nargs='+',default=['normal','x_even','x_odd','y_even','y_odd',
+       'cdw','sd','isd','real_bond','lc_same','lc_opposite','random'])
     p.add_argument('--random-starts',type=int,default=1)
     p.add_argument('--no-auto-lc-modes',action='store_true')
     p.add_argument('--no-continuation',action='store_true')

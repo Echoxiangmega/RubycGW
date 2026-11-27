@@ -13,16 +13,17 @@ set -euo pipefail
 # Submit one array per supercell size, for example:
 #   sbatch --export=ALL,L1=4,L2=4,V_MIN=0,V_MAX=8,V_STEP=0.5,OUT=results/vscan #     ed_benchmark/vmc_zeroT/slurm_vscan_array.sh
 #
-# Array tasks 0..7  : eight seed branches, V increasing.
-# Array tasks 8..15 : the same eight seed branches, V decreasing.
+# Array tasks 0..7: eight Slater branches, V increasing.
+# Array tasks 8..15: the same eight branches, V decreasing.
+# Use slurm_vscan_quarter_competing_cpu.sh for SDW/Pf branches.
 #
 # Adapt the GPU/partition/module/conda lines to your cluster.
 
 mkdir -p logs
 
 SEEDS=(normal sd isd lc_same lc_opposite random ps_co mix_co_lc_opposite)
-SEED_INDEX=$((SLURM_ARRAY_TASK_ID % 8))
-DIR_INDEX=$((SLURM_ARRAY_TASK_ID / 8))
+SEED_INDEX=$((SLURM_ARRAY_TASK_ID % ${#SEEDS[@]}))
+DIR_INDEX=$((SLURM_ARRAY_TASK_ID / ${#SEEDS[@]}))
 SEED="${SEEDS[${SEED_INDEX}]}"
 if [[ "${DIR_INDEX}" -eq 0 ]]; then
   DIRECTION="up"
@@ -38,6 +39,8 @@ V_STEP="${V_STEP:-0.5}"
 OUT="${OUT:-results/vscan}"
 EVAL_SAMPLES="${EVAL_SAMPLES:-8192}"
 NCHAINS="${NCHAINS:-32}"
+FILLING_ARGS=()
+if [[ -n "${FILLING:-}" ]]; then FILLING_ARGS=(--filling "$FILLING"); fi
 
 # Avoid JAX reserving essentially all device memory at startup.  The scan
 # driver controls the dominant allocations through --chunk-size and
@@ -47,6 +50,8 @@ export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 
 python ed_benchmark/vmc_zeroT/run_supercell_vscan.py \
   --L1 "${L1}" --L2 "${L2}" \
+  "${FILLING_ARGS[@]}" \
+  --t1 "${T1:-0.5}" --t2 "${T2:--0.5}" \
   --seed "${SEED}" \
   --mode continuation \
   --direction "${DIRECTION}" \

@@ -58,6 +58,7 @@ from matplotlib.patches import Patch
 BRANCH_ORDER=[
     "normal","sd","isd","lc_same","lc_opposite","random",
     "ps_co","mix_co_lc_opposite",
+    "sdw","pf_s","pf_dplus","pf_dminus",
 ]
 
 BRANCH_LABELS={
@@ -69,6 +70,10 @@ BRANCH_LABELS={
     "random":"random",
     "ps_co":"pseudospin CO",
     "mix_co_lc_opposite":"CO + LC opposite",
+    "sdw":"M-point pseudospin SDW candidate",
+    "pf_s":"Pfaffian s candidate",
+    "pf_dplus":"Pfaffian d+id candidate",
+    "pf_dminus":"Pfaffian d-id candidate",
 }
 
 
@@ -235,6 +240,8 @@ def _phase_rows(size_rows,tie_sigma):
 
         best_seed=_s(best.get("branch_seed",best.get("seed")))
         best_phase=_s(best.get("phase_label"),"unknown")
+        if best_phase.endswith("_uncertain"):
+            phase_uncertain=True
         present={
             _s(r.get("branch_seed",r.get("seed")))
             for r in candidates
@@ -826,11 +833,63 @@ def _coexistence_scatter(phase_rows,outdir,L1,L2):
 def _phase_table_public(phase_rows):
     out=[]
     for r in phase_rows:
-        out.append({
+        row={
             k:v for k,v in r.items()
             if k!="_winner_row"
-        })
+        }
+        for key in ("mx","my","mz","B_sign","M_pseudospin_x",
+                    "M_pseudospin_y","M_pseudospin_z",
+                    "M_pseudospin_xy_amplitude","M_pseudospin_z_amplitude",
+                    "pair_far_s_abs","pair_far_dplus_abs","pair_far_dminus_abs",
+                    "pair_far_distance","pair_far_samples"):
+            row["winner_"+key]=r["_winner_row"].get(key,"")
+        out.append(row)
     return out
+
+
+def _competing_orders(size_rows,outdir,L1,L2):
+    fields=("scan_V","branch_seed","phase_label","mc_E","mc_E_error",
+            "mx","my","mz","B_sign","M_pseudospin_x","M_pseudospin_y",
+            "M_pseudospin_z","M_pseudospin_x_error","M_pseudospin_y_error",
+            "M_pseudospin_z_error","M_pseudospin_xy_amplitude",
+            "M_pseudospin_z_amplitude","pair_far_s_abs","pair_far_s_error",
+            "pair_far_dplus_abs","pair_far_dplus_error",
+            "pair_far_dminus_abs","pair_far_dminus_error",
+            "pair_far_samples","pair_far_distance","pair_far_cells")
+    selected=[r for r in size_rows if _s(r.get("branch_seed")) in
+              ("sdw","pf_s","pf_dplus","pf_dminus")]
+    if not selected:return
+    _write_csv(outdir/"candidate_order_parameters.csv",
+               [{key:r.get(key,"") for key in fields} for r in selected])
+    fig,axes=plt.subplots(2,1,figsize=(8.4,7.6),sharex=True)
+    sdw=sorted((r for r in selected if _s(r.get("branch_seed"))=="sdw"),
+               key=lambda r:_f(r.get("scan_V")))
+    if sdw:
+        x=[_f(r.get("scan_V")) for r in sdw]
+        for key,label in (("M_pseudospin_xy_amplitude",r"$|m_{xy}(M)|$"),
+                          ("M_pseudospin_z_amplitude",r"$|m_z(M)|$")):
+            y=[_f(r.get(key)) for r in sdw]
+            axes[0].plot(x,y,"o-",label=label)
+    axes[0].set_ylabel("M-point one-point amplitude / triangle")
+    for seed,key,label in (("pf_s","pair_far_s_abs","s"),
+                            ("pf_dplus","pair_far_dplus_abs","d+id"),
+                            ("pf_dminus","pair_far_dminus_abs","d-id")):
+        rr=sorted((r for r in selected if _s(r.get("branch_seed"))==seed),
+                  key=lambda r:_f(r.get("scan_V")))
+        if rr:
+            axes[1].errorbar([_f(r.get("scan_V")) for r in rr],
+                [_f(r.get(key)) for r in rr],
+                yerr=[_f(r.get(key.replace("_abs","_error")),0.) for r in rr],
+                marker="o",capsize=2,label=label)
+    axes[1].set_ylabel(r"Separated $|\langle\Delta_R^\dagger\Delta_{R'}\rangle|$")
+    axes[1].set_xlabel("V")
+    for ax in axes:
+        ax.grid(alpha=.25)
+        if ax.has_data():ax.legend()
+    fig.suptitle(f"SDW and paired candidate diagnostics, {L1}x{L2}")
+    fig.tight_layout()
+    fig.savefig(outdir/"competing_order_diagnostics.png",dpi=200)
+    plt.close(fig)
 
 
 def _common_v_by_size(size_phase):
@@ -983,6 +1042,7 @@ def main():
         _error_plot(rr,outdir,L1,L2)
         _lro_plot(phase,outdir,L1,L2)
         _orders_plot(phase,outdir,L1,L2)
+        _competing_orders(rr,outdir,L1,L2)
         _coexistence_scatter(phase,outdir,L1,L2)
         _write_csv(outdir/"phase_table.csv",_phase_table_public(phase))
 

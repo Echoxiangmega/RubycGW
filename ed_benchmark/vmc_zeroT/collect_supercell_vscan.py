@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 from pathlib import Path
 
 
@@ -19,7 +20,21 @@ def main():
         raise FileNotFoundError(f"No branch_scan.csv files below {root}")
 
     rows=[]
+    physical_settings={}
     for path in files:
+        settings_path=path.parent/"scan_settings.json"
+        if settings_path.exists():
+            settings=json.loads(settings_path.read_text(encoding="utf-8"))
+            size=(int(settings["L1"]),int(settings["L2"]))
+            physics=(int(settings["Nf"]),float(settings["t"]),
+                     float(settings["t1"]),float(settings["t2"]))
+            old=physical_settings.setdefault(size,(physics,settings_path))
+            if old[0]!=physics:
+                raise ValueError(
+                    f"Cannot compare different Nf/t/t1/t2 at L{size[0]}x{size[1]}: "
+                    f"{old[1]} has {old[0]}, {settings_path} has {physics}. "
+                    "Use separate output roots for distinct Hamiltonians."
+                )
         with path.open(newline="",encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 row=dict(row)

@@ -20,7 +20,7 @@
 
 ```bash
 OPENBLAS_NUM_THREADS=1 python scan_ruby_hex_vtri_filling.py \
-  --period ring3 --symmetry c3 \
+  --period ring3 --symmetry none \
   --t 1 --t1 0.5 --t2 0.5 --nk 8 8 \
   --Vtri-min 0 --Vtri-max 1 --Vtri-step 0.25 \
   --n-min 1.25 --n-max 1.75 --n-step 0.25 \
@@ -32,7 +32,7 @@ OPENBLAS_NUM_THREADS=1 python scan_ruby_hex_vtri_filling.py \
 
 ```bash
 OPENBLAS_NUM_THREADS=1 python scan_ruby_hex_vtri_filling.py \
-  --period ring3 --symmetry c3 \
+  --period ring3 --symmetry none \
   --t 1 --t1 0.5 --t2 0.5 --nk 12 12 \
   --Vtri-min 0 --Vtri-max 3 --Vtri-step 0.2 \
   --n-min 0.75 --n-max 3.25 --n-step 0.125 \
@@ -40,18 +40,21 @@ OPENBLAS_NUM_THREADS=1 python scan_ruby_hex_vtri_filling.py \
   --random-starts 3 --output results/hex18_Vtri_n_fine
 ```
 
-`--period hex2x2` 对应 24-site 的 2×2 Bravais 超胞、三个 M 波矢；`ring3` 对应 18-site 六角环和 K 相关调制。`--symmetry c3` 允许两三角形反向 LC，`c6` 会排除部分模式，`none` 无点群约束但保留超胞周期。
+`--period hex2x2` 对应 24-site 的 2×2 Bravais 超胞、三个 M 波矢；`ring3` 对应 18-site 六角环和 K 相关调制。默认 `--symmetry none` 不施加点群约束，保留超胞周期，并允许面内 pseudospin CO 打破 C3。`c3` 或 `c6` 会投影掉这些面内 CO 分量，不适用于包含 `x_even/x_odd/y_even/y_odd` 的扫描。
 
 可以用 `--Vtri-values 0 .25 .5 1 1.5 2` 和 `--n-values 1.0 1.25 1.5 1.75 2` 指定非均匀网格，覆盖连续的相关区间。
 
 ## 扫描效率与收敛
 
-默认包含 normal / CDW / SD / ISD / real BOW / 同反向 LC / mixed / random 及独立 LC modes，多初态严格比较最低自由能。它支持两个方向的 warm start（前一个 V 和相邻 n），以及蛇形参数扫描；但 warm start 只用于初值，不会强制某一序。
+默认包含 normal / 面内 CO（x/y 的 even/odd）/ CDW / SD / ISD / real BOW / 同反向 LC / random 及独立 LC modes，多初态严格比较最低自由能。扫描不再使用混合序参量 seed。它支持两个方向的 warm start（前一个 V 和相邻 n），以及蛇形参数扫描；但 warm start 只用于初值，不会强制某一序。
 
 快速定位相边界可暂时使用：
 
 ```bash
---seeds normal cdw sd isd lc_same lc_opposite mixed --random-starts 0 --no-auto-lc-modes
+python scan_ruby_hex_vtri_filling.py \
+  --symmetry none \
+  --seeds normal x_even x_odd y_even y_odd cdw sd isd lc_same lc_opposite \
+  --random-starts 0 --no-auto-lc-modes
 ```
 
 **快速模式可能遗漏有序态**。正式图最好恢复默认 LC modes、多随机起点并提高 k 网格、降低温度后复查近简并区域。

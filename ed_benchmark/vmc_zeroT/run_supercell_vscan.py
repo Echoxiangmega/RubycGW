@@ -27,11 +27,13 @@ import sys
 
 HERE=Path(__file__).resolve().parent
 RAW_RUNNER=HERE/"run_supercell_raw_pav.py"
+COMPETING_RUNNER=HERE.parents[1]/"research"/"quarter_competing_vscan.py"
 
 DEFAULT_SEEDS=[
     "normal","sd","isd","lc_same","lc_opposite","random",
-    "ps_co","mix_co_lc_opposite",
+    "ps_co","mix_co_lc_opposite","sdw","pf_s","pf_dplus","pf_dminus",
 ]
+COMPETING_SEEDS={"sdw","pf_s","pf_dplus","pf_dminus"}
 
 
 def _parse_filling(value):
@@ -228,6 +230,13 @@ def parser():
     p.add_argument("--train-samples-late",type=int,default=2048)
     p.add_argument("--train-samples-refine",type=int,default=4096)
     p.add_argument("--eval-samples",type=int,default=8192)
+    p.add_argument("--competing-train-samples",type=int,default=512,
+                   help="Training samples per restricted SDW/Pf candidate")
+    p.add_argument("--competing-eval-samples",type=int,default=4096,
+                   help="Final independent samples for restricted SDW/Pf branches")
+    p.add_argument("--competing-refine-steps",type=int,default=9)
+    p.add_argument("--competing-pair-samples",type=int,default=64,
+                   help="Final-chain samples for separated pair correlations")
     p.add_argument(
         "--maps-every",type=int,default=1,
         help="Save the expensive full Raw site/bond/current map every N scan points. 1=every V, 0=never. The final V is always mapped when N>0.",
@@ -273,6 +282,40 @@ def main():
     values=_build_v_values(a)
     if not values:
         raise ValueError("No V values")
+    if a.seed in COMPETING_SEEDS:
+        # The existing fast Raw sampler is specifically for a Bloch Slater
+        # determinant periodic in one 18-site ring3 cell. An M-point SDW needs
+        # a larger unit cell; a projected pair state needs a Pfaffian sampler.
+        # Keep the established scan directory/collector format while routing
+        # these branches to their correct wavefunction evaluator.
+        nf_expected=Fraction(18*a.L1*a.L2,4)
+        if a.nf is None and a.filling is None:
+            raise ValueError(
+                "Quarter-filled SDW/Pf seeds require --filling 1/4 or --nf. "
+                "The default filling of the older Slater branches is 1/3."
+            )
+        if a.nf is not None and Fraction(a.nf)!=nf_expected:
+            raise ValueError(f"Seed {a.seed} requires Nf={nf_expected} at 1/4 filling")
+        if a.filling is not None and abs(a.filling-.25)>1e-12:
+            raise ValueError(f"Seed {a.seed} currently supports --filling 1/4")
+        cmd=[sys.executable,str(COMPETING_RUNNER),
+             "--L1",str(a.L1),"--L2",str(a.L2),"--filling","1/4",
+             "--seed",a.seed,"--t",str(a.t),"--t1",str(a.t1),
+             "--t2",str(a.t2),"--V-values",*(str(x) for x in sorted(values)),
+             "--direction",a.direction,"--mode",a.mode,
+             "--seed-amplitude",str(a.seed_amplitude),
+             "--train-samples",str(a.competing_train_samples),
+             "--eval-samples",str(a.competing_eval_samples),
+             "--refine-steps",str(a.competing_refine_steps),
+             "--pair-samples",str(a.competing_pair_samples),
+             "--rng-seed",str(a.rng_seed),"--output",str(a.output)]
+        if a.dry_run:cmd.append("--dry-run")
+        if not a.resume:cmd.append("--no-resume")
+        print("[scan] Quarter-filled M-SDW/Pf branch uses the CPU "
+              "Slater/Pfaffian + 7-Jastrow evaluator, without backflow.",
+              flush=True)
+        subprocess.run(cmd,check=True)
+        return
     if int(a.maps_every)<0:
         raise ValueError("--maps-every must be >= 0")
 

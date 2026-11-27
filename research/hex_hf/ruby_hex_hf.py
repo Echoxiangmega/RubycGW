@@ -93,7 +93,7 @@ def _site_orbits(permutation):
 
 
 class RubyHexHF:
-    def __init__(self, period='ring3',symmetry='c3',nk=(6,6),
+    def __init__(self, period='ring3',symmetry='none',nk=(6,6),
                  t=1.,t1=.5,t2=.5,Vtri=0.,Vt1=0.,Vt2=0.):
         if period not in PERIODS:raise ValueError('period must be ring3 or hex2x2')
         if symmetry not in ['c6','c3','none']:raise ValueError('symmetry must be c6, c3, or none')
@@ -406,11 +406,33 @@ class RubyHexHF:
         if np.max(abs(site))>1e-12:site/=np.max(abs(site))
         return f,site
 
+    def _inplane_co_formfactor(self,name):
+        """Return a physical triangle-pseudospin x/y CO density pattern.
+
+        The even/odd labels refer to the A/B triangle combination in the
+        physical pseudospin frame.  These patterns break C3 and must not be
+        projected into a C3/C6-invariant subspace.
+        """
+        if name not in ('x_even','x_odd','y_even','y_odd'):
+            raise ValueError(f'Unknown in-plane CO seed {name}')
+        comp,parity=name.split('_')
+        a=np.zeros(6,float);b=np.zeros(6,float)
+        a[:3]=[2.,-1.,-1.] if comp=='x' else [0.,-SQ3,SQ3]
+        # B's physical pseudospin frame reverses the algebraic y component.
+        b[3:]=[2.,-1.,-1.] if comp=='x' else [0.,SQ3,-SQ3]
+        pattern=a+b if parity=='even' else a-b
+        pattern/=np.max(np.abs(pattern))
+        return np.tile(pattern,self.ncell)
+
     def seed(self,name,fill=1/3,amp=.05,random_seed=0):
         rng=np.random.default_rng(random_seed)
         n=np.full(self.N,fill,float)
         chi=np.full(self.B,.1+0j,complex)
-        if name=='cdw':
+        if name in ('x_even','x_odd','y_even','y_odd'):
+            if self.symmetry!='none':
+                raise ValueError(f'{name} breaks C3; use --symmetry none to retain this seed')
+            n+=amp*self._inplane_co_formfactor(name)
+        elif name=='cdw':
             n+=amp*rng.normal(size=self.N)
         elif name in ('sd','isd'):
             form,dens=self._real_star_formfactor();sign=1 if name=='sd' else -1
@@ -418,21 +440,18 @@ class RubyHexHF:
             n+=.4*amp*sign*dens
         elif name=='real_bond':
             chi+=amp*rng.normal(size=self.B)
-        elif name in ('lc_same','lc_opposite','mixed'):
+        elif name in ('lc_same','lc_opposite'):
             signs=[1,1] if name=='lc_same' else [1,-1]
             for c,q,links in self.triangles:
                 for b,s in links:
                     chi[b]+=1j*amp*s*signs[q]*np.sign(self.tb[b])
-            if name=='mixed':
-                n+=.5*amp*rng.normal(size=self.N)
-                chi+=.5*amp*rng.normal(size=self.B)
         elif name.startswith('lc_mode'):
             idx=int(name[len('lc_mode'):])
             if idx>=self.current_null.shape[1]:raise ValueError('Invalid current mode')
             coeff=self.current_null[:,idx]
             chi+=1j*amp*(self.bsign*coeff[self.bclass])
-        elif name in ('lc_random','random'):
-            if name=='random':n+=amp*rng.normal(size=self.N)
+        elif name=='random':
+            n+=amp*rng.normal(size=self.N)
             chi+=amp*rng.normal(size=self.B)+1j*amp*rng.normal(size=self.B)
         elif name!='normal':raise ValueError(f'Unknown seed {name}')
         n+=fill-n.mean()
@@ -627,7 +646,7 @@ def draw_classes(m,outprefix='ruby_hex_bond_classes'):
 def main():
     p=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument('--period',choices=PERIODS.keys(),default='ring3')
-    p.add_argument('--symmetry',choices=['c6','c3','none'],default='c3')
+    p.add_argument('--symmetry',choices=['c6','c3','none'],default='none')
     p.add_argument('--nk',nargs=2,type=int,default=[6,6])
     p.add_argument('--t',type=float,default=1.)
     p.add_argument('--t1',type=float,default=.5)
@@ -648,8 +667,8 @@ def main():
     p.add_argument('--tol',type=float,default=1e-7)
     p.add_argument('--mix',type=float,default=.3)
     p.add_argument('--seed-amplitude',type=float,default=.06)
-    p.add_argument('--seeds',nargs='+',default=['normal','cdw','sd','isd','real_bond','lc_same',
-                  'lc_opposite','lc_random','mixed','random'])
+    p.add_argument('--seeds',nargs='+',default=['normal','x_even','x_odd','y_even','y_odd',
+                  'cdw','sd','isd','real_bond','lc_same','lc_opposite','random'])
     p.add_argument('--random-starts',type=int,default=1)
     p.add_argument('--no-auto-lc-modes',action='store_true',
                    help='Skip independent Kirchhoff-compatible LC channel seeds')
