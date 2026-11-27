@@ -86,7 +86,7 @@ def check():
         # Long accepted-hop chains must retain the exact Jastrow features and
         # fixed-N determinant/Pfaffian amplitudes after every cache update.
         chain=occ.copy();cache=trial.hop_cache(chain)
-        for _ in range(24):
+        for _ in range(96):
             src=int(rng.choice(chain))
             dst=int(rng.choice(np.setdiff1d(np.arange(g.Ns),chain)))
             ratio,_,target=trial.hop_ratio(chain,src,dst,cache)
@@ -99,6 +99,16 @@ def check():
             cache=trial.hop_cache(target,previous=cache,move=(src,dst))
             chain=target
             assert np.allclose(cache[1],trial.features(chain),atol=1e-10),seed
+            if trial.Q is not None:
+                matrix=trial.Q[chain,:]
+            elif trial.blocked.shape[1]:
+                block=trial.blocked[chain]
+                matrix=np.block([[trial.F[np.ix_(chain,chain)],block],
+                                 [-block.T,np.zeros((block.shape[1],block.shape[1]))]])
+            else:
+                matrix=trial.F[np.ix_(chain,chain)]
+            assert np.allclose(matrix@cache[0],np.eye(len(matrix)),
+                               rtol=1e-8,atol=1e-8),seed
 
     # The map's oriented rho=<c_i^dag c_j> estimator must agree with the
     # exact Fock-space matrix element, including the fermion sign and phase.

@@ -219,16 +219,23 @@ class Trial:
 
         On an accepted hop, update the density field and seven features in
         O(channels * Ns) instead of summing over every occupied pair again.
-        The inverse is rebuilt so the long Markov chain has no update drift.
+        Update the Slater inverse at rank one and the Pfaffian inverse at
+        rank two; rebuild periodically to limit long-chain roundoff drift.
         """
-        if self.Q is not None:a=self.Q[occ,:]
-        elif self.blocked.shape[1]:
-            a=np.block([[self.F[np.ix_(occ,occ)],self.blocked[occ]],
-                        [-self.blocked[occ].T,np.zeros((self.blocked.shape[1],
-                                                         self.blocked.shape[1]))]])
-        else:a=self.F[np.ix_(occ,occ)]
-        try:inverse=np.linalg.inv(a)
-        except np.linalg.LinAlgError:inverse=None
+        inverse=None
+        updates=0
+        if previous is not None and previous[0] is not None and previous[4]<32:
+            inverse=self._updated_inverse(occ,previous,move)
+            if inverse is not None:updates=previous[4]+1
+        if inverse is None:
+            if self.Q is not None:a=self.Q[occ,:]
+            elif self.blocked.shape[1]:
+                a=np.block([[self.F[np.ix_(occ,occ)],self.blocked[occ]],
+                            [-self.blocked[occ].T,np.zeros((self.blocked.shape[1],
+                                                             self.blocked.shape[1]))]])
+            else:a=self.F[np.ix_(occ,occ)]
+            try:inverse=np.linalg.inv(a)
+            except np.linalg.LinAlgError:inverse=None
         if previous is None:
             field=self.mats[:,:,occ].sum(axis=2)
             features=self.features(occ)
@@ -237,7 +244,41 @@ class Trial:
             src,dst=move
             features=previous[1]+self.feature_delta(src,dst,previous)
             field=previous[2]+self.mats[:,:,dst]-self.mats[:,:,src]
-        return inverse,features,field
+        return inverse,features,field,occ.copy(),updates
+
+    def _updated_inverse(self,occ,previous,move):
+        """Exact low-rank accepted-hop update before periodic rebuilding."""
+        if move is None:return None
+        src,dst=move
+        old=previous[3]
+        k=int(np.searchsorted(old,src))
+        if k>=len(old) or old[k]!=src:return None
+        changed=old.copy()
+        changed[k]=dst
+        perm=np.argsort(changed)
+        if not np.array_equal(changed[perm],occ):return None
+        old_inverse=previous[0]
+        if self.Q is not None:
+            d=self.Q[dst,:]-self.Q[src,:]
+            u=old_inverse[:,k]
+            denom=1.+d@u
+            if not np.isfinite(denom) or abs(denom)<1.e-8:return None
+            new_inverse=old_inverse-np.outer(u,d@old_inverse)/denom
+            new_inverse=new_inverse[:,perm]
+        else:
+            oldrow=np.r_[self.F[src,old],self.blocked[src]]
+            newrow=np.r_[self.F[dst,old],self.blocked[dst]]
+            oldrow[k]=newrow[k]=0.
+            d=newrow-oldrow
+            u=old_inverse[:,k]
+            w=old_inverse@d
+            denom=1.+d@u
+            if not np.isfinite(denom) or abs(denom)<1.e-8:return None
+            new_inverse=old_inverse+(np.outer(u,w)-np.outer(w,u))/denom
+            full_perm=np.r_[perm,np.arange(self.nf,len(new_inverse))]
+            new_inverse=new_inverse[np.ix_(full_perm,full_perm)]
+            new_inverse=.5*(new_inverse-new_inverse.T)
+        return new_inverse if np.all(np.isfinite(new_inverse)) else None
 
     def feature_delta(self,src,dst,cache):
         """Exact seven-channel feature change for an occupied src -> empty dst."""
@@ -247,22 +288,25 @@ class Trial:
                        -2*self.mats[:,src,dst])
                 -self.fill*(self.rows[:,dst]-self.rows[:,src]))
 
-    def hop_ratio(self,occ,a,b,cache=None):
+    def hop_ratio(self,occ,a,b,cache=None,*,target_required=True):
         """Canonical amplitude ratio after moving an occupied a to empty b.
 
         For a Pfaffian, replacing occupied row/column k gives
         Pf(A')/Pf(A)=sum_j A'_{kj}(A^{-1})_{jk}. The final sign reorders the
-        replaced orbital to ascending physical-site order.
+        replaced orbital to ascending physical-site order. Local-energy
+        evaluations do not need to construct a new occupation array.
         """
         k=int(np.searchsorted(occ,a))
-        target=np.sort(np.r_[occ[occ!=a],b])
-        parity=(-1 if np.count_nonzero((occ>min(a,b)) &
-                                       (occ<max(a,b)))%2 else 1)
+        left=int(np.searchsorted(occ,min(a,b),side='right'))
+        right=int(np.searchsorted(occ,max(a,b),side='left'))
+        parity=-1 if (right-left)%2 else 1
         if cache is None:cache=self.hop_cache(occ)
         inverse=cache[0]
+        target=None
         if inverse is None:
+            target=occ.copy();target[k]=b;target.sort()
             ratio=np.exp(self.logpsi(target)-self.logpsi(occ))
-            return ratio,parity,target
+            return ratio,parity,target if target_required else None
         if self.Q is not None:
             basic=self.Q[b,:]@inverse[:,k]
         else:
@@ -272,10 +316,13 @@ class Trial:
         exponent=float(self.v@self.feature_delta(a,b,cache))
         ratio=parity*basic*np.exp(exponent)
         if not (np.isfinite(ratio.real) and np.isfinite(ratio.imag)):
+            target=occ.copy();target[k]=b;target.sort()
             ratio=np.exp(self.logpsi(target)-self.logpsi(occ))
         if not (np.isfinite(ratio.real) and np.isfinite(ratio.imag)):
             raise FloatingPointError('Non-finite one-particle move ratio')
-        return ratio,parity,target
+        if target_required and target is None:
+            target=occ.copy();target[k]=b;target.sort()
+        return ratio,parity,target if target_required else None
 
     def local_energy(self,occ,logpsi,V,cache=None):
         occupied=np.zeros(self.g.Ns,bool);occupied[occ]=True
@@ -286,7 +333,7 @@ class Trial:
             i,j=int(e.i),int(e.j)
             if occupied[i]==occupied[j]:continue
             a,b=(i,j) if occupied[i] else (j,i)
-            ratio,sign,_=self.hop_ratio(occ,a,b,cache)
+            ratio,sign,_=self.hop_ratio(occ,a,b,cache,target_required=False)
             energy+=self.g.t[e.kind]*sign*ratio
         return energy
 
@@ -301,7 +348,7 @@ class Trial:
             for a in occ:
                 for b in np.flatnonzero(np.abs(source[:,a])>1e-12):
                     if filled[b] or b==a:continue
-                    ratio,sign,_=self.hop_ratio(occ,a,b,cache)
+                    ratio,sign,_=self.hop_ratio(occ,a,b,cache,target_required=False)
                     value+=source[b,a]*sign*ratio
             values.append(value)
         return values
@@ -316,6 +363,9 @@ def sample(trial,V,*,warmup,samples,interval,rng,measure=True,orders=False,
         if np.isfinite(logpsi.real):break
     else:raise RuntimeError('Could not start chain in trial-state support')
     cache=trial.hop_cache(occ)
+    filled=np.zeros(g.Ns,bool)
+    filled[occ]=True
+    empty=np.flatnonzero(~filled)
     pair_info=None
     if pair_samples:
         ci,cj,dist=far_pair_cells(g)
@@ -328,13 +378,20 @@ def sample(trial,V,*,warmup,samples,interval,rng,measure=True,orders=False,
         map_rho=np.zeros(len(g.edges),complex)
     for sweep in range(warmup+samples*interval):
         for _ in range(nf):
-            filled=np.zeros(g.Ns,bool);filled[occ]=True
-            a=int(rng.choice(occ));b=int(rng.choice(np.flatnonzero(~filled)))
-            ratio,_,target=trial.hop_ratio(occ,a,b,cache);attempted+=1
+            a=int(rng.choice(occ));b=int(rng.choice(empty))
+            ratio,_,_=trial.hop_ratio(occ,a,b,cache,target_required=False)
+            attempted+=1
             if abs(ratio)>0 and np.log(max(rng.random(),1e-300))<min(
                     0.,2*np.log(abs(ratio))):
                 previous=cache
+                target=occ.copy()
+                target[np.searchsorted(occ,a)]=b
+                target.sort()
                 occ=target
+                filled[a]=False
+                filled[b]=True
+                empty[np.searchsorted(empty,b)]=a
+                empty.sort()
                 logpsi+=np.log(ratio)
                 cache=trial.hop_cache(occ,previous=previous,move=(a,b))
                 accepted+=1
@@ -350,12 +407,12 @@ def sample(trial,V,*,warmup,samples,interval,rng,measure=True,orders=False,
                 # rho_e=<c_i^dag c_j> for the oriented edge (i,j).
                 # The local estimator is nonzero for n_i=1,n_j=0; the
                 # fermionic sign is separate from the wavefunction ratio.
-                filled=np.zeros(g.Ns,bool);filled[occ]=True
                 map_density[occ]+=1.
                 for ie,e in enumerate(g.edges):
                     i,j=int(e.i),int(e.j)
                     if filled[i] and not filled[j]:
-                        ratio,sign,_=trial.hop_ratio(occ,i,j,cache)
+                        ratio,sign,_=trial.hop_ratio(
+                            occ,i,j,cache,target_required=False)
                         map_rho[ie]+=sign*ratio
             features.append(cache[1].copy())
     feats=np.asarray(features,float)
@@ -484,12 +541,20 @@ def optimize(g,nf,mats,seed,V,initial,options,rng):
                 s0=sample(t,V,warmup=options.burn,
                           samples=options.train_samples,interval=options.interval,
                           rng=np.random.default_rng(options.rng_seed+1000*step+index))
-                results.append((s0['E'],p))
+                results.append((s0['E'],p,s0['mc_E_error'],index))
             except (ValueError,RuntimeError,FloatingPointError,np.linalg.LinAlgError):continue
-        if results:best=min(results,key=lambda x:x[0])[1]
+        if results:
+            train_e,best,train_err,selected=min(results,key=lambda x:x[0])
+            detail=(f'E_train={train_e:.6f}±{train_err:.4f}, '
+                    f'selected={selected}, '
+                    + (f'delta={best["delta"]:.5g}, mu={best["mu"]:.5g}'
+                       if seed!='sdw' else
+                       f'm=({best["mx"]:.4g},{best["my"]:.4g},{best["mz"]:.4g})'))
+        else:
+            detail='no valid proposal; kept previous parameters'
         print(f'[quarter] V={V:g} {seed}: refine '
               f'{step+1}/{options.refine_steps}, valid={len(results)}, '
-              f'elapsed={time.perf_counter()-started:.1f}s',flush=True)
+              f'{detail}, elapsed={time.perf_counter()-started:.1f}s',flush=True)
     final=Trial(g,nf,seed,best,mats)
     print(f'[quarter] V={V:g} {seed}: final evaluation '
           f'({options.eval_samples} samples), '
